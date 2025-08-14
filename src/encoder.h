@@ -13,16 +13,18 @@ public:
     virtual ~Encoder() = default;
 
     // Initialize the encoder with specific settings
-    virtual bool initialize(const std::string& config) = 0;
+    virtual void Initialize() {}
 
     // Encode raw input data and return encoded output
-    virtual std::vector<uint8_t> encode(const std::vector<uint8_t>& rawData) = 0;
+    virtual void FillData(const std::vector<uint8_t>& rawData) {}
+
+    virtual void GetFrame() {}
 
     // Finalize the encoding process
-    virtual void finalize() = 0;
+    virtual void finalize() {}
 
     // Get the name of the encoder
-    virtual std::string getName() const = 0;
+    virtual std::string getName() const { return ""; }
 };
 
 } // namespace halcodec

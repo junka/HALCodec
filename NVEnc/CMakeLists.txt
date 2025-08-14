@@ -1,4 +1,4 @@
-cmake_minimum_required(VERSION 3.7)
+cmake_minimum_required(VERSION 3.10)
 
 
 set(NVCODEC_SDK_DIR ${CMAKE_CURRENT_SOURCE_DIR}/Video_Codec_SDK_13.0.19)

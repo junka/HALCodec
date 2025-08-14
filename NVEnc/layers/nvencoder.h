@@ -9,11 +9,11 @@ namespace nvenc {
 class NVEncoder : public halcodec::Encoder {
 public:
     NVEncoder();
-    ~NVEncoder();
+    ~NVEncoder() = default;
 
-    void Initialize();
-    void EncodeFrame();
-    void Finalize();
+    // void Initialize() override;
+    // void EncodeFrame() override;
+    // void Finalize() override;
 
 };
 

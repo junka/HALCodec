@@ -253,4 +253,5 @@ private:
 }
 
 extern simplelogger::Logger *logger;
-#define LOG(level) simplelogger::LogTransaction(logger, level, __FILE__, __LINE__, __FUNCTION__).GetStream()
+// #define LOG(level) simplelogger::LogTransaction(logger, level, __FILE__, __LINE__, __FUNCTION__).GetStream()
+#define LOG(level)  std::cout

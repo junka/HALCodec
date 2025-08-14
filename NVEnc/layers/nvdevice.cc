@@ -2,24 +2,20 @@
 namespace halcodec {
 namespace nvenc {
 
-void NVDevice::createCudaContext(unsigned int flags)
+void NVDevice::createCudaContext(int idx, unsigned int flags)
 {
-    int ret = cuInit(0);
-    if (ret != CUDA_SUCCESS) {
-        std::cout << "cuInit error" << std::endl;
-        return;
-    }
-    ret = cuDeviceGet(&cuDevice_, iGpu_);
+    int ret = cuDeviceGet(&cuDevice_, idx);
     if (ret != CUDA_SUCCESS) {
         std::cout << "cuDeviceGet error" << std::endl;
         return;
     }
-    ret = cuDeviceGetName(szDeviceName_, sizeof(szDeviceName_), cuDevice_);
+    char szDeviceName[80];
+    ret = cuDeviceGetName(szDeviceName, sizeof(szDeviceName), cuDevice_);
     if (ret != CUDA_SUCCESS) {
         std::cout << "cuDeviceGetName error" << std::endl;
         return;
     }
-    std::cout << "GPU in use: " << szDeviceName_ << std::endl;
+    name_ = std::string(szDeviceName);
     ret = cuCtxCreate(&cuContext_, flags, cuDevice_);
     if (ret != CUDA_SUCCESS) {
         std::cout << "cuCtxCreate error" << std::endl;
@@ -95,6 +91,11 @@ void NVDevice::showDecoderCapability()
         }
     }
 }
+
+static bool registered = []() -> bool {
+    NVDevice::Register();
+    return true;
+}();
 
 } // namespace nvenc
 } // namespace halcodec
