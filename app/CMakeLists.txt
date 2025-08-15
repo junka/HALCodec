@@ -21,10 +21,10 @@ if(NOT nvenc_layers)
 endif()
 
 target_include_directories(hal_enc PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/../NVEnc/layers)
-target_link_libraries(hal_enc PUBLIC nvenc_layers)
+target_link_libraries(hal_enc PUBLIC  -Wl,--no-as-needed nvenc_layers -Wl,--as-needed)
 
 target_include_directories(decinfo PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/../NVEnc/layers)
 target_link_libraries(decinfo PUBLIC -Wl,--no-as-needed nvenc_layers -Wl,--as-needed)
 
 target_include_directories(hal_dec PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/../NVEnc/layers)
-target_link_libraries(hal_dec PUBLIC nvenc_layers Boost::program_options)
+target_link_libraries(hal_dec PUBLIC -Wl,--no-as-needed nvenc_layers -Wl,--as-needed Boost::program_options)

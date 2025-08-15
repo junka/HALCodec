@@ -7,9 +7,10 @@
 #include <memory>
 #include <functional>
 #include <unordered_map>
+#include <iostream>
 
 namespace halcodec {
-
+    
 class Decoder {
 protected:
     Decoder() = default;
@@ -36,10 +37,10 @@ public:
         getRegistry()[type] = creator;
     }
 
-    virtual void Initialize() {}
+    virtual void Initialize(std::string input) {}
 
     // Fill input data and return  output
-    virtual void FillinFrame(const std::vector<uint8_t>& rawData) {}
+    virtual int FillinFrame() { return -1; }
 
     // Finalize the encoding process
     virtual void Finalize() {}
@@ -47,7 +48,9 @@ public:
     // Get the name of the encoder
     virtual std::string getName() const {return "";}
 
-    virtual void GetFrame() {}
+    virtual uint8_t* GetFrame(int *framesize) {return nullptr;}
+
+    virtual void ReleaseFrame(uint8_t **pFrame) {}
 };
 
 } // namespace halcodec

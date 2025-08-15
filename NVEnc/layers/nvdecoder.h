@@ -4,9 +4,12 @@
 #include <memory>
 #include <vector>
 
-#include "nvdevice.h"
 #include "decoder.h"
+
+#include "nvdevice.h"
 #include "NvDecoder.h"
+#include "FFmpegDemuxer.h"
+
 
 namespace halcodec {
 namespace nvenc {
@@ -16,14 +19,12 @@ class NVDecoder : public halcodec::Decoder {
 public:
     NVDecoder() = default;
 
-    friend std::unique_ptr<halcodec::Decoder> halcodec::Decoder::Create(const std::string&); 
-
-    void Initialize() override;
-    void FillinFrame(const std::vector<uint8_t>& rawData) override;
+    void Initialize(std::string inputfile) override;
+    int FillinFrame() override;
     void Finalize() override;
-    void GetFrame() override;
+    uint8_t* GetFrame(int *framesize) override;
+    void ReleaseFrame(uint8_t **pFrame) override;
     std::string getName() const override;
-
 
     static bool Register() {
         halcodec::Decoder::RegisterDecoder("nvdec", []() {
@@ -33,7 +34,9 @@ public:
     }
 
 private:
-    NVDevice device_;
+    std::unique_ptr<NVDevice> device_;
+    std::unique_ptr<NvDecoder> decoder_;
+    std::unique_ptr<FFmpegDemuxer> demuxer_;
 };
 
 } // namespace nvenc

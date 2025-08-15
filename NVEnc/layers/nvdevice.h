@@ -5,6 +5,7 @@
 #include <iostream>
 #include <iomanip>
 #include <cuda.h>
+
 #include "nvcuvid.h"
 #include "cuviddec.h"
 
