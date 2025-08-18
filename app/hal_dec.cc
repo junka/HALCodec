@@ -70,7 +70,6 @@ int main(int argc, char *argv[]) {
     do {
         n_dec = dec->FillinFrame();
         total_frames += n_dec;
-        std::cout << "fill frame " << n_dec << std::endl;
         for (int i = 0; i < n_dec; i++) {
             int size;
             auto data = dec->GetFrame(&size);

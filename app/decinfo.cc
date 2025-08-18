@@ -16,6 +16,7 @@ int main() {
         std::cout << dev->getDeviceIdx() << ": " << dev->getDeviceName() << std::endl;
         dev->showDecoderCapability();
         std::cout << std::endl;
+        dev->showEncoderCapability();
     }
     return 0;
 }

@@ -20,8 +20,13 @@ void NVDecoder::Initialize(std::string inputfile) {
     Dim resizeDim = {};
 
     demuxer_ = std::make_unique<FFmpegDemuxer>(inputfile.c_str());
+#if NVENCAPI_MAJOR_VERSION > 12
     decoder_ = std::make_unique<NvDecoder>(cudaCtx, false, FFmpeg2NvCodecId(demuxer_->GetVideoCodec()),
         false, false, &cropRect, &resizeDim, false, 0, 0, 1000, false, 0, nullptr);
+#else
+decoder_ = std::make_unique<NvDecoder>(cudaCtx, false, FFmpeg2NvCodecId(demuxer_->GetVideoCodec()),
+false, false, &cropRect, &resizeDim, false, 0, 0, 1000, false);
+#endif
     decoder_->SetOperatingPoint(0, false);
 
 }

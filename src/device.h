@@ -47,6 +47,7 @@ public:
     virtual void createCtx(int idx) { id_ = idx; }
     virtual void destroyCtx() {}
     virtual void showDecoderCapability() {}
+    virtual void showEncoderCapability() {}
 
     int getDeviceIdx() {
         return id_;

@@ -8,6 +8,7 @@
 
 #include "nvcuvid.h"
 #include "cuviddec.h"
+#include "nvEncodeAPI.h"
 
 #include "device.h"
 
@@ -44,6 +45,7 @@ public:
     }
 
     void showDecoderCapability() override;
+    void showEncoderCapability() override;
 
     static bool isCodecSupported(cudaVideoCodec codec, cudaVideoChromaFormat chromaFormat, int bitDepth)
     {
@@ -82,6 +84,7 @@ public:
 private:
     CUcontext cuContext_ = nullptr;
     CUdevice cuDevice_ = 0;
+    NV_ENCODE_API_FUNCTION_LIST encode_api_;
 };
 
 } // namespace nvenc
