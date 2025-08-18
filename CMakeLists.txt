@@ -13,6 +13,7 @@ include_directories(${CMAKE_SOURCE_DIR}/src)
 file(GLOB_RECURSE SRC ${CMAKE_SOURCE_DIR}/src/*.cc ${CMAKE_SOURCE_DIR}/src/*.h)
 
 add_subdirectory(NVEnc)
+add_subdirectory(NVJPEG)
 
 
 add_subdirectory(app)

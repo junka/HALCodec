@@ -14,17 +14,15 @@ add_executable(decinfo decinfo.cc)
 
 add_executable(hal_dec hal_dec.cc parse_cli.h)
 
-find_library(nvenc_layers nvenc_layers PATHS ${CMAKE_CURRENT_BINARY_DIR}/../NVEnc/layers NO_DEFAULT_PATH)
-
-if(NOT nvenc_layers)
-    message(FATAL_ERROR "nvenc_layers library not found in the specified path.")
-endif()
-
+set(LINK_LAYERS -Wl,--no-as-needed
+                nvenc_layers
+                nvjpeg_layers
+                -Wl,--as-needed)
 target_include_directories(hal_enc PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/../NVEnc/layers)
-target_link_libraries(hal_enc PUBLIC  -Wl,--no-as-needed nvenc_layers -Wl,--as-needed)
+target_link_libraries(hal_enc PUBLIC ${LINK_LAYERS})
 
 target_include_directories(decinfo PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/../NVEnc/layers)
-target_link_libraries(decinfo PUBLIC -Wl,--no-as-needed nvenc_layers -Wl,--as-needed)
+target_link_libraries(decinfo PUBLIC ${LINK_LAYERS})
 
 target_include_directories(hal_dec PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/../NVEnc/layers)
-target_link_libraries(hal_dec PUBLIC -Wl,--no-as-needed nvenc_layers -Wl,--as-needed Boost::program_options)
+target_link_libraries(hal_dec PUBLIC ${LINK_LAYERS} Boost::program_options)
