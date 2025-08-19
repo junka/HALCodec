@@ -211,10 +211,10 @@ void NVDevice::showEncoderCapability() {
                 return "H264";
             } else if (std::memcmp(&guid, &NV_ENC_CODEC_HEVC_GUID, 16) == 0) {
                 return "HEVC";
-        #if NVENCAPI_MAJOR_VERSION > 11
+#if NVENCAPI_MAJOR_VERSION > 11
             } else if (std::memcmp(&guid, &NV_ENC_CODEC_AV1_GUID, 16) == 0) {
                 return "AV1";
-        #endif
+#endif
             } else {
                 return "Unknown";
             }
@@ -237,7 +237,7 @@ void NVDevice::showEncoderCapability() {
             std::cerr << "fail to get encoder prest count" << std::endl;
             return;
         }
-        std::cout << "preset GUID count " << preset_count << std::endl;
+
         presetGUID.resize(preset_count);
         ret = encode_api_.nvEncGetEncodePresetGUIDs(nvencoder, guids[i], presetGUID.data(), preset_count, &preset_count);
         if (ret != NV_ENC_SUCCESS) {
@@ -245,9 +245,51 @@ void NVDevice::showEncoderCapability() {
             return;
         }
 
-        for (int p = 0; p < preset_count; p++) {
-            // presetGUID[p] = ;
-        }
+        auto supportpresets = [&nvencoder, this](GUID encodeGUID, std::vector<GUID> presets){
+            std::string out;
+            for (auto f: presets) {
+                if (std::memcmp(&f, &NV_ENC_PRESET_P1_GUID, 16) == 0) {
+                    out += "P1";
+                } else if (std::memcmp(&f, &NV_ENC_PRESET_P2_GUID, 16) == 0) {
+                    out += "P2";
+                } else if (std::memcmp(&f, &NV_ENC_PRESET_P3_GUID, 16) == 0) {
+                    out += "P3";
+                } else if (std::memcmp(&f, &NV_ENC_PRESET_P4_GUID, 16) == 0) {
+                    out += "P4";
+                } else if (std::memcmp(&f, &NV_ENC_PRESET_P5_GUID, 16) == 0) {
+                    out += "P5";
+                } else if (std::memcmp(&f, &NV_ENC_PRESET_P6_GUID, 16) == 0) {
+                    out += "P6";
+                } else if (std::memcmp(&f, &NV_ENC_PRESET_P7_GUID, 16) == 0) {
+                    out += "P7";
+                } else {
+                    out += "Unknown";
+                }
+                NV_ENC_PRESET_CONFIG config;
+                config.version = NV_ENC_PRESET_CONFIG_VER;
+#if NVENCAPI_MAJOR_VERSION > 11
+                if (std::memcmp(&encodeGUID, &NV_ENC_CODEC_AV1_GUID, 16) != 0) {
+#endif
+                    encode_api_.nvEncGetEncodePresetConfig(nvencoder, encodeGUID, f, &config);
+                    out += "(GOP " + std::to_string(config.presetCfg.gopLength) +
+                        ", FrameInteralP " + std::to_string(config.presetCfg.frameIntervalP) +
+                        ", monoChrome " + std::to_string(config.presetCfg.monoChromeEncoding) +
+                        ", frameField " + std::to_string(config.presetCfg.frameFieldMode) +
+                        ", mvPrecision " + std::to_string(config.presetCfg.mvPrecision) +
+                        ", rateControl " + std::to_string(config.presetCfg.rcParams.rateControlMode) +
+                        ", constQP(" + std::to_string(config.presetCfg.rcParams.constQP.qpIntra) + "," +
+                        std::to_string(config.presetCfg.rcParams.constQP.qpInterP) + "," +
+                        std::to_string(config.presetCfg.rcParams.constQP.qpInterB) + ")" +
+                        ", averageBitRate " + std::to_string(config.presetCfg.rcParams.averageBitRate) +
+                        ", maxBitrate " + std::to_string(config.presetCfg.rcParams.maxBitRate);
+#if NVENCAPI_MAJOR_VERSION > 11
+                }
+#endif
+                out += "\n";
+            }
+            return out;
+        } (guids[i], presetGUID);
+        std::cout << "supported presets: " << supportpresets << std::endl;
 
         uint32_t profile_count;
         ret = encode_api_.nvEncGetEncodeProfileGUIDCount(nvencoder, guids[i], &profile_count);
@@ -255,13 +297,53 @@ void NVDevice::showEncoderCapability() {
             std::cerr << "fail to get encoder profile count" << std::endl;
             return;
         }
-        std::cout << "profile GUID count " << preset_count << std::endl;
         std::vector<GUID> profileGUID(profile_count);
         ret = encode_api_.nvEncGetEncodeProfileGUIDs(nvencoder, guids[i], profileGUID.data(), profile_count, &profile_count);
         if (ret != NV_ENC_SUCCESS) {
             std::cerr << "fail to get encoder profile" << std::endl;
             return;
         }
+        auto supportprofiles = [](std::vector<GUID> profiles){
+            std::string out;
+            for (auto f: profiles) {
+                if (std::memcmp(&f, &NV_ENC_CODEC_PROFILE_AUTOSELECT_GUID, 16) == 0) {
+                    out += "Auto Select";
+                } else if (std::memcmp(&f, &NV_ENC_H264_PROFILE_BASELINE_GUID, 16) == 0) {
+                    out += "H264 Baseline";
+                } else if (std::memcmp(&f, &NV_ENC_H264_PROFILE_MAIN_GUID, 16) == 0) {
+                    out += "H264 Main";
+                } else if (std::memcmp(&f, &NV_ENC_H264_PROFILE_HIGH_GUID, 16) == 0) {
+                    out += "H264 High";
+                }
+#if NVENCAPI_MAJOR_VERSION > 12
+                else if (std::memcmp(&f, &NV_ENC_H264_PROFILE_HIGH_10_GUID, 16) == 0) {
+                    out += "H264 High 10";
+                } else if (std::memcmp(&f, &NV_ENC_H264_PROFILE_HIGH_422_GUID, 16) == 0) {
+                    out += "H264 High 422";
+                }
+#endif
+                else if (std::memcmp(&f, &NV_ENC_H264_PROFILE_HIGH_444_GUID, 16) == 0) {
+                    out += "H264 High 444";
+                } else if (std::memcmp(&f, &NV_ENC_H264_PROFILE_STEREO_GUID, 16) == 0) {
+                    out += "H264 Stereo";
+                } else if (std::memcmp(&f, &NV_ENC_H264_PROFILE_PROGRESSIVE_HIGH_GUID, 16) == 0) {
+                    out += "H264 Progressive High";
+                } else if (std::memcmp(&f, &NV_ENC_H264_PROFILE_CONSTRAINED_HIGH_GUID, 16) == 0) {
+                    out += "H264 Contrained High";
+                } else if (std::memcmp(&f, &NV_ENC_HEVC_PROFILE_MAIN_GUID, 16) == 0) {
+                    out += "HEVC Main";
+                } else if (std::memcmp(&f, &NV_ENC_HEVC_PROFILE_MAIN10_GUID, 16) == 0) {
+                    out += "HEVC Main 10";
+                } else if (std::memcmp(&f, &NV_ENC_HEVC_PROFILE_FREXT_GUID, 16) == 0) {
+                    out += "HEVC FREXT";
+                } else if (std::memcmp(&f, &NV_ENC_AV1_PROFILE_MAIN_GUID, 16) == 0) {
+                    out += "AV1 Main";
+                }
+                out += " ";
+            }
+            return out;
+        }(profileGUID);
+        std::cout << "supported profiles: " << supportprofiles << std::endl;
 
         uint32_t format_count;
         ret = encode_api_.nvEncGetInputFormatCount(nvencoder, guids[i], &format_count);
@@ -269,7 +351,6 @@ void NVDevice::showEncoderCapability() {
             std::cerr << "fail to get input format count" << std::endl;
             return;
         }
-        std::cout << "input format count " << format_count << std::endl;
         std::vector<NV_ENC_BUFFER_FORMAT> formats(format_count);
         ret = encode_api_.nvEncGetInputFormats(nvencoder, guids[i], formats.data(), format_count, &format_count);
         if (ret != NV_ENC_SUCCESS) {
@@ -277,10 +358,6 @@ void NVDevice::showEncoderCapability() {
             return;
         }
         auto supportformat = [](std::vector<NV_ENC_BUFFER_FORMAT> formats){
-            const char* input_format_str[] = {
-                "undefined", "NV12", "YV12", "IYUV", "YUV444", "YUV420_10bit",
-                "YUV444_10bit", "ARGB", "ARGB10", "AYUV", "ABGR10", "U8", "NV16", "P210"
-            };
             std::string out;
             for (auto f: formats) {
                 if (f == NV_ENC_BUFFER_FORMAT_NV12) {
@@ -317,7 +394,7 @@ void NVDevice::showEncoderCapability() {
             }
             return out;
         }(formats);
-        std::cout << "input format: " << supportformat << std::endl;
+        std::cout << "supported input format: " << supportformat << std::endl;
 
 
         std::cout << std::endl;
