@@ -267,29 +267,35 @@ void NVDevice::showEncoderCapability() {
                 }
                 NV_ENC_PRESET_CONFIG config;
                 config.version = NV_ENC_PRESET_CONFIG_VER;
-#if NVENCAPI_MAJOR_VERSION > 11
-                if (std::memcmp(&encodeGUID, &NV_ENC_CODEC_AV1_GUID, 16) != 0) {
-#endif
-                    encode_api_.nvEncGetEncodePresetConfig(nvencoder, encodeGUID, f, &config);
-                    out += "(GOP " + std::to_string(config.presetCfg.gopLength) +
-                        ", FrameInteralP " + std::to_string(config.presetCfg.frameIntervalP) +
-                        ", monoChrome " + std::to_string(config.presetCfg.monoChromeEncoding) +
-                        ", frameField " + std::to_string(config.presetCfg.frameFieldMode) +
-                        ", mvPrecision " + std::to_string(config.presetCfg.mvPrecision) +
-                        ", rateControl " + std::to_string(config.presetCfg.rcParams.rateControlMode) +
-                        ", constQP(" + std::to_string(config.presetCfg.rcParams.constQP.qpIntra) + "," +
-                        std::to_string(config.presetCfg.rcParams.constQP.qpInterP) + "," +
-                        std::to_string(config.presetCfg.rcParams.constQP.qpInterB) + ")" +
-                        ", averageBitRate " + std::to_string(config.presetCfg.rcParams.averageBitRate) +
-                        ", maxBitrate " + std::to_string(config.presetCfg.rcParams.maxBitRate);
-#if NVENCAPI_MAJOR_VERSION > 11
-                }
+                auto getRcmode = [](NV_ENC_PRESET_CONFIG &config) -> std::string {
+                    switch (config.presetCfg.rcParams.rateControlMode) {
+                        case NV_ENC_PARAMS_RC_CONSTQP:
+                            return "CONSTQP";
+                        case NV_ENC_PARAMS_RC_VBR:
+                            return "VBR";
+                        case NV_ENC_PARAMS_RC_CBR:
+                            return "CBR";
+                        default:
+                            return "Unknown";
+                    }
+                };
+                encode_api_.nvEncGetEncodePresetConfigEx(nvencoder, encodeGUID, f, NV_ENC_TUNING_INFO_HIGH_QUALITY, &config);
+                out += " HIGH_QUALITY (" + getRcmode(config) + ") ";
+                encode_api_.nvEncGetEncodePresetConfigEx(nvencoder, encodeGUID, f, NV_ENC_TUNING_INFO_LOW_LATENCY, &config);
+                out += " LOW_LATENCY (" + getRcmode(config) + ") ";
+                encode_api_.nvEncGetEncodePresetConfigEx(nvencoder, encodeGUID, f, NV_ENC_TUNING_INFO_ULTRA_LOW_LATENCY, &config);
+                out += " ULTRA_LOW_LATENCY (" + getRcmode(config) + ") ";
+                encode_api_.nvEncGetEncodePresetConfigEx(nvencoder, encodeGUID, f, NV_ENC_TUNING_INFO_LOSSLESS, &config);
+                out += " LOSSLESS (" + getRcmode(config) + ") ";
+#if NVENCAPI_MAJOR_VERSION > 12
+                encode_api_.nvEncGetEncodePresetConfigEx(nvencoder, encodeGUID, f, NV_ENC_TUNING_INFO_ULTRA_HIGH_QUALITY, &config);
+                out += " ULTRA_HIGH_QUALITY (" + getRcmode(config) + ") ";
 #endif
                 out += "\n";
             }
             return out;
         } (guids[i], presetGUID);
-        std::cout << "supported presets: " << supportpresets << std::endl;
+        std::cout << "supported presets:" << std::endl << supportpresets << std::endl;
 
         uint32_t profile_count;
         ret = encode_api_.nvEncGetEncodeProfileGUIDCount(nvencoder, guids[i], &profile_count);
