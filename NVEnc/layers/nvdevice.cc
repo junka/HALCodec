@@ -265,12 +265,12 @@ void NVDevice::showEncoderCapability() {
                 } else {
                     out += "Unknown";
                 }
-                NV_ENC_PRESET_CONFIG config;
-                config.version = NV_ENC_PRESET_CONFIG_VER;
-                auto getRcmode = [](NV_ENC_PRESET_CONFIG &config) -> std::string {
-                    switch (config.presetCfg.rcParams.rateControlMode) {
+                auto getRcmode = [](NV_ENC_CONFIG presetCfg) -> std::string {
+                    switch (presetCfg.rcParams.rateControlMode) {
                         case NV_ENC_PARAMS_RC_CONSTQP:
-                            return "CONSTQP";
+                            return "CONSTQP["+std::to_string(presetCfg.rcParams.constQP.qpIntra) + "," +
+                                   std::to_string(presetCfg.rcParams.constQP.qpInterB) + "," +
+                                   std::to_string(presetCfg.rcParams.constQP.qpInterP) + "]";
                         case NV_ENC_PARAMS_RC_VBR:
                             return "VBR";
                         case NV_ENC_PARAMS_RC_CBR:
@@ -279,17 +279,42 @@ void NVDevice::showEncoderCapability() {
                             return "Unknown";
                     }
                 };
-                encode_api_.nvEncGetEncodePresetConfigEx(nvencoder, encodeGUID, f, NV_ENC_TUNING_INFO_HIGH_QUALITY, &config);
-                out += " HIGH_QUALITY (" + getRcmode(config) + ") ";
-                encode_api_.nvEncGetEncodePresetConfigEx(nvencoder, encodeGUID, f, NV_ENC_TUNING_INFO_LOW_LATENCY, &config);
-                out += " LOW_LATENCY (" + getRcmode(config) + ") ";
-                encode_api_.nvEncGetEncodePresetConfigEx(nvencoder, encodeGUID, f, NV_ENC_TUNING_INFO_ULTRA_LOW_LATENCY, &config);
-                out += " ULTRA_LOW_LATENCY (" + getRcmode(config) + ") ";
-                encode_api_.nvEncGetEncodePresetConfigEx(nvencoder, encodeGUID, f, NV_ENC_TUNING_INFO_LOSSLESS, &config);
-                out += " LOSSLESS (" + getRcmode(config) + ") ";
+                NV_ENC_PRESET_CONFIG config = {};
+                config.version = NV_ENC_PRESET_CONFIG_VER;
+                config.presetCfg.version = NV_ENC_CONFIG_VER;
+                int ret = encode_api_.nvEncGetEncodePresetConfigEx(nvencoder, encodeGUID, f, NV_ENC_TUNING_INFO_HIGH_QUALITY, &config);
+                if (ret == NV_ENC_SUCCESS) {
+                    out += " HIGH_QUALITY (" + getRcmode(config.presetCfg) + ") ";
+                }
+                std::memset(&config, 0, sizeof(config));
+                config.version = NV_ENC_PRESET_CONFIG_VER;
+                config.presetCfg.version = NV_ENC_CONFIG_VER;
+                ret = encode_api_.nvEncGetEncodePresetConfigEx(nvencoder, encodeGUID, f, NV_ENC_TUNING_INFO_LOW_LATENCY, &config);
+                if (ret == NV_ENC_SUCCESS) {
+                    out += " LOW_LATENCY (" + getRcmode(config.presetCfg) + ") ";
+                }
+                std::memset(&config, 0, sizeof(config));
+                config.version = NV_ENC_PRESET_CONFIG_VER;
+                config.presetCfg.version = NV_ENC_CONFIG_VER;
+                ret = encode_api_.nvEncGetEncodePresetConfigEx(nvencoder, encodeGUID, f, NV_ENC_TUNING_INFO_ULTRA_LOW_LATENCY, &config);
+                if (ret == NV_ENC_SUCCESS) {
+                    out += " ULTRA_LOW_LATENCY (" + getRcmode(config.presetCfg) + ") ";
+                }
+                std::memset(&config, 0, sizeof(config));
+                config.version = NV_ENC_PRESET_CONFIG_VER;
+                config.presetCfg.version = NV_ENC_CONFIG_VER;
+                ret = encode_api_.nvEncGetEncodePresetConfigEx(nvencoder, encodeGUID, f, NV_ENC_TUNING_INFO_LOSSLESS, &config);
+                if (ret == NV_ENC_SUCCESS) {
+                    out += " LOSSLESS (" + getRcmode(config.presetCfg) + ") ";
+                }
 #if NVENCAPI_MAJOR_VERSION > 12
-                encode_api_.nvEncGetEncodePresetConfigEx(nvencoder, encodeGUID, f, NV_ENC_TUNING_INFO_ULTRA_HIGH_QUALITY, &config);
-                out += " ULTRA_HIGH_QUALITY (" + getRcmode(config) + ") ";
+                std::memset(&config, 0, sizeof(config));
+                config.version = NV_ENC_PRESET_CONFIG_VER;
+                config.presetCfg.version = NV_ENC_CONFIG_VER;
+                ret = encode_api_.nvEncGetEncodePresetConfigEx(nvencoder, encodeGUID, f, NV_ENC_TUNING_INFO_ULTRA_HIGH_QUALITY, &config);
+                if (ret == NV_ENC_SUCCESS) {
+                    out += " ULTRA_HIGH_QUALITY (" + getRcmode(config.presetCfg) + ") ";
+                }
 #endif
                 out += "\n";
             }
