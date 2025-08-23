@@ -12,8 +12,15 @@ include_directories(${CMAKE_SOURCE_DIR}/src)
 # Collect all source files in src directory
 file(GLOB_RECURSE SRC ${CMAKE_SOURCE_DIR}/src/*.cc ${CMAKE_SOURCE_DIR}/src/*.h)
 
-add_subdirectory(NVEnc)
-add_subdirectory(NVJPEG)
+if(UNIX AND NOT APPLE)
+    find_package(CUDA QUIET)
+    if(CUDA_FOUND)
+        add_subdirectory(NVEnc)
+        add_subdirectory(NVJPEG)
+    endif()
+elseif(APPLE)
+    add_subdirectory(VideoToolbox)
+endif()
 
 
 add_subdirectory(app)

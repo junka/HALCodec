@@ -14,10 +14,16 @@ add_executable(codecinfo codecinfo.cc)
 
 add_executable(hal_dec hal_dec.cc parse_cli.h)
 
-set(LINK_LAYERS -Wl,--no-as-needed
+set(LINK_LAYERS "")
+if(APPLE)
+	list(APPEND LINK_LAYERS vtbox_layers)
+else()
+	list(APPEND LINK_LAYERS -Wl,--no-as-needed
                 nvenc_layers
                 nvjpeg_layers
                 -Wl,--as-needed)
+endif()
+
 target_include_directories(hal_enc PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/../NVEnc/layers)
 target_link_libraries(hal_enc PUBLIC ${LINK_LAYERS})
 

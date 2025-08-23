@@ -20,7 +20,7 @@ int main(int argc, char *argv[]) {
     CommandLineParser cli;
     cli.parse(argc, argv);
 
-    auto dec = halcodec::Decoder::Create("nvjpeg");
+    auto dec = halcodec::Decoder::Create("vtbox");
     if (!dec) {
         std::cerr << "Fail to create decoder" << std::endl;
         return -1;
