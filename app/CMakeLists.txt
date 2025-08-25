@@ -25,7 +25,7 @@ else()
 endif()
 
 target_include_directories(hal_enc PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/../NVEnc/layers)
-target_link_libraries(hal_enc PUBLIC ${LINK_LAYERS})
+target_link_libraries(hal_enc PUBLIC ${LINK_LAYERS} Boost::program_options)
 
 target_include_directories(codecinfo PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/../NVEnc/layers)
 target_link_libraries(codecinfo PUBLIC ${LINK_LAYERS})

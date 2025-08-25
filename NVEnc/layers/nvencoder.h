@@ -11,7 +11,7 @@ public:
     NVEncoder();
     ~NVEncoder() = default;
 
-    // void Initialize() override;
+    // void Initialize(std::string input) override;
     // void EncodeFrame() override;
     // void Finalize() override;
 

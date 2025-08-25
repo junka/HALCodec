@@ -4,6 +4,9 @@
 #include <string>
 #include <vector>
 #include <cstdint>
+#include <memory>
+#include <functional>
+#include <unordered_map>
 
 namespace halcodec {
 
@@ -11,17 +14,36 @@ class Encoder {
 public:
     Encoder() = default;
     virtual ~Encoder() = default;
+    using Creator = std::function<std::unique_ptr<Encoder>()>;
+    static std::unordered_map<std::string, Encoder::Creator>& getRegistry() {
+        static std::unordered_map<std::string, Encoder::Creator> registry;
+        return registry;
+    }
+    // Factory method to create a Decoder instance
+    static std::unique_ptr<Encoder> Create(const std::string& type) {
+        auto& registry = getRegistry();
+        auto it = registry.find(type);
+        if (it != registry.end()) {
+            return it->second();
+        } else {
+            return nullptr;
+        }
+    }
+
+    static void RegisterEncoder(const std::string& type, Creator creator) {
+        getRegistry()[type] = creator;
+    }
 
     // Initialize the encoder with specific settings
-    virtual void Initialize() {}
+    virtual void Initialize(std::string input) {}
+    // Finalize the encoding process
+    virtual void Finalize() {}
 
     // Encode raw input data and return encoded output
-    virtual void FillData(const std::vector<uint8_t>& rawData) {}
+    virtual int FillData() { return 0;}
+    virtual uint8_t* GetFrame(int *framesize) { return nullptr;}
+    virtual void ReleaseFrame(uint8_t **pFrame) {}
 
-    virtual void GetFrame() {}
-
-    // Finalize the encoding process
-    virtual void finalize() {}
 
     // Get the name of the encoder
     virtual std::string getName() const { return ""; }

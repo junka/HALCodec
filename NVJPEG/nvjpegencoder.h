@@ -1,36 +1,37 @@
-#ifndef NVJPEGDECODER_H
-#define NVJPEGDECODER_H
+#ifndef NVJPEGENCODER_H
+#define NVJPEGENCODER_H
 
 #include <cuda.h>
 #include <nvjpeg.h>
 #include <vector>
 #include <string>
+#include <memory>
 
-#include "decoder.h"
+#include "encoder.h"
 
 namespace halcodec {
 namespace nvjpeg {
 
-class NVJPEGDecoder : public Decoder {
+class NVJPEGEncoder : public Encoder {
 public:
-    NVJPEGDecoder();
-    ~NVJPEGDecoder() = default;
+    NVJPEGEncoder();
+    ~NVJPEGEncoder() = default;
 
     void Initialize(std::string input) override;
-
-    int FillinFrame() override;
-
     void Finalize() override;
 
     std::string getName() const override {return "nvjpeg";}
+
+
+    int FillData() override;
 
     uint8_t* GetFrame(int *framesize) override;
 
     void ReleaseFrame(uint8_t **pFrame) override;
 
     static bool Register() {
-        halcodec::Decoder::RegisterDecoder("nvjpeg", []() {
-            return std::make_unique<NVJPEGDecoder>();
+        halcodec::Encoder::RegisterEncoder("nvjpeg", []() {
+            return std::make_unique<NVJPEGEncoder>();
         });
         return true;
     }
@@ -55,8 +56,9 @@ private:
     bool pipeline_ = false;
     nvjpegHandle_t nvjpegHandle_;
     nvjpegJpegState_t jpegState_;
+    nvjpegEncoderState_t encoderState_;
     nvjpegOutputFormat_t outputfmt_;
-    nvjpegJpegDecoder_t decoder_;
+    // nvjpegJpegEncoder_t encoder_;
     cudaStream_t stream_;
 
     //decouple
@@ -64,7 +66,7 @@ private:
     nvjpegBufferPinned_t pinned_buffers_[2]; // 2 buffers for pipelining
     nvjpegBufferDevice_t device_buffer_;
     nvjpegJpegStream_t  jpeg_streams_[2]; //  2 streams for pipelining
-    nvjpegDecodeParams_t decode_params_;
+    nvjpegEncoderParams_t encode_params_;
 
     
     std::vector<std::vector<char> > data_;
@@ -84,4 +86,4 @@ private:
 
 } // namespace nvjpeg
 } // namespace halcodec
-#endif // NVJPEGDECODER_H
+#endif // NVJPEGENCODER_H

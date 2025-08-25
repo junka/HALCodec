@@ -1,8 +1,89 @@
 #include <cstdint>
+#include <fstream>
 #include <iostream>
 
-#include "encoder.h"
+#include <dirent.h>
+#include <unistd.h>
+#include <sys/stat.h>
+#include <sys/types.h>
 
-int main() {
+#include "encoder.h"
+#include "parse_cli.h"
+
+int main(int argc, char *argv[]) {
+    std::string inputFile;
+    std::string outputFile;
+    int gpuIndex;
+    std::string format;
+    CommandLineParser cli;
+    cli.parse(argc, argv);
+
+    auto enc = halcodec::Encoder::Create("nvjpeg");
+    if (!enc) {
+        std::cerr << "Fail to create encoder" << std::endl;
+        return -1;
+    }
+    std::string input = cli.getInputFile();
+    enc->Initialize(input);
+
+    struct stat info;
+    if (stat(input.c_str(), &info) != 0) {
+        std::cout << "Cannot access " << input << std::endl;
+        return -1;
+    }
+    std::vector<std::string> files;
+    if (info.st_mode & S_IFDIR) {
+        DIR *dir;
+        struct dirent *ent;
+        while (!input.empty() && input.back() == '/') {
+            input.pop_back();
+        }
+        if ((dir = opendir(input.c_str())) != NULL) {
+            while ((ent = readdir(dir)) != NULL) {
+                if (ent->d_type == DT_REG) { // Regular file
+                    std::string inputFileName = input + '/' + ent->d_name;
+                    size_t lastDot = inputFileName.find_last_of('.');
+                    if (lastDot != std::string::npos) {
+                        inputFileName = inputFileName.substr(0, lastDot);
+                    }
+                    files.emplace_back(inputFileName + "." + cli.getFormat());
+                }
+            }
+            closedir(dir);
+        }
+    } else {
+        files.push_back(cli.getOutputFile() + '.' + cli.getFormat());
+    }
+
+    for (auto p : files) {
+        std::cout << p << std::endl;
+    }
+    int fidx = 0;
+    std::ofstream fpout(files[fidx++], std::ios::out|std::ios::binary);
+    if (!fpout) {
+        std::cerr << "unable to open output file" << std::endl;
+    }
+    int n_enc = 0;
+    int total_frames = 0;
+    do {
+        n_enc = enc->FillData();
+        total_frames += n_enc;
+        for (int i = 0; i < n_enc; i++) {
+            int size;
+            auto data = enc->GetFrame(&size);
+            fpout.write(reinterpret_cast<char *>(data), size);
+            if (enc->getName() == "nvjpeg" && fidx < files.size()) {
+                fpout.close();
+                fpout.open(files[fidx++], std::ios::out|std::ios::binary);
+            }
+            enc->ReleaseFrame(&data);
+        }
+    } while (n_enc > 0);
+
+    fpout.close();
+    enc->Finalize();
+
+    std::cout << "Decode total frames: "<< total_frames << std::endl;
+
     return 0;
 }
