@@ -258,13 +258,14 @@ int NVJPEGDecoder::FillinFrame() {
         if (outputfmt_ == NVJPEG_OUTPUT_RGBI || outputfmt_ == NVJPEG_OUTPUT_BGRI) {
             channels = 1;
             mul = 3;
-        }
-        // in the case of rgb create 3 buffers with sizes of original image
-        else if (outputfmt_ == NVJPEG_OUTPUT_RGB ||
-            outputfmt_ == NVJPEG_OUTPUT_BGR) {
+        } else if (outputfmt_ == NVJPEG_OUTPUT_RGB || outputfmt_ == NVJPEG_OUTPUT_BGR) {
+            // in the case of rgb create 3 buffers with sizes of original image
             channels = 3;
             widths[1] = widths[2] = widths[0];
             heights[1] = heights[2] = heights[0];
+        } else if (outputfmt_ == NVJPEG_OUTPUT_Y) {
+            channels = 1;
+            mul = 1;
         }
         for (int c = 0; c < channels; c++) {
             int aw = mul * widths[c];
@@ -302,7 +303,7 @@ int NVJPEGDecoder::FillinFrame() {
     cudaEventSynchronize(stopEvent);
     cudaEventElapsedTime(&loopTime, startEvent, stopEvent);
     time = static_cast<double>(loopTime);
-    std::cout << "Decode time " << time << std::endl;
+    std::cout << "Decode time " << time << "ms" << std::endl;
     return num_decoded;
 }
 
@@ -313,10 +314,14 @@ uint8_t* NVJPEGDecoder::GetFrame(int *framesize, int *height, int *width, int *n
     int chanels = 0;
 
     // Calculate total size for YUV format
-    for (int c = 0; c < NVJPEG_MAX_COMPONENT; c++) {
-        if (out_[idx].channel[c] != nullptr) {
-            total_size += img_heights_[idx] * out_[idx].pitch[c];
-            chanels ++;
+    if (outputfmt_ == NVJPEG_OUTPUT_Y) {
+        total_size = img_heights_[idx] * out_[idx].pitch[0];
+    } else {
+        for (int c = 0; c < NVJPEG_MAX_COMPONENT; c++) {
+            if (out_[idx].channel[c] != nullptr) {
+                total_size += img_heights_[idx] * out_[idx].pitch[c];
+                chanels ++;
+            }
         }
     }
 
@@ -384,7 +389,11 @@ uint8_t* NVJPEGDecoder::GetFrame(int *framesize, int *height, int *width, int *n
             }
         }
     } else if (outputfmt_ == NVJPEG_OUTPUT_Y) {
-        //
+        if (out_[idx].channel[0] != nullptr) {
+            cudaMemcpy2D(combined_frame, img_widths_[idx], out_[idx].channel[0], out_[idx].pitch[0],
+                img_widths_[idx], img_heights_[idx], cudaMemcpyDeviceToHost);
+            chanels = 1;
+        }
     } else if (outputfmt_ == NVJPEG_OUTPUT_BGR || outputfmt_ == NVJPEG_OUTPUT_RGB) {
         for (int c = 0; c < NVJPEG_MAX_COMPONENT; c++) {
             if (out_[idx].channel[c] != nullptr) {
@@ -399,6 +408,7 @@ uint8_t* NVJPEGDecoder::GetFrame(int *framesize, int *height, int *width, int *n
             cudaMemcpy2D(combined_frame, img_widths_[idx] * 3, out_[idx].channel[0], out_[idx].pitch[0],
                 img_widths_[idx] * 3, img_heights_[idx], cudaMemcpyDeviceToHost);
         }
+        chanels = 3;
     }
 
     *height = img_heights_[idx];

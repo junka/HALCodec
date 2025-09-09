@@ -78,7 +78,8 @@ int main(int argc, char *argv[]) {
             int height;
             int n_chan;
             auto data = dec->GetFrame(&size, &height, &width, &n_chan);
-            if (cli.getFormat() == "bgr" || cli.getFormat() == "rgb" || cli.getFormat() == "rgbi" || cli.getFormat() == "bgri") {
+            if (cli.getFormat() == "y" || cli.getFormat() == "bgr" || cli.getFormat() == "rgb"
+                 || cli.getFormat() == "rgbi" || cli.getFormat() == "bgri") {
                 BMPWriter writer(files[fidx++], cli.getFormat());                
                 writer.writeBMP(data, width, height, n_chan);
             } else {

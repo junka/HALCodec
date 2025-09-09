@@ -20,7 +20,7 @@ public:
         file_.close();
     }
 
-    #pragma pack(push, 2)
+    #pragma pack(push, 1)
     struct BMPFileHeader {
         uint16_t type{0x4D42};          // BM
         uint32_t size{0};
@@ -42,6 +42,12 @@ public:
         uint32_t colors_used{0};
         uint32_t colors_important{0};
     };
+    struct BMPColor {
+        uint8_t r;
+        uint8_t g;
+        uint8_t b;
+        uint8_t a;
+    };
     #pragma pack(pop)
 
     int writeBMP(const uint8_t *data, int width, int height, int n_chan) {
@@ -52,9 +58,8 @@ public:
         int y;
         int n;
         uint8_t red, green, blue;
-
-        extrabytes = (4 - ((width * 3) % 4)) % 4;  // How many bytes of padding to add to each
-        paddedsize = ((width * 3) + extrabytes) * height;
+        extrabytes = (4 - ((width * n_chan) % 4)) % 4;  // How many bytes of padding to add to each
+        paddedsize = ((width * n_chan) + extrabytes) * height;
 
         // Headers...
         BMPFileHeader file_header;
@@ -63,34 +68,49 @@ public:
         BMPInfoHeader info_header;
         info_header.width = width;
         info_header.height = height;
+        if (format_ == "y") {
+            info_header.bit_count = 8;
+            info_header.colors_used = 256;
+        }
         info_header.image_size = paddedsize;
         file_.write(reinterpret_cast<const char*>(&file_header), sizeof(file_header));
         file_.write(reinterpret_cast<const char*>(&info_header), sizeof(info_header));
-        printf("height %d, widht %d\n", height, width);
+        if (format_ == "y") {
+            struct BMPColor palette[256];
+            for (int i = 0; i < 256; i++) {
+                palette[i].r = palette[i].g = palette[i].b = palette[i].a = i;
+            }
+            file_.write(reinterpret_cast<const char*>(palette), 256 * sizeof(struct BMPColor));
+        }
         // BMP image format is written from bottom to top...
         for (y = height - 1; y >= 0; y--) {
             for (x = 0; x <= width - 1; x++) {
-                if (format_ == "rgb") {
+                if (format_ == "y") {
                     red = data[y * width + x];
-                    green = data[y * width + x + width * height];
-                    blue = data[y * width + x + width * height * 2];
-                } else if (format_ == "bgr") {
-                    red = data[y * width + x + width * height * 2];
-                    green = data[y * width + x + width * height];
-                    blue = data[y * width + x];
-                } else if (format_ == "rgbi") {
-                    red = data[(y * width + x) * 3];
-                    green = data[(y * width + x) * 3 + 1];
-                    blue = data[(y * width + x) * 3 + 2];
-                } else if (format_ == "bgri") {
-                    blue = data[(y * width + x) * 3];
-                    green = data[(y * width + x) * 3 + 1];
-                    red = data[(y * width + x) * 3 + 2];
+                    file_.write(reinterpret_cast<const char*>(&red), 1);
+                } else {
+                    if (format_ == "rgb") {
+                        red = data[y * width + x];
+                        green = data[y * width + x + width * height];
+                        blue = data[y * width + x + width * height * 2];
+                    } else if (format_ == "bgr") {
+                        red = data[y * width + x + width * height * 2];
+                        green = data[y * width + x + width * height];
+                        blue = data[y * width + x];
+                    } else if (format_ == "rgbi") {
+                        red = data[(y * width + x) * 3];
+                        green = data[(y * width + x) * 3 + 1];
+                        blue = data[(y * width + x) * 3 + 2];
+                    } else if (format_ == "bgri") {
+                        blue = data[(y * width + x) * 3];
+                        green = data[(y * width + x) * 3 + 1];
+                        red = data[(y * width + x) * 3 + 2];
+                    }
+                    // Also, it's written in (b,g,r) format...
+                    file_.write(reinterpret_cast<const char*>(&blue), 1);
+                    file_.write(reinterpret_cast<const char*>(&green), 1);
+                    file_.write(reinterpret_cast<const char*>(&red), 1);
                 }
-                // Also, it's written in (b,g,r) format...
-                file_.write(reinterpret_cast<const char*>(&blue), 1);
-                file_.write(reinterpret_cast<const char*>(&green), 1);
-                file_.write(reinterpret_cast<const char*>(&red), 1);
             }
             if (extrabytes)  // See above - BMP lines must be of lengths divisible by 4.
             {
