@@ -7,7 +7,7 @@
 namespace halcodec {
 namespace nvenc {
 
-void NVDecoder::Initialize(std::string inputfile) {
+void NVDecoder::Initialize(std::string inputfile, std::string format) {
     device_ = std::make_unique<NVDevice>();
     if (!device_) {
         std::cout << "unable to create device" << std::endl;
@@ -24,11 +24,10 @@ void NVDecoder::Initialize(std::string inputfile) {
     decoder_ = std::make_unique<NvDecoder>(cudaCtx, false, FFmpeg2NvCodecId(demuxer_->GetVideoCodec()),
         false, false, &cropRect, &resizeDim, false, 0, 0, 1000, false, 0, nullptr);
 #else
-decoder_ = std::make_unique<NvDecoder>(cudaCtx, false, FFmpeg2NvCodecId(demuxer_->GetVideoCodec()),
-false, false, &cropRect, &resizeDim, false, 0, 0, 1000, false);
+    decoder_ = std::make_unique<NvDecoder>(cudaCtx, false, FFmpeg2NvCodecId(demuxer_->GetVideoCodec()),
+        false, false, &cropRect, &resizeDim, false, 0, 0, 1000, false);
 #endif
     decoder_->SetOperatingPoint(0, false);
-
 }
 
 int NVDecoder::FillinFrame() {
@@ -52,7 +51,7 @@ std::string NVDecoder::getName() const {
     return "nvdec";
 }
 
-uint8_t* NVDecoder::GetFrame(int *framesize) {
+uint8_t* NVDecoder::GetFrame(int *framesize, int *height, int *width, int *n_chan) {
     uint8_t* frame = decoder_->GetLockedFrame();
     *framesize = decoder_->GetFrameSize();
     auto outFormat = decoder_->GetOutputFormat();

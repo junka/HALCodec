@@ -17,7 +17,7 @@ public:
     NVJPEGEncoder();
     ~NVJPEGEncoder() = default;
 
-    void Initialize(std::string input) override;
+    void Initialize(std::string input, std::string format) override;
     void Finalize() override;
 
     std::string getName() const override {return "nvjpeg";}
@@ -25,7 +25,7 @@ public:
 
     int FillData() override;
 
-    uint8_t* GetFrame(int *framesize) override;
+    uint8_t* GetFrame(int *framesize, int *height, int *width, int *n_chan) override;
 
     void ReleaseFrame(uint8_t **pFrame) override;
 
@@ -36,8 +36,6 @@ public:
         return true;
     }
 private:
-    void create_decouple_api();
-    void destroy_deouple_api();
 
     void checkStatus(nvjpegStatus_t status, const std::string& errorMessage);
 

@@ -21,7 +21,7 @@ public:
                 ("input,i", po::value<std::string>(&inputFile_)->required(), "Input file")
                 ("output,o", po::value<std::string>(&outputFile_), "Output file (optional, defaults to input file name with format extension)")
                 ("gpu", po::value<int>(&gpuIndex_)->default_value(0), "GPU index")
-                ("format,f", po::value<std::string>(&format_)->default_value("yuv"), "Output planar format");
+                ("format,f", po::value<std::string>(&format_)->default_value("yuv"), "Output planar format: yuv/y/rbg/bgr/bgri/rgbi");
 
             // Parse the command line
             po::variables_map vm;

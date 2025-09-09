@@ -37,7 +37,7 @@ public:
         getRegistry()[type] = creator;
     }
 
-    virtual void Initialize(std::string input) {}
+    virtual void Initialize(std::string input, std::string format) {}
 
     // Fill input data and return  output
     virtual int FillinFrame() { return -1; }
@@ -48,7 +48,7 @@ public:
     // Get the name of the encoder
     virtual std::string getName() const {return "";}
 
-    virtual uint8_t* GetFrame(int *framesize) {return nullptr;}
+    virtual uint8_t* GetFrame(int *framesize, int *height, int *width, int *n_chan) {return nullptr;}
 
     virtual void ReleaseFrame(uint8_t **pFrame) {}
 };

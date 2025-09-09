@@ -16,7 +16,7 @@ public:
     NVJPEGDecoder();
     ~NVJPEGDecoder() = default;
 
-    void Initialize(std::string input) override;
+    void Initialize(std::string input, std::string format) override;
 
     int FillinFrame() override;
 
@@ -24,7 +24,7 @@ public:
 
     std::string getName() const override {return "nvjpeg";}
 
-    uint8_t* GetFrame(int *framesize) override;
+    uint8_t* GetFrame(int *framesize, int *height, int *width, int *n_chan) override;
 
     void ReleaseFrame(uint8_t **pFrame) override;
 

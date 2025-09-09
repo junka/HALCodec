@@ -14,10 +14,10 @@ class VTDecoder : public Decoder {
 public:
     VTDecoder() = default;
 
-    void Initialize(std::string inputfile) override;
+    void Initialize(std::string inputfile, std::string format) override;
     int FillinFrame() override;
     void Finalize() override;
-    uint8_t* GetFrame(int *framesize) override;
+    uint8_t* GetFrame(int *framesize, int *height, int *width, int *n_chan) override;
     void ReleaseFrame(uint8_t **pFrame) override;
     std::string getName() const override { return "vtbox"; }
 

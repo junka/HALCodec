@@ -7,7 +7,7 @@
 
 namespace halcodec {
 namespace vtbox {
-void VTDecoder::Initialize(std::string input) {
+void VTDecoder::Initialize(std::string input, std::string format) {
     const uint8_t* sps = nullptr;
     size_t spsSize = 0;
     const uint8_t* pps = nullptr;
@@ -64,7 +64,7 @@ int VTDecoder::FillinFrame() {
     return 0;
 }
 
-uint8_t* VTDecoder::GetFrame(int *framesize) {
+uint8_t* VTDecoder::GetFrame(int *framesize, int *height, int *width, int *n_chan) {
     uint8_t* frame = nullptr;
     return nullptr;
 }

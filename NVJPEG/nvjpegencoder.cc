@@ -24,7 +24,7 @@ NVJPEGEncoder::NVJPEGEncoder() {
 }
 
 
-void NVJPEGEncoder::Initialize(std::string input) {
+void NVJPEGEncoder::Initialize(std::string input, std::string format) {
     CUdevice cuDevice_ = 0;
     int idx = 0;
     int ret = cuDeviceGet(&cuDevice_, idx);
@@ -59,8 +59,9 @@ void NVJPEGEncoder::Initialize(std::string input) {
             &pinned_allocator, 0,  &nvjpegHandle_);
     nvjpegJpegStateCreate(nvjpegHandle_, &jpegState_);
     nvjpegEncoderStateCreate(nvjpegHandle_, &encoderState_, stream_);
-    outputfmt_ = NVJPEG_OUTPUT_YUV;
-    nvjpegDecodeBatchedInitialize(nvjpegHandle_, jpegState_, batch_size_, 1, outputfmt_);
+    nvjpegEncoderParamsCreate(nvjpegHandle_, &encode_params_, stream_);
+    nvjpegEncoderParamsSetQuality(encode_params_, 75, stream_);
+    nvjpegEncoderParamsSetOptimizedHuffman(encode_params_, 1, stream_);
 
     struct stat info;
     if (stat(input.c_str(), &info) != 0) {
@@ -95,9 +96,7 @@ void NVJPEGEncoder::Initialize(std::string input) {
     if (file_names_.size() > 16) {
         batch_size_ = 16;
     }
-    if (batch_size_ == 1) {
-        create_decouple_api();
-    }
+
     ret = cudaStreamCreateWithFlags(&stream_, cudaStreamNonBlocking);
     if (ret != CUDA_SUCCESS) {
         std::cerr << "Fail to create cuda stream" << std::endl;
@@ -122,41 +121,11 @@ void NVJPEGEncoder::Initialize(std::string input) {
     }
 }
 
-void NVJPEGEncoder::create_decouple_api()
-{
-    // int ret = nvjpegDecoderCreate(nvjpegHandle_, NVJPEG_BACKEND_DEFAULT, &decoder_);
-    // ret = nvjpegDecoderStateCreate(nvjpegHandle_, decoder_, &decoupled_state_);
-
-    int ret = nvjpegBufferPinnedCreate(nvjpegHandle_, NULL, &pinned_buffers_[0]);
-    ret = nvjpegBufferPinnedCreate(nvjpegHandle_, NULL, &pinned_buffers_[1]);
-    ret = nvjpegBufferDeviceCreate(nvjpegHandle_, NULL, &device_buffer_);
-
-    ret = nvjpegJpegStreamCreate(nvjpegHandle_, &jpeg_streams_[0]);
-    ret = nvjpegJpegStreamCreate(nvjpegHandle_, &jpeg_streams_[1]);
-    ret = nvjpegEncoderParamsCreate(nvjpegHandle_, &encode_params_, stream_);
-}
-
-void NVJPEGEncoder::destroy_deouple_api() {
-    int ret = nvjpegEncoderParamsDestroy(encode_params_);
-    ret = nvjpegJpegStreamDestroy(jpeg_streams_[0]);
-    ret = nvjpegJpegStreamDestroy(jpeg_streams_[1]);
-    ret = nvjpegBufferPinnedDestroy(pinned_buffers_[0]);
-    ret = nvjpegBufferPinnedDestroy(pinned_buffers_[1]);
-    ret = nvjpegBufferDeviceDestroy(device_buffer_);
-    ret = nvjpegJpegStateDestroy(decoupled_state_);
-    // ret = nvjpegDecoderDestroy(decoder_);
-}
-
 void NVJPEGEncoder::Finalize() {
     cudaStreamDestroy(stream_);
-
-    if (batch_size_ == 1) {
-        destroy_deouple_api();
-    }
     nvjpegEncoderStateDestroy(encoderState_);
     nvjpegJpegStateDestroy(jpegState_);
     nvjpegDestroy(nvjpegHandle_);
-
     cuCtxDestroy(cuContext_);
 }
 
@@ -195,22 +164,17 @@ int NVJPEGEncoder::FillData() {
     }
 
     int channels;
-    nvjpegChromaSubsampling_t subsampling;
+    nvjpegInputFormat_t input_format = NVJPEG_INPUT_BGR;
+    nvjpegChromaSubsampling_t subsampling = NVJPEG_CSS_420;
     int widths[NVJPEG_MAX_COMPONENT];
     int heights[NVJPEG_MAX_COMPONENT];
 
     for (int i = 0; i < data_.size(); i++) {
-        nvjpegGetImageInfo(nvjpegHandle_, (const unsigned char*)data_[i].data(), file_len_[i],
-            &channels, &subsampling, widths, heights);
         
         img_widths_[i] = widths[0];
         img_heights_[i] = heights[0];
         subsamplings_[i] = subsampling;
-        std::cout << "Image is " << channels << " channels." << std::endl;
-        for (int c = 0; c < channels; c++) {
-            std::cout << "Channel #" << c << " size: " << widths[c] << " x "
-                    << heights[c] << std::endl;
-        }
+
         switch (subsampling) {
         case NVJPEG_CSS_444:
             std::cout << "YUV 4:4:4 chroma subsampling" << std::endl;
@@ -240,17 +204,7 @@ int NVJPEGEncoder::FillData() {
         int mul = 1;
         // in the case of interleaved RGB output, write only to single channel, but
         // 3 samples at once
-        if (outputfmt_ == NVJPEG_OUTPUT_RGBI || outputfmt_ == NVJPEG_OUTPUT_BGRI) {
-            channels = 1;
-            mul = 3;
-        }
-        // in the case of rgb create 3 buffers with sizes of original image
-        else if (outputfmt_ == NVJPEG_OUTPUT_RGB ||
-            outputfmt_ == NVJPEG_OUTPUT_BGR) {
-            channels = 3;
-            widths[1] = widths[2] = widths[0];
-            heights[1] = heights[2] = heights[0];
-        }
+         
         for (int c = 0; c < channels; c++) {
             int aw = mul * widths[c];
             int ah = heights[c];
@@ -266,116 +220,55 @@ int NVJPEGEncoder::FillData() {
         }
     }
 
+    // Image buffers.
+    unsigned char * pBuffer = NULL;
+    cudaMalloc((void**)&pBuffer, widths[0] * heights[0] * NVJPEG_MAX_COMPONENT);
     cudaEventCreate(&startEvent);
     cudaEventCreate(&stopEvent);
-    if (batch_size_ == 1) {
-        cudaEventRecord(startEvent, stream_);
-        for (int i = 0; i < batch_size_; i++) {
-            // nvjpegEncodeYUV(nvjpegHandle_, encoderState_, encode_params_, (const unsigned char *)data_[i].data(), file_len_[i], outputfmt_, &out_[i], stream_);
-        }
-        cudaEventRecord(stopEvent, stream_);
-    } else {
-        std::vector<const unsigned char *> raw_inputs;
-        for (int i = 0; i < batch_size_; i++) {
-            raw_inputs.push_back((const unsigned char *)data_[i].data());
-        }
-        cudaEventRecord(startEvent, stream_);
-        nvjpegDecodeBatched(nvjpegHandle_, jpegState_, raw_inputs.data(), file_len_.data(), out_.data(), stream_);
-        cudaEventRecord(stopEvent, stream_);
+
+    std::vector<const unsigned char *> raw_inputs;
+    for (int i = 0; i < batch_size_; i++) {
+        raw_inputs.push_back((const unsigned char *)data_[i].data());
     }
+    cudaEventRecord(startEvent, stream_);
+    nvjpegImage_t imgdesc = {
+        {
+            pBuffer,
+            pBuffer + widths[0]*heights[0],
+            pBuffer + widths[0]*heights[0]*2,
+            pBuffer + widths[0]*heights[0]*3
+        },
+        {
+            (unsigned int)((outputfmt_ == NVJPEG_OUTPUT_RGBI || outputfmt_ == NVJPEG_OUTPUT_BGRI) ? widths[0] * 3 : widths[0]),
+            (unsigned int)widths[0],
+            (unsigned int)widths[0],
+            (unsigned int)widths[0]
+        }
+    };
+    if (outputfmt_ == NVJPEG_OUTPUT_YUV) {
+        // For YUV output, use nvjpegEncodeYUV
+        nvjpegEncodeYUV(nvjpegHandle_, encoderState_, encode_params_, &imgdesc, subsampling, widths[0], heights[0], stream_);
+    } else {
+        // For other formats, use nvjpegEncodeImage
+        nvjpegEncodeImage(nvjpegHandle_, encoderState_, encode_params_, &imgdesc, input_format, widths[0], heights[0], stream_);
+    }
+    cudaEventRecord(stopEvent, stream_);
+
     num_decoded += batch_size_;
     cudaEventSynchronize(stopEvent);
     cudaEventElapsedTime(&loopTime, startEvent, stopEvent);
     time = static_cast<double>(loopTime);
-    std::cout << "Decode time " << time << std::endl;
+    std::cout << "Encode time " << time << std::endl;
     return num_decoded;
 }
 
-
-uint8_t* NVJPEGEncoder::GetFrame(int *framesize) {
+uint8_t* NVJPEGEncoder::GetFrame(int *framesize, int *height, int *width, int *n_chan) {
     int idx = batch_size_ - num_decoded;
     int total_size = 0;
+    nvjpegEncodeRetrieveBitstream(nvjpegHandle_, encoderState_, nullptr, (size_t*)&total_size, stream_);
 
-    // Calculate total size for YUV format
-    for (int c = 0; c < NVJPEG_MAX_COMPONENT; c++) {
-        if (out_[idx].channel[c] != nullptr) {
-            total_size += img_heights_[idx] * out_[idx].pitch[c];
-        }
-    }
-
-    // Allocate memory for the combined frame
     uint8_t* combined_frame = (uint8_t*)malloc(total_size);
-    if (!combined_frame) {
-        std::cerr << "Failed to allocate memory for combined frame" << std::endl;
-        return nullptr;
-    }
-
-    // Copy each channel into the combined buffer
-    int offset = 0;
-
-    if (outputfmt_ == NVJPEG_OUTPUT_YUV) {
-        // Interleave YUV channels based on subsampling
-        for (int c = 0; c < NVJPEG_MAX_COMPONENT; c++) {
-            if (out_[idx].channel[c] != nullptr) {
-                int subsample_factor_h = 1;
-                int subsample_factor_w = 1;
-
-                // Determine subsampling factors based on chroma subsampling type
-                switch (subsamplings_[idx]) {
-                    case NVJPEG_CSS_420:
-                        subsample_factor_h = (c == 0) ? 1 : 2; // Y: 1, UV: 2
-                        subsample_factor_w = (c == 0) ? 1 : 2;
-                        break;
-                    case NVJPEG_CSS_422:
-                        subsample_factor_h = 1;
-                        subsample_factor_w = (c == 0) ? 1 : 2; // Y: 1, UV: 2
-                        break;
-                    case NVJPEG_CSS_444:
-                        subsample_factor_h = 1;
-                        subsample_factor_w = 1; // No subsampling
-                        break;
-                    case NVJPEG_CSS_440:
-                        subsample_factor_h = (c == 0) ? 1 : 2; // Y: 1, UV: 2
-                        subsample_factor_w = 1;
-                        break;
-                    case NVJPEG_CSS_411:
-                        subsample_factor_h = 1;
-                        subsample_factor_w = (c == 0) ? 1 : 4; // Y: 1, UV: 4
-                        break;
-                    case NVJPEG_CSS_410:
-                        subsample_factor_h = (c == 0) ? 1 : 2; // Y: 1, UV: 2
-                        subsample_factor_w = (c == 0) ? 1 : 4;
-                        break;
-                    case NVJPEG_CSS_GRAY:
-                        subsample_factor_h = 1;
-                        subsample_factor_w = 1; // Grayscale
-                        break;
-                    default:
-                        std::cerr << "Unsupported chroma subsampling type" << std::endl;
-                        return nullptr;
-                }
-
-                int channel_height = img_heights_[idx] / subsample_factor_h;
-                int channel_width = out_[idx].pitch[c];
-
-                for (int h = 0; h < channel_height; h++) {
-                    cudaMemcpy(combined_frame + offset + h * channel_width,
-                               out_[idx].channel[c] + h * out_[idx].pitch[c],
-                               channel_width, cudaMemcpyDeviceToHost);
-                }
-                offset += channel_height * channel_width;
-            }
-        }
-    } else {
-        // Default behavior for non-YUV formats
-        for (int c = 0; c < NVJPEG_MAX_COMPONENT; c++) {
-            if (out_[idx].channel[c] != nullptr) {
-                int channel_size = img_heights_[idx] * out_[idx].pitch[c];
-                cudaMemcpy(combined_frame + offset, out_[idx].channel[c], channel_size, cudaMemcpyDeviceToHost);
-                offset += channel_size;
-            }
-        }
-    }
+    nvjpegEncodeRetrieveBitstream(nvjpegHandle_, encoderState_, combined_frame, (size_t*)&total_size, stream_);
 
     *framesize = total_size;
     return combined_frame;

@@ -8,6 +8,7 @@
 #include <sys/types.h>
 
 #include "parse_cli.h"
+#include "bmp_write.h"
 
 #include "decoder.h"
 
@@ -20,13 +21,12 @@ int main(int argc, char *argv[]) {
     CommandLineParser cli;
     cli.parse(argc, argv);
 
-    auto dec = halcodec::Decoder::Create("vtbox");
+    auto dec = halcodec::Decoder::Create("nvjpeg");
     if (!dec) {
         std::cerr << "Fail to create decoder" << std::endl;
         return -1;
     }
     std::string input = cli.getInputFile();
-    dec->Initialize(input);
 
     struct stat info;
     if (stat(input.c_str(), &info) != 0) {
@@ -42,7 +42,7 @@ int main(int argc, char *argv[]) {
         }
         if ((dir = opendir(input.c_str())) != NULL) {
             while ((ent = readdir(dir)) != NULL) {
-                if (ent->d_type == DT_REG) { // Regular file
+                if (ent->d_type == DT_REG) {
                     std::string inputFileName = input + '/' + ent->d_name;
                     size_t lastDot = inputFileName.find_last_of('.');
                     if (lastDot != std::string::npos) {
@@ -54,17 +54,19 @@ int main(int argc, char *argv[]) {
             closedir(dir);
         }
     } else {
-        files.push_back(cli.getOutputFile() + '.' + cli.getFormat());
+        files.push_back(cli.getOutputFile());
     }
 
     for (auto p : files) {
         std::cout << p << std::endl;
     }
     int fidx = 0;
-    std::ofstream fpout(files[fidx++], std::ios::out|std::ios::binary);
-    if (!fpout) {
-        std::cerr << "unable to open output file" << std::endl;
+    std::ofstream fpout;
+    if (dec->getName() != "nvjpeg") {
+        fpout.open(files[fidx++], std::ios::out|std::ios::binary);
     }
+
+    dec->Initialize(input, cli.getFormat());
     int n_dec = 0;
     int total_frames = 0;
     do {
@@ -72,17 +74,27 @@ int main(int argc, char *argv[]) {
         total_frames += n_dec;
         for (int i = 0; i < n_dec; i++) {
             int size;
-            auto data = dec->GetFrame(&size);
-            fpout.write(reinterpret_cast<char *>(data), size);
-            if (dec->getName() == "nvjpeg" && fidx < files.size()) {
-                fpout.close();
-                fpout.open(files[fidx++], std::ios::out|std::ios::binary);
+            int width;
+            int height;
+            int n_chan;
+            auto data = dec->GetFrame(&size, &height, &width, &n_chan);
+            if (cli.getFormat() == "bgr" || cli.getFormat() == "rgb" || cli.getFormat() == "rgbi" || cli.getFormat() == "bgri") {
+                BMPWriter writer(files[fidx++], cli.getFormat());                
+                writer.writeBMP(data, width, height, n_chan);
+            } else {
+                fpout.write(reinterpret_cast<char *>(data), size);
+                if (dec->getName() == "nvjpeg" && fidx < files.size()) {
+                    fpout.close();
+                    fpout.open(files[fidx++], std::ios::out|std::ios::binary);
+                }
             }
             dec->ReleaseFrame(&data);
         }
     } while (n_dec > 0);
 
-    fpout.close();
+    if (dec->getName() != "nvjpeg") {
+        fpout.close();
+    }
     dec->Finalize();
 
     std::cout << "Decode total frames: "<< total_frames << std::endl;

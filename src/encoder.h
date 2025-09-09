@@ -35,13 +35,13 @@ public:
     }
 
     // Initialize the encoder with specific settings
-    virtual void Initialize(std::string input) {}
+    virtual void Initialize(std::string input, std::string format) {}
     // Finalize the encoding process
     virtual void Finalize() {}
 
     // Encode raw input data and return encoded output
     virtual int FillData() { return 0;}
-    virtual uint8_t* GetFrame(int *framesize) { return nullptr;}
+    virtual uint8_t* GetFrame(int *framesize, int *height, int *width, int *n_chan) { return nullptr;}
     virtual void ReleaseFrame(uint8_t **pFrame) {}
 
 

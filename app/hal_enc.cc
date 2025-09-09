@@ -24,7 +24,6 @@ int main(int argc, char *argv[]) {
         return -1;
     }
     std::string input = cli.getInputFile();
-    enc->Initialize(input);
 
     struct stat info;
     if (stat(input.c_str(), &info) != 0) {
@@ -52,7 +51,7 @@ int main(int argc, char *argv[]) {
             closedir(dir);
         }
     } else {
-        files.push_back(cli.getOutputFile() + '.' + cli.getFormat());
+        files.push_back(cli.getOutputFile());
     }
 
     for (auto p : files) {
@@ -63,6 +62,8 @@ int main(int argc, char *argv[]) {
     if (!fpout) {
         std::cerr << "unable to open output file" << std::endl;
     }
+
+    enc->Initialize(input, cli.getFormat());
     int n_enc = 0;
     int total_frames = 0;
     do {
@@ -70,7 +71,10 @@ int main(int argc, char *argv[]) {
         total_frames += n_enc;
         for (int i = 0; i < n_enc; i++) {
             int size;
-            auto data = enc->GetFrame(&size);
+            int width;
+            int height;
+            int n_chan;
+            auto data = enc->GetFrame(&size, &width, &height, &n_chan);
             fpout.write(reinterpret_cast<char *>(data), size);
             if (enc->getName() == "nvjpeg" && fidx < files.size()) {
                 fpout.close();
@@ -83,7 +87,7 @@ int main(int argc, char *argv[]) {
     fpout.close();
     enc->Finalize();
 
-    std::cout << "Decode total frames: "<< total_frames << std::endl;
+    std::cout << "Encode total frames: "<< total_frames << std::endl;
 
     return 0;
 }

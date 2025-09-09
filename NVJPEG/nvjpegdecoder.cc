@@ -24,7 +24,25 @@ NVJPEGDecoder::NVJPEGDecoder() {
 }
 
 
-void NVJPEGDecoder::Initialize(std::string input) {
+void NVJPEGDecoder::Initialize(std::string input, std::string format) {
+    if (format == "rgb") {
+        outputfmt_ = NVJPEG_OUTPUT_RGB;
+    } else if (format == "bgr") {
+        outputfmt_ = NVJPEG_OUTPUT_BGR;
+    } else if (format == "rgbi") {
+        outputfmt_ = NVJPEG_OUTPUT_RGBI;
+    } else if (format == "bgri") {
+        outputfmt_ = NVJPEG_OUTPUT_BGRI;
+    } else if (format == "yuv") {
+        outputfmt_ = NVJPEG_OUTPUT_YUV;
+    } else if (format == "y") {
+        outputfmt_ = NVJPEG_OUTPUT_Y;
+    } else if (format == "unchanged") {
+        outputfmt_ = NVJPEG_OUTPUT_UNCHANGED;
+    } else {
+        std::cout << "Unknown format: " << format << std::endl;
+        return;
+    }
     CUdevice cuDevice_ = 0;
     int idx = 0;
     int ret = cuDeviceGet(&cuDevice_, idx);
@@ -58,7 +76,6 @@ void NVJPEGDecoder::Initialize(std::string input) {
     nvjpegCreateEx(NVJPEG_BACKEND_HYBRID, &dev_allocator,
             &pinned_allocator, 0,  &nvjpegHandle_);
     nvjpegJpegStateCreate(nvjpegHandle_, &jpegState_);
-    outputfmt_ = NVJPEG_OUTPUT_YUV;
     nvjpegDecodeBatchedInitialize(nvjpegHandle_, jpegState_, batch_size_, 1, outputfmt_);
 
     struct stat info;
@@ -290,14 +307,16 @@ int NVJPEGDecoder::FillinFrame() {
 }
 
 
-uint8_t* NVJPEGDecoder::GetFrame(int *framesize) {
+uint8_t* NVJPEGDecoder::GetFrame(int *framesize, int *height, int *width, int *n_chan) {
     int idx = batch_size_ - num_decoded;
     int total_size = 0;
+    int chanels = 0;
 
     // Calculate total size for YUV format
     for (int c = 0; c < NVJPEG_MAX_COMPONENT; c++) {
         if (out_[idx].channel[c] != nullptr) {
             total_size += img_heights_[idx] * out_[idx].pitch[c];
+            chanels ++;
         }
     }
 
@@ -364,17 +383,27 @@ uint8_t* NVJPEGDecoder::GetFrame(int *framesize) {
                 offset += channel_height * channel_width;
             }
         }
-    } else {
-        // Default behavior for non-YUV formats
+    } else if (outputfmt_ == NVJPEG_OUTPUT_Y) {
+        //
+    } else if (outputfmt_ == NVJPEG_OUTPUT_BGR || outputfmt_ == NVJPEG_OUTPUT_RGB) {
         for (int c = 0; c < NVJPEG_MAX_COMPONENT; c++) {
             if (out_[idx].channel[c] != nullptr) {
                 int channel_size = img_heights_[idx] * out_[idx].pitch[c];
-                cudaMemcpy(combined_frame + offset, out_[idx].channel[c], channel_size, cudaMemcpyDeviceToHost);
+                cudaMemcpy2D(combined_frame + offset, img_widths_[idx], out_[idx].channel[c],
+                             out_[idx].pitch[c], img_widths_[idx], img_heights_[idx], cudaMemcpyDeviceToHost);
                 offset += channel_size;
             }
         }
+    } else if (outputfmt_ == NVJPEG_OUTPUT_BGRI || outputfmt_ == NVJPEG_OUTPUT_RGBI) {
+        if (out_[idx].channel[0] != nullptr) {
+            cudaMemcpy2D(combined_frame, img_widths_[idx] * 3, out_[idx].channel[0], out_[idx].pitch[0],
+                img_widths_[idx] * 3, img_heights_[idx], cudaMemcpyDeviceToHost);
+        }
     }
 
+    *height = img_heights_[idx];
+    *width = img_widths_[idx];
+    *n_chan = chanels;
     *framesize = total_size;
     return combined_frame;
 }
