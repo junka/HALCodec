@@ -5,6 +5,38 @@
 #include <string>
 #include <fstream>
 
+#pragma pack(push, 1)
+
+struct BMPFileHeader {
+    uint16_t type{0x4D42};          // BM
+    uint32_t size{0};
+    uint16_t reserved1{0};
+    uint16_t reserved2{0};
+    uint32_t offset{54};            // 14 + 40
+};
+
+struct BMPInfoHeader {
+    uint32_t size{40};
+    int32_t width{0};
+    int32_t height{0};              // 正数：bottom-up
+    uint16_t planes{1};
+    uint16_t bit_count{24};
+    uint32_t compression{0};
+    uint32_t image_size{0};
+    int32_t x_pixels_per_meter{0};
+    int32_t y_pixels_per_meter{0};
+    uint32_t colors_used{0};
+    uint32_t colors_important{0};
+};
+struct BMPColor {
+    uint8_t r;
+    uint8_t g;
+    uint8_t b;
+    uint8_t a;
+};
+
+#pragma pack(pop)
+
 class BMPWriter {
 public:
     BMPWriter(const std::string filename, std::string format = "rgb"): format_(format) {
@@ -20,38 +52,7 @@ public:
         file_.close();
     }
 
-    #pragma pack(push, 1)
-    struct BMPFileHeader {
-        uint16_t type{0x4D42};          // BM
-        uint32_t size{0};
-        uint16_t reserved1{0};
-        uint16_t reserved2{0};
-        uint32_t offset{54};            // 14 + 40
-    };
-    
-    struct BMPInfoHeader {
-        uint32_t size{40};
-        int32_t width{0};
-        int32_t height{0};              // 正数：bottom-up
-        uint16_t planes{1};
-        uint16_t bit_count{24};
-        uint32_t compression{0};
-        uint32_t image_size{0};
-        int32_t x_pixels_per_meter{0};
-        int32_t y_pixels_per_meter{0};
-        uint32_t colors_used{0};
-        uint32_t colors_important{0};
-    };
-    struct BMPColor {
-        uint8_t r;
-        uint8_t g;
-        uint8_t b;
-        uint8_t a;
-    };
-    #pragma pack(pop)
-
     int writeBMP(const uint8_t *data, int width, int height, int n_chan) {
-        FILE *outfile;
         int extrabytes;
         int paddedsize;
         int x;
@@ -124,10 +125,40 @@ public:
         return 0;
     }
 
-
 private:
     std::ofstream file_;
     std::string format_;
+};
+
+
+class BMPReader {
+public:
+    BMPReader(const std::string filename) {
+        file_.open(filename, std::ios::in|std::ios::binary);
+    }
+    ~BMPReader() {
+        file_.close();
+    }
+
+    uint8_t* readBMP(int *width, int *height, int *n_chan) {
+        uint8_t *data;
+        BMPFileHeader file_header;
+        BMPInfoHeader info_header;
+        file_.read(reinterpret_cast<char *>(&file_header), sizeof(file_header));
+        file_.read(reinterpret_cast<char *>(&info_header), sizeof(info_header));
+        *width = info_header.width;
+        *height = info_header.height;
+        *n_chan = info_header.bit_count/8;
+        if (info_header.colors_used) {
+            file_.seekg(info_header.colors_used * sizeof(struct BMPColor), std::ios_base::cur);
+        }
+        data = reinterpret_cast<uint8_t *>(malloc(info_header.image_size));
+        file_.read(reinterpret_cast<char *>(data), info_header.image_size);
+        return data;
+    }
+
+private:
+    std::ifstream file_;
 };
 
 #endif // BMP_WRITE_H

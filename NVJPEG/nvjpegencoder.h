@@ -49,14 +49,15 @@ private:
 
 private:
     int batch_size_ = 1;
+    std::string format_;
     std::vector<std::string> file_names_;
     std::vector<std::string>::iterator file_iter_;
     bool pipeline_ = false;
     nvjpegHandle_t nvjpegHandle_;
-    nvjpegJpegState_t jpegState_;
+
     nvjpegEncoderState_t encoderState_;
-    nvjpegOutputFormat_t outputfmt_;
-    // nvjpegJpegEncoder_t encoder_;
+    nvjpegInputFormat_t inputfmt_;
+
     cudaStream_t stream_;
 
     //decouple
@@ -67,7 +68,7 @@ private:
     nvjpegEncoderParams_t encode_params_;
 
     
-    std::vector<std::vector<char> > data_;
+    std::vector<uint8_t *> dev_data_;
     std::vector<size_t> file_len_;
     std::vector<nvjpegImage_t> out_;
     std::vector<nvjpegImage_t> isz_;

@@ -7,6 +7,7 @@
 #include <sys/stat.h>
 #include <sys/types.h>
 
+#include "bmp_write.h"
 #include "encoder.h"
 #include "parse_cli.h"
 
@@ -63,7 +64,7 @@ int main(int argc, char *argv[]) {
         std::cerr << "unable to open output file" << std::endl;
     }
 
-    enc->Initialize(input, cli.getFormat());
+    enc->Initialize(input, cli.getInputFormat());
     int n_enc = 0;
     int total_frames = 0;
     do {
@@ -74,7 +75,8 @@ int main(int argc, char *argv[]) {
             int width;
             int height;
             int n_chan;
-            auto data = enc->GetFrame(&size, &width, &height, &n_chan);
+            auto data = enc->GetFrame(&size, &height, &width, &n_chan);
+            printf("get frame size %d, w %d, h %d\n", size, width, height);
             fpout.write(reinterpret_cast<char *>(data), size);
             if (enc->getName() == "nvjpeg" && fidx < files.size()) {
                 fpout.close();
