@@ -1,0 +1,243 @@
+##############################################################################
+#
+# Copyright (c) 2020-2023 NVIDIA CORPORATION.  All Rights Reserved.
+#
+# NVIDIA CORPORATION and its licensors retain all intellectual property
+# and proprietary rights in and to this software, related documentation
+# and any modifications thereto.  Any use, reproduction, disclosure or
+# distribution of this software and related documentation without an express
+# license agreement from NVIDIA CORPORATION is strictly prohibited.
+#
+#
+###############################################################################
+
+This README file describes the setup of the PDK and environment for running the sample application on
+both QNX and Linux Operating systems.
+
+1- QNX setup:
+=============
+
+	Clearing previous installation:
+	======================
+	Check if previous version is already present in the host PC
+
+		sudo dpkg -l | grep "nv-driveos-build-sdk" - For sdk debian package
+		sudo dpkg -l | grep "nv-driveos-qnx-qa-toolchain" - For QNX toolchain debian package
+
+	Remove the previous sdk and qnx toolchain installations
+
+		sudo apt remove --purge nv-driveos-build-sdk-qnx-* - For sdk debian package
+		sudo apt remove --purge nv-driveos-qnx-qa-toolchain-* - For QNX toolchain debian package
+
+	Setting up PDK folder:
+	======================
+	Make a directory (mkdir <top>) to copy the PDK package onto.
+	cd to <top> then extract the PDK package, and then run the following commands:
+
+		sudo -E apt -f -y --reinstall install "nv-driveos-build-sdk-qnx-*"
+		(Extract all files as per installer.list to ensure dependencies are met)
+		sudo -E apt -f -y --reinstall install ./nv-driveos-qnx-qa-<branch>-<GCID>_<branch>-<GCID>_amd64.deb
+
+	Setting Environment Variables:
+	==============================
+	After extraction of the PDK on the host PC, execute the following instructions to set up the environment variables:
+
+		export TOOLCHAIN_DIR_HOST=$PDK_TOP/toolchains/qnx_toolchain
+		(where PDK_TOP is the directory the files from previous step are installed)
+		export QNX_TOP=$PDK_TOP/drive-qnx
+		export QNX_BASE=$TOOLCHAIN_DIR_HOST
+		export QNX_TARGET=$QNX_BASE/target/qnx7
+		export QNX_HOST=$QNX_BASE/host/linux/x86_64
+
+	Build the sample application on the host PC:
+	============================================
+	The following are the instructions to build the sample application, pkcs11_reference_application:
+
+		cd $PDK_TOP/drive-qnx/samples/nvpkcs11/external/
+		make -f Makefile
+
+	Check the build is successful and that you have the built pkcs11_reference_application.
+
+	Unwrap reference sample:
+	==============================
+	The aim of the unwrap reference sample code is to demonstrate usage of the C_UnwrapKey
+	API to provision a wrapped key.
+
+	The wrapping key, used by the PKCS#11 Object Generation Tool to generate wrapped key
+	objects, and the unwrapping key, used by the PKCS#11 library on the target, are both
+	derived from a fuse-based key named "NV_OEM_KEY1".
+	(Refer to "Derivation from Fuse-based Keys" in NVIDIA Drive OS SDK Developer Guide)
+
+	To pass the unwrapped key section of the code, make sure the wrapped keys are generated
+	and copied to the same folder as the application. The derived unwrapping key needs to have
+	the same length as the key used for wrapping (i.e both 16 or both 32 bytes).
+
+	For more details on wrapped key generation please see:
+		drive-foundation/tools/security/pkcs11/keywrap/README
+
+	In this application these files are used
+		- Test_Sign_key.aad
+		- Test_Sign_key.iv
+		- Test_Sign_key.keytag
+		- Test_Sign_key.label
+		- Test_Sign_key.ctxt
+
+	Exception: Fuse-based key unknown or board not fused
+	-----------------------------------------------------
+	In the event that the NV_OEM_KEY1 is not known or not fused, an independent secret key
+	value can be provided.  For development purposes only, NOT to be used for production.
+
+	To enable this, one additional file needs to be copied over.
+		- Example_dev_only_key.bin
+
+	This file should contain a binary array representing a 16 or 32 byte key value, matching
+	the one used with the PKCS#11 Object Generation Tool. If this file is present, this key
+	will be used instead of NV_OEM_KEY1 to derive the unwrapping key.
+
+	Run the application on target:
+	==============================
+	The following are the instructions to mount and run the application on the target guest VM:
+
+		fs-nfs3 -vv -t $HOST_IP:/$PDK_TOP/drive-qnx/samples/nvpkcs11/external/ /external
+		where HOST_IP is the IP address of the host PC where the PDK is extracted
+
+	To run the application:
+		cd /external
+
+	1. To run the application with root privileges (not suitable for production)
+
+		./pkcs11_reference_application (or)
+		iolauncher -U 0:0 ./pkcs11_reference_application
+
+	2. Permissions needed to run the application with non-root privileges
+
+		GIDs always required:
+		# 3000 io_nvsys
+
+		GIDs always required for CCPLEX tokens:
+		# 2281 nvvse-aes0 (gpse default low)
+		# 2282 nvvse-aes1 (gpse default low)
+		# 2283 nvvse-sha  (gpse default low)
+		# 3780 devc-nvtzvault-crypto_asym_service
+		# 3790 devc-nvtzvault-crypto_sym_service
+
+		GIDs needed as part of the sample code examples:
+		# 7109 nvvse-tzse-sha1 (tzse high 1) (Only needed because TZSE_SHA_HIGH_GID channel is used in the sample code)
+		# 6004 devc-nvtzvault-pkcs11_keystore_service_4 (Only needed because CCPLEX_DYNAMIC_2 is used in sample code)
+
+		Additional GIDs required for non-safety build only:
+		# 3500 devc-nvtzvault
+		# 2280 nvvse
+		# 3640 nvpkcs11
+
+		Additional GIDs required for safety build only:
+		# 45040 nvpkcs11
+		# 40002 libc.so.5
+		# 40006 libslog2.so.1
+		# 45011 libgp.so
+		# 45037 libnvos_s3_safety.so
+		# 45057 libnvvse-safety.so
+		# 45066 libnvdtcommon.so
+		# 45071 libnvsocsys.so
+		# 45112 libnvdvms_client.so
+
+		Custom abilities required by every PKCS#11 library application:
+		# nvtzvault/crypto_ability (Common for all tokens)
+
+		Custom abilities required for CCPLEX tokens:
+		# nvvse/Engines:0-2 (Allow access to GP-SE)
+		# nvvse/Engines:3-5 (Allow access to TZ-SE, required for use with TZSE_SHA_HIGH_GID channel)
+
+		Custom abilities for access to CCPLEX_DYNAMIC_2 token:
+		# nvtzvault/pkcs11ks_dynamic_token_2_ability
+
+		Custom abilities for NVDVMS access required for safety build only:
+		# nvsys/system_info (Allow access to system information)
+		# Nvdvms/ClientCommGetState (Allow access to NVDVMS framework)
+
+		Note1:
+			In order to use a token, an application must have access to both keys and engines.
+			The permissions for these are handled separately. In the above example, we will use
+			the keys from the CCPLEX_DYNAMIC_2 token, and use the GP-SE hardware engines.
+
+			GID 6004 is to allow CCPLEX_DYNAMIC_2 token to be accessed. Other tokens will require
+			different GIDs, these are listed in the PDK documentation.
+
+			The library will attempt to connect to all tokens when C_Initialize is called. You will see warnings
+			about failing to connect to tokens that you do not have permission to use - these can be safely ignored.
+
+		Note2:
+			When running as non-root on both safety and non-safety builds, QNX custom ability needs
+			to be defined to access nvvse drivers (for hardware engine), tzvault tokens (for keys)
+			and crypto TA services.
+
+		For further details on permissions, please refer to the appropriate section in the PDK documentation.
+
+	3. Conclusion
+		To run the sample app as non-root on a safety build, using nvvse and the CCPLEX_DYNAMIC_2 token:
+
+		iolauncher -U 45040:2281,2282,2283,7109,3000,3780,3790,6004,40002,40006,45011,45037,45040,45057,45066,45071,45112 \
+			-A nonroot,allow,able=nvvse/Engines:0-5 \
+			-A nonroot,allow,able=nvtzvault/pkcs11ks_dynamic_token_2_ability \
+			-A nonroot,allow,able=nvtzvault/crypto_ability \
+			-A nonroot,allow,able=nvsys/system_info \
+			-A nonroot,allow,able=Nvdvms/ClientCommGetState \
+			./pkcs11_reference_application
+
+		To run the sample app as non-root on a non-safety build, using nvvse and the CCPLEX_DYNAMIC_2 token:
+
+		iolauncher -U 3640:3000,3500,2280,2281,2282,2283,3640,3780,3790,6004,7109 \
+			-A nonroot,allow,able=nvvse/Engines:0-5 \
+			-A nonroot,allow,able=nvtzvault/pkcs11ks_dynamic_token_2_ability \
+			-A nonroot,allow,able=nvtzvault/crypto_ability \
+			./pkcs11_reference_application
+
+	Refer to PDK documentation for more details on custom abilities
+
+2- Linux setup:
+===============
+
+	Clearing previous installation:
+	======================
+	Check if previous version is already present in the host PC
+
+		sudo dpkg -l | grep "nv-driveos-build-*" - For linux debian package
+
+	Remove the previous sdk and qnx toolchain installations
+
+		sudo apt remove --purge nv-driveos-build-* - For all linux debian package
+		sudo apt autoremove
+
+	Setting up the PDK folder:
+	==========================
+	On the host PC, make a directory (mkdir <top>) to copy the PDK package onto.
+	cd to <top> then extract the PDK package, and then run the following commands:
+
+	sudo -E apt -f -y --reinstall install "nv-driveos-build-pdk-linux-*"
+	(Extract all files as per installer.list to ensure dependencies are met)
+
+	Build the sample application on the host PC:
+	============================================
+	The followings are the instructions to build the sample application, pkcs11_reference_application:
+
+		cd <top>/drive-linux/samples/nvpkcs11/external/
+		make -f Makefile
+
+	Check the build is successful and that you have the built pkcs11_reference_application.
+
+	Run the application on target:
+	==============================
+	To run the application on the target guest OS (GOS), you need to copy the application as well
+	as the generated wrapped keys files from the host PC onto the target.
+
+	For more details on generation of the wrapped keys please see:
+		drive-foundation/tools/security/pkcs11/keywrap/README
+
+	scp <user>@<HOST_IP>:/<top>/drive-linux/samples/nvpkcs11/external/ /external
+		Where <HOST_IP> is the IP address of the host PC.
+
+	cd /external
+
+	To run the application, any command that uses pkcs11 needs to have tzvault privileges.
+	This can be done by adding the user temporarily to the tzvault group via sudo as follows:
+		sudo -u <username to run as> -g tzvault ./pkcs11_reference_application
