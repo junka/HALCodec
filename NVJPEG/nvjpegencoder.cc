@@ -209,6 +209,7 @@ int NVJPEGEncoder::FillData() {
                 return -1;
             }
             file_len_[i] = size;
+            subsamplings_[i] =  NVJPEG_CSS_420;
         } else {
             // assume it is yuv, try get width and height from filename
             std::regex pattern(R"((\d+)[xX](\d+))");
@@ -228,6 +229,17 @@ int NVJPEGEncoder::FillData() {
             }
             cudaMemcpy(dev_data_[i], data.data(), size, cudaMemcpyHostToDevice);   
             file_len_[i] = size;
+            if (size == img_heights_[i] * img_widths_[i] * 3) {
+                subsamplings_[i] =  NVJPEG_CSS_444;
+            } else if (size == img_heights_[i] * img_widths_[i] * 2) {
+                subsamplings_[i] =  NVJPEG_CSS_440;
+            } else if (size == img_heights_[i] * img_widths_[i] * 3/2) {
+                subsamplings_[i] =  NVJPEG_CSS_420;
+            } else if (size == img_heights_[i] * img_widths_[i] * 5/4) {
+                subsamplings_[i] =  NVJPEG_CSS_411;
+            } else if (size == img_heights_[i] * img_widths_[i] * 9/8) {
+                subsamplings_[i] =  NVJPEG_CSS_410;
+            }
         }
         std::cout << "Processing: " << *file_iter_ << std::endl;
     }
@@ -245,12 +257,9 @@ int NVJPEGEncoder::FillData() {
     } else if (format_ == "bgr") {
         inputfmt_ = NVJPEG_INPUT_BGR;
     }
-    nvjpegChromaSubsampling_t subsampling = NVJPEG_CSS_420;
-
     for (int i = 0; i < dev_data_.size(); i++) {
-        subsamplings_[i] = subsampling;
 
-        switch (subsampling) {
+        switch (subsamplings_[i]) {
         case NVJPEG_CSS_444:
             std::cout << "YUV 4:4:4 chroma subsampling" << std::endl;
             break;
@@ -301,7 +310,7 @@ int NVJPEGEncoder::FillData() {
             {
                 dev_data_[i],
                 dev_data_[i] + img_widths_[i] * img_heights_[i],
-                dev_data_[i] + img_widths_[i] * img_heights_[i] * 2,
+                dev_data_[i] + img_widths_[i] * img_heights_[i] * 3/2,
                 dev_data_[i] + img_widths_[i] * img_heights_[i] * 3
             },
             {
@@ -314,7 +323,7 @@ int NVJPEGEncoder::FillData() {
         printf("encode height %d, width %d\n", img_heights_[i], img_widths_[i]);
         if (format_ == "yuv") {
             // For YUV output, use nvjpegEncodeYUV
-            ret = nvjpegEncodeYUV(nvjpegHandle_, encoderState_, encode_params_, &imgdesc, subsampling, img_widths_[i], img_heights_[i], stream_);
+            ret = nvjpegEncodeYUV(nvjpegHandle_, encoderState_, encode_params_, &imgdesc, subsamplings_[i], img_widths_[i], img_heights_[i], stream_);
             if (ret != NVJPEG_STATUS_SUCCESS) {
                 std::cout << "fail to nvjpegEncodeYUV " << ret << std::endl;
                 return 0;

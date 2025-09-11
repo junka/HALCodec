@@ -23,6 +23,7 @@ public:
                 ("gpu", po::value<int>(&gpuIndex_)->default_value(0), "GPU index")
                 ("format,f", po::value<std::string>(&format_)->default_value("yuv"),
                  "Output planar format: yuv/y/rbg/bgr/bgri/rgbi for nvjpeg decoding")
+                ("codec,c", po::value<std::string>(&codec_)->default_value("h264"))
                 ("colorspace,c", po::value<std::string>(&cs_)->default_value("420"), "Color sapce: 420/444/410");
 
             // Parse the command line
@@ -66,6 +67,7 @@ private:
     std::string format_;
     std::string input_format_;
     std::string cs_;
+    std::string codec_;
 };
 
 #endif // PARSE_CLI_H

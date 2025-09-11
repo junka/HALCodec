@@ -19,7 +19,7 @@ int main(int argc, char *argv[]) {
     CommandLineParser cli;
     cli.parse(argc, argv);
 
-    auto enc = halcodec::Encoder::Create("nvjpeg");
+    auto enc = halcodec::Encoder::Create("nvenc");
     if (!enc) {
         std::cerr << "Fail to create encoder" << std::endl;
         return -1;
@@ -64,7 +64,7 @@ int main(int argc, char *argv[]) {
         std::cerr << "unable to open output file" << std::endl;
     }
 
-    enc->Initialize(input, cli.getInputFormat());
+    enc->Initialize(input, cli.getFormat());
     int n_enc = 0;
     int total_frames = 0;
     do {
