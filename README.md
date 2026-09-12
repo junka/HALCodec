@@ -29,9 +29,13 @@ All types live in the `halcodec` namespace:
 |-------------|----------|----------|---------------|-------------|
 | NVIDIA NVENC/NVDEC | `nvdec` | `nvenc` (empty) | `nvidia` | Linux + CUDA |
 | NVIDIA NVJPEG | `nvjpeg` | -        | -             | Linux + CUDA |
+| AMD AMF     | `amfdec` | `amfenc` (empty) | `amf`    | Linux + AMD |
 | Apple VideoToolbox | `vtbox`  | -        | `vtbox`       | macOS        |
 
-NvMedia (tegra) and AMD AMF adapters are planned.
+NvMedia (tegra) is planned. The AMF adapter is built only when the AMF SDK
+headers are present under `AMF/AMF-1.4.36/amf/public/include`; the AMF runtime
+(`libamfrt64.so.1`) is dlopen'd at runtime and is required on the machine
+where the binary runs.
 
 ## Layout
 
@@ -40,6 +44,7 @@ src/                 unified interface headers
 NVEnc/layers/        NVIDIA adapter (nvenc namespace)
 NVJPEG/layers/       NVIDIA JPEG adapter (nvjpeg namespace)
 VideoToolbox/layers/ Apple adapter (vtbox namespace)
+AMF/layers/          AMD adapter (amd namespace), Linux-only
 app/                 example CLIs
 ```
 
@@ -51,8 +56,8 @@ backend with `-b/--backend`; when omitted, the platform default is used:
 
 | Tool      | Default backend         | Alternative backends |
 |-----------|-------------------------|----------------------|
-| `hal_dec` | macOS: `vtbox`, Linux: `nvdec` | `nvjpeg` |
-| `hal_enc` | `nvenc`                 | -                    |
+| `hal_dec` | macOS: `vtbox`, Linux: `nvdec` | `nvjpeg`, `amfdec` |
+| `hal_enc` | `nvenc`                 | `amfenc` |
 | `codecinfo` | all registered capability providers | `-b` restricts to one |
 
 Common options (from `app/parse_cli.h`):

@@ -27,6 +27,9 @@ else()
             nvenc_layers
             nvjpeg_layers
             -Wl,--as-needed)
+    if(AMF_SDK_DIR)
+        list(APPEND LINK_LAYERS -Wl,--no-as-needed amf_layers -Wl,--as-needed)
+    endif()
 endif()
 
 target_link_libraries(hal_enc PUBLIC ${LINK_LAYERS} Boost::program_options)
