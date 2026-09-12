@@ -42,3 +42,8 @@
 
 build
 NVEnc/Video_Codec_SDK_13.0.19/Samples
+
+# AMF SDK: track the headers/docs (needed at build time), skip the 1.2G
+# third-party binaries and CI metadata (akin to .git).
+AMF/AMF-*/.github/
+AMF/AMF-*/Thirdparty/
