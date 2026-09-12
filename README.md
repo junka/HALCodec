@@ -30,12 +30,15 @@ All types live in the `halcodec` namespace:
 | NVIDIA NVENC/NVDEC | `nvdec` | `nvenc` (empty) | `nvidia` | Linux + CUDA |
 | NVIDIA NVJPEG | `nvjpeg` | -        | -             | Linux + CUDA |
 | AMD AMF     | `amfdec` | `amfenc` (empty) | `amf`    | Linux + AMD |
+| Intel QSV   | `qsvdec` | `qsvenc` (empty) | `qsv`    | Linux + Intel iGPU |
 | Apple VideoToolbox | `vtbox`  | -        | `vtbox`       | macOS        |
 
 NvMedia (tegra) is planned. The AMF adapter is built only when the AMF SDK
-headers are present under `AMF/AMF-1.4.36/amf/public/include`; the AMF runtime
+headers are present under `AMF/AMF-*/amf/public/include`; the AMF runtime
 (`libamfrt64.so.1`) is dlopen'd at runtime and is required on the machine
-where the binary runs.
+where the binary runs. Same for QSV: built only when libvpl headers exist
+under `QSV/libvpl-*/api`, with `libvpl.so.2` + an Intel media driver expected
+at runtime.
 
 ## Layout
 
@@ -45,6 +48,7 @@ NVEnc/layers/        NVIDIA adapter (nvenc namespace)
 NVJPEG/layers/       NVIDIA JPEG adapter (nvjpeg namespace)
 VideoToolbox/layers/ Apple adapter (vtbox namespace)
 AMF/layers/          AMD adapter (amd namespace), Linux-only
+QSV/layers/          Intel QSV/libvpl adapter (qsv namespace), Linux-only
 app/                 example CLIs
 ```
 
@@ -56,8 +60,8 @@ backend with `-b/--backend`; when omitted, the platform default is used:
 
 | Tool      | Default backend         | Alternative backends |
 |-----------|-------------------------|----------------------|
-| `hal_dec` | macOS: `vtbox`, Linux: `nvdec` | `nvjpeg`, `amfdec` |
-| `hal_enc` | `nvenc`                 | `amfenc` |
+| `hal_dec` | macOS: `vtbox`, Linux: `nvdec` | `nvjpeg`, `amfdec`, `qsvdec` |
+| `hal_enc` | `nvenc`                 | `amfenc`, `qsvenc` |
 | `codecinfo` | all registered capability providers | `-b` restricts to one |
 
 Common options (from `app/parse_cli.h`):

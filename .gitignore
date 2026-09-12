@@ -47,3 +47,7 @@ NVEnc/Video_Codec_SDK_13.0.19/Samples
 # third-party binaries and CI metadata (akin to .git).
 AMF/AMF-*/.github/
 AMF/AMF-*/Thirdparty/
+
+# libvpl SDK (QSV): track the full source (needed at build time), skip CI
+# metadata (akin to .git).
+QSV/libvpl-*/.github/
