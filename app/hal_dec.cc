@@ -1,6 +1,8 @@
 #include <cstdint>
 #include <fstream>
 #include <iostream>
+#include <string>
+#include <vector>
 
 #include <dirent.h>
 #include <unistd.h>
@@ -14,19 +16,109 @@
 #include "decoder.h"
 #include "frame.h"
 
-int main(int argc, char *argv[]) {
+namespace {
+
+bool ReadFile(const std::string& path, std::vector<uint8_t>* buf) {
+    std::ifstream in(path, std::ios::binary | std::ios::ate);
+    if (!in) {
+        return false;
+    }
+    std::streamsize size = in.tellg();
+    in.seekg(0, std::ios::beg);
+    buf->resize(static_cast<size_t>(size));
+    return static_cast<bool>(
+        in.read(reinterpret_cast<char*>(buf->data()), size));
+}
+
+// Scan an Annex-B H.264 stream for SPS (nalu type 7) and PPS (nalu type 8)
+// and pack them into AVCC extradata ([len:4][nalu]...), which is what the
+// decoders' Initialize() consumes.
+void AppendAvcc(std::vector<uint8_t>* avcc, const uint8_t* data, size_t n) {
+    avcc->push_back(static_cast<uint8_t>((n >> 24) & 0xFF));
+    avcc->push_back(static_cast<uint8_t>((n >> 16) & 0xFF));
+    avcc->push_back(static_cast<uint8_t>((n >> 8) & 0xFF));
+    avcc->push_back(static_cast<uint8_t>(n & 0xFF));
+    avcc->insert(avcc->end(), data, data + n);
+}
+
+bool ExtractParameterSets(const uint8_t* data, size_t size,
+                          std::vector<uint8_t>* extradata) {
+    std::vector<uint8_t> sps, pps;
+    size_t i = 0;
+    while (i + 4 <= size) {
+        // Find start code 00 00 01 or 00 00 00 01.
+        if (!(data[i] == 0 && data[i + 1] == 0 &&
+              (data[i + 2] == 1 ||
+               (i + 3 < size && data[i + 2] == 0 && data[i + 3] == 1)))) {
+            ++i;
+            continue;
+        }
+        size_t sc = (data[i + 2] == 1) ? 3 : 4;
+        size_t start = i + sc;
+
+        // Find the next start code to delimit this NALU.
+        size_t j = start + 1;
+        for (; j + 4 <= size; ++j) {
+            if (data[j] != 0 || data[j + 1] != 0) continue;
+            if (data[j + 2] == 1 ||
+                (j + 3 < size && data[j + 2] == 0 && data[j + 3] == 1)) {
+                break;
+            }
+        }
+        size_t end = j;  // payload is [start, end)
+
+        if (start < size) {
+            uint8_t type = data[start] & 0x1F;
+            if (type == 7 && sps.empty()) {
+                sps.assign(data + start, data + end);
+            } else if (type == 8 && pps.empty()) {
+                pps.assign(data + start, data + end);
+            }
+        }
+        if (!sps.empty() && !pps.empty()) break;
+        i = j;
+    }
+
+    if (sps.empty() && pps.empty()) {
+        return false;
+    }
+    if (!sps.empty()) {
+        AppendAvcc(extradata, sps.data(), sps.size());
+    }
+    if (!pps.empty()) {
+        AppendAvcc(extradata, pps.data(), pps.size());
+    }
+    return true;
+}
+
+#ifdef __APPLE__
+const char* kDefaultDecoder = "vtbox";
+#else
+const char* kDefaultDecoder = "nvdec";
+#endif
+
+} // namespace
+
+int main(int argc, char* argv[]) {
     CommandLineParser cli;
     cli.parse(argc, argv);
 
-    auto dec = halcodec::Decoder::Create("nvjpeg");
+    if (cli.getInputFile().empty()) {
+        std::cerr << "missing input file (-i <file|dir>)" << std::endl;
+        return 2;
+    }
+
+    std::string backend = cli.getBackend().empty() ? kDefaultDecoder
+                                                   : cli.getBackend();
+    auto dec = halcodec::Decoder::Create(backend);
     if (!dec) {
-        std::cerr << "Fail to create decoder" << std::endl;
+        std::cerr << "Fail to create decoder backend: " << backend << std::endl;
         return -1;
     }
-    std::string input = cli.getInputFile();
+    std::cout << "decoder backend: " << dec->getName() << std::endl;
 
     halcodec::CodecParams params;
-    params.inputs.push_back(input);
+    params.inputs.push_back(cli.getInputFile());
     params.deviceIndex = cli.getGpuIndex();
     if (cli.getFormat() == "rgb" || cli.getFormat() == "rgbi") {
         params.outputFormat = halcodec::PixelFormat::RGB;
@@ -35,10 +127,18 @@ int main(int argc, char *argv[]) {
     } else if (cli.getFormat() == "y") {
         params.outputFormat = halcodec::PixelFormat::GRAY;
     }
+    // Decoders that build a format description from parameter sets (vtbox)
+    // need SPS/PPS; extract them from the Annex-B input stream when present.
+    std::vector<uint8_t> raw;
+    if (ReadFile(cli.getInputFile(), &raw)) {
+        ExtractParameterSets(raw.data(), raw.size(), &params.extradata);
+    }
     if (!dec->Initialize(params)) {
-        std::cerr << "Fail to initialize decoder" << std::endl;
+        std::cerr << "Fail to initialize decoder backend: " << backend << std::endl;
         return -1;
     }
+
+    std::string input = cli.getInputFile();
 
     struct stat info;
     if (stat(input.c_str(), &info) != 0) {
@@ -67,6 +167,7 @@ int main(int argc, char *argv[]) {
             closedir(dir);
         }
     } else {
+        // getOutputFile() already carries the format extension when derived.
         files.push_back(cli.getOutputFile());
     }
 

@@ -2,6 +2,7 @@
 #include <fstream>
 #include <iostream>
 #include <regex>
+#include <string>
 
 #include <dirent.h>
 #include <unistd.h>
@@ -15,15 +16,18 @@
 #include "codec_config.h"
 #include "frame.h"
 
-int main(int argc, char *argv[]) {
+int main(int argc, char* argv[]) {
     CommandLineParser cli;
     cli.parse(argc, argv);
 
-    auto enc = halcodec::Encoder::Create("nvenc");
+    std::string backend = cli.getBackend().empty() ? "nvenc"
+                                                   : cli.getBackend();
+    auto enc = halcodec::Encoder::Create(backend);
     if (!enc) {
-        std::cerr << "Fail to create encoder" << std::endl;
+        std::cerr << "Fail to create encoder backend: " << backend << std::endl;
         return -1;
     }
+    std::cout << "encoder backend: " << enc->getName() << std::endl;
     std::string input = cli.getInputFile();
 
     std::regex pattern(R"((\d+)[xX](\d+))");
@@ -44,7 +48,7 @@ int main(int argc, char *argv[]) {
         params.height = std::stoi(match[2].str());
     }
     if (!enc->Initialize(params)) {
-        std::cerr << "Fail to initialize encoder" << std::endl;
+        std::cerr << "Fail to initialize encoder backend: " << backend << std::endl;
         return -1;
     }
 
