@@ -1,4 +1,3 @@
-
 #include "nvjpegdecoder.h"
 
 #include <cuda.h>
@@ -13,6 +12,9 @@
 #include <sys/types.h>
 #include <vector>
 
+#include "frame.h"
+#include "registry.h"
+
 namespace halcodec {
 namespace nvjpeg {
 
@@ -23,49 +25,50 @@ NVJPEGDecoder::NVJPEGDecoder() {
     }
 }
 
-
-void NVJPEGDecoder::Initialize(std::string input, std::string format) {
-    if (format == "rgb") {
-        outputfmt_ = NVJPEG_OUTPUT_RGB;
-    } else if (format == "bgr") {
-        outputfmt_ = NVJPEG_OUTPUT_BGR;
-    } else if (format == "rgbi") {
-        outputfmt_ = NVJPEG_OUTPUT_RGBI;
-    } else if (format == "bgri") {
-        outputfmt_ = NVJPEG_OUTPUT_BGRI;
-    } else if (format == "yuv") {
-        outputfmt_ = NVJPEG_OUTPUT_YUV;
-    } else if (format == "y") {
-        outputfmt_ = NVJPEG_OUTPUT_Y;
-    } else if (format == "unchanged") {
-        outputfmt_ = NVJPEG_OUTPUT_UNCHANGED;
-    } else {
-        std::cout << "Unknown format: " << format << std::endl;
-        return;
+bool NVJPEGDecoder::Initialize(const CodecParams& params) {
+    if (params.inputs.empty()) {
+        std::cerr << "NVJPEGDecoder: no input specified" << std::endl;
+        return false;
     }
+    const std::string input = params.inputs[0];
+
+    // Map the unified output format to an nvjpeg output format.
+    outputfmt_ = NVJPEG_OUTPUT_YUV;
+    switch (params.outputFormat) {
+        case PixelFormat::RGB: outputfmt_ = NVJPEG_OUTPUT_RGB; break;
+        case PixelFormat::BGR: outputfmt_ = NVJPEG_OUTPUT_BGR; break;
+        case PixelFormat::GRAY: outputfmt_ = NVJPEG_OUTPUT_Y; break;
+        default:
+            if (params.outputFormat != PixelFormat::Unknown) {
+                std::cout << "NVJPEGDecoder: falling back to YUV output for format "
+                          << static_cast<int>(params.outputFormat) << std::endl;
+            }
+            break;
+    }
+
     CUdevice cuDevice_ = 0;
-    int idx = 0;
+    int idx = params.deviceIndex;
     int ret = cuDeviceGet(&cuDevice_, idx);
     if (ret != CUDA_SUCCESS) {
         std::cout << "cuDeviceGet error" << std::endl;
-        return;
+        return false;
     }
     char szDeviceName[80];
     ret = cuDeviceGetName(szDeviceName, sizeof(szDeviceName), cuDevice_);
     if (ret != CUDA_SUCCESS) {
         std::cout << "cuDeviceGetName error" << std::endl;
-        return;
+        return false;
     }
     ret = cuCtxCreate(&cuContext_, 0, cuDevice_);
     if (ret != CUDA_SUCCESS) {
         std::cout << "cuCtxCreate error" << std::endl;
-        return;
+        return false;
     }
     cudaDeviceProp props;
     ret = cudaGetDeviceProperties(&props, 0);
     if (ret != CUDA_SUCCESS) {
         std::cout << "get device properties error" << std::endl;
-        return;
+        return false;
     }
     printf("Using GPU %d (%s, %d SMs, %d th/SM max, CC %d.%d, ECC %s)\n",
          0, props.name, props.multiProcessorCount,
@@ -81,25 +84,26 @@ void NVJPEGDecoder::Initialize(std::string input, std::string format) {
     struct stat info;
     if (stat(input.c_str(), &info) != 0) {
         std::cout << "Cannot access " << input << std::endl;
-        return;
+        return false;
     }
 
     if (info.st_mode & S_IFDIR) { // Check if input is a directory
         DIR *dir;
         struct dirent *ent;
-        while (!input.empty() && input.back() == '/') {
-            input.pop_back();
+        std::string dirPath = input;
+        while (!dirPath.empty() && dirPath.back() == '/') {
+            dirPath.pop_back();
         }
-        if ((dir = opendir(input.c_str())) != NULL) {
+        if ((dir = opendir(dirPath.c_str())) != NULL) {
             while ((ent = readdir(dir)) != NULL) {
                 if (ent->d_type == DT_REG) { // Regular file
-                    file_names_.emplace_back(input + '/' + ent->d_name);
+                    file_names_.emplace_back(dirPath + '/' + ent->d_name);
                 }
             }
             closedir(dir);
         } else {
             std::cout << "Could not open directory " << input << std::endl;
-            return;
+            return false;
         }
         std::cout << "Number of files in directory: " << file_names_.size() << std::endl;
     } else if (info.st_mode & S_IFREG) { // Check if input is a regular file
@@ -107,6 +111,7 @@ void NVJPEGDecoder::Initialize(std::string input, std::string format) {
         file_names_.emplace_back(input.c_str());
     } else {
         std::cout << "Input is neither a file nor a directory" << std::endl;
+        return false;
     }
     if (file_names_.size() > 16) {
         batch_size_ = 16;
@@ -136,6 +141,7 @@ void NVJPEGDecoder::Initialize(std::string input, std::string format) {
             isz_[i].pitch[c] = 0;
         }
     }
+    return true;
 }
 
 void NVJPEGDecoder::create_decouple_api()
@@ -205,7 +211,7 @@ int NVJPEGDecoder::FillinFrame() {
             return -1;
         }
         file_len_[i] = size;
-        
+
         std::cout << "Processing: " << *file_iter_ << std::endl;
     }
 
@@ -217,7 +223,7 @@ int NVJPEGDecoder::FillinFrame() {
     for (int i = 0; i < data_.size(); i++) {
         nvjpegGetImageInfo(nvjpegHandle_, (const unsigned char*)data_[i].data(), file_len_[i],
             &channels, &subsampling, widths, heights);
-        
+
         img_widths_[i] = widths[0];
         img_heights_[i] = heights[0];
         subsamplings_[i] = subsampling;
@@ -225,32 +231,6 @@ int NVJPEGDecoder::FillinFrame() {
         for (int c = 0; c < channels; c++) {
             std::cout << "Channel #" << c << " size: " << widths[c] << " x "
                     << heights[c] << std::endl;
-        }
-        switch (subsampling) {
-        case NVJPEG_CSS_444:
-            std::cout << "YUV 4:4:4 chroma subsampling" << std::endl;
-            break;
-        case NVJPEG_CSS_440:
-            std::cout << "YUV 4:4:0 chroma subsampling" << std::endl;
-            break;
-        case NVJPEG_CSS_422:
-            std::cout << "YUV 4:2:2 chroma subsampling" << std::endl;
-            break;
-        case NVJPEG_CSS_420:
-            std::cout << "YUV 4:2:0 chroma subsampling" << std::endl;
-            break;
-        case NVJPEG_CSS_411:
-            std::cout << "YUV 4:1:1 chroma subsampling" << std::endl;
-            break;
-        case NVJPEG_CSS_410:
-            std::cout << "YUV 4:1:0 chroma subsampling" << std::endl;
-            break;
-        case NVJPEG_CSS_GRAY:
-            std::cout << "Grayscale JPEG " << std::endl;
-            break;
-        case NVJPEG_CSS_UNKNOWN:
-            std::cout << "Unknown chroma subsampling" << std::endl;
-            return EXIT_FAILURE;
         }
         int mul = 1;
         // in the case of interleaved RGB output, write only to single channel, but
@@ -307,8 +287,7 @@ int NVJPEGDecoder::FillinFrame() {
     return num_decoded;
 }
 
-
-uint8_t* NVJPEGDecoder::GetFrame(int *framesize, int *height, int *width, int *n_chan) {
+bool NVJPEGDecoder::GetFrame(CodecFrame& out) {
     int idx = batch_size_ - num_decoded;
     int total_size = 0;
     int chanels = 0;
@@ -329,7 +308,7 @@ uint8_t* NVJPEGDecoder::GetFrame(int *framesize, int *height, int *width, int *n
     uint8_t* combined_frame = (uint8_t*)malloc(total_size);
     if (!combined_frame) {
         std::cerr << "Failed to allocate memory for combined frame" << std::endl;
-        return nullptr;
+        return false;
     }
 
     // Copy each channel into the combined buffer
@@ -374,7 +353,8 @@ uint8_t* NVJPEGDecoder::GetFrame(int *framesize, int *height, int *width, int *n
                         break;
                     default:
                         std::cerr << "Unsupported chroma subsampling type" << std::endl;
-                        return nullptr;
+                        free(combined_frame);
+                        return false;
                 }
 
                 int channel_height = img_heights_[idx] / subsample_factor_h;
@@ -411,22 +391,32 @@ uint8_t* NVJPEGDecoder::GetFrame(int *framesize, int *height, int *width, int *n
         chanels = 3;
     }
 
-    *height = img_heights_[idx];
-    *width = img_widths_[idx];
-    *n_chan = chanels;
-    *framesize = total_size;
-    return combined_frame;
-}
+    out.data = combined_frame;
+    out.size = total_size;
+    out.width = img_widths_[idx];
+    out.height = img_heights_[idx];
+    out.strides[0] = out_[idx].pitch[0];
+    switch (outputfmt_) {
+        case NVJPEG_OUTPUT_YUV:
+            out.format = (subsamplings_[idx] == NVJPEG_CSS_420)
+                             ? PixelFormat::I420 : PixelFormat::YUV444P;
+            break;
+        case NVJPEG_OUTPUT_RGB: out.format = PixelFormat::RGB; break;
+        case NVJPEG_OUTPUT_BGR: out.format = PixelFormat::BGR; break;
+        case NVJPEG_OUTPUT_Y: out.format = PixelFormat::GRAY; break;
+        case NVJPEG_OUTPUT_RGBI: out.format = PixelFormat::RGB; break;
+        case NVJPEG_OUTPUT_BGRI: out.format = PixelFormat::BGR; break;
+        default: out.format = PixelFormat::Unknown; break;
+    }
+    out.release = [this, combined_frame]() {
+        ::free(combined_frame);
+        num_decoded--;
+    };
 
-void NVJPEGDecoder::ReleaseFrame(uint8_t **pFrame) {
-    num_decoded --;
-    free(*pFrame);
-}
-
-static bool registered = []() -> bool {
-    NVJPEGDecoder::Register();
     return true;
-}();
+}
+
+HALCODEC_CONNECT(Decoder, nvjpeg, NVJPEGDecoder);
 
 } // namespace nvjpeg
 } // namespace halcodec

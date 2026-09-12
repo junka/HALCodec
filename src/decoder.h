@@ -1,58 +1,53 @@
-#ifndef DECODER_H
-#define DECODER_H
+#ifndef SRC_DECODER_H
+#define SRC_DECODER_H
 
-#include <string>
-#include <vector>
-#include <cstdint>
 #include <memory>
-#include <functional>
-#include <unordered_map>
-#include <iostream>
+#include <string>
+
+#include "codec_config.h"
+#include "frame.h"
+#include "registry.h"
 
 namespace halcodec {
-    
+
 class Decoder {
 protected:
     Decoder() = default;
+
 public:
     virtual ~Decoder() = default;
 
-    using Creator = std::function<std::unique_ptr<Decoder>()>;
-    static std::unordered_map<std::string, Decoder::Creator>& getRegistry() {
-        static std::unordered_map<std::string, Decoder::Creator> registry;
-        return registry;
-    }
-    // Factory method to create a Decoder instance
+    using Creator = Registry<Decoder>::Creator;
+
+    // Factory: instantiate a registered decoder by name (e.g. "nvdec",
+    // "nvjpeg", "vtbox").
     static std::unique_ptr<Decoder> Create(const std::string& type) {
-        auto& registry = getRegistry();
-        auto it = registry.find(type);
-        if (it != registry.end()) {
-            return it->second();
-        } else {
-            return nullptr;
-        }
+        return Registry<Decoder>::Create(type);
     }
 
-    static void RegisterDecoder(const std::string& type, Creator creator) {
-        getRegistry()[type] = creator;
+    static bool Register(const std::string& type, Creator creator) {
+        return Registry<Decoder>::Register(type, std::move(creator));
     }
 
-    virtual void Initialize(std::string input, std::string format) {}
+    // Initialize the decoder with the given configuration. Returns true on
+    // success, false otherwise.
+    virtual bool Initialize(const CodecParams& params) { (void)params; return false; }
 
-    // Fill input data and return  output
+    // Fill input data and decode. Returns the number of frames decoded in
+    // this batch (0 = exhausted, negative = error).
     virtual int FillinFrame() { return -1; }
 
-    // Finalize the encoding process
+    // Retrieve the next decoded frame. Returns true when a frame is
+    // available; the caller owns the CodecFrame object and must invoke
+    // out.release() to free the underlying buffer.
+    virtual bool GetFrame(CodecFrame& out) { (void)out; return false; }
+
+    // Finalize the decoding process and release resources.
     virtual void Finalize() {}
 
-    // Get the name of the encoder
-    virtual std::string getName() const {return "";}
-
-    virtual uint8_t* GetFrame(int *framesize, int *height, int *width, int *n_chan) {return nullptr;}
-
-    virtual void ReleaseFrame(uint8_t **pFrame) {}
+    virtual std::string getName() const { return ""; }
 };
 
 } // namespace halcodec
 
-#endif // DECODER_H
+#endif // SRC_DECODER_H

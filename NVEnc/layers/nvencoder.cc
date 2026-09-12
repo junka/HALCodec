@@ -1,39 +1,65 @@
 #include <vector>
+#include <algorithm>
+#include <fstream>
+#include <sstream>
+#include <string>
+#include <regex>
+
 #include "nvencoder.h"
 
-#include <regex>
+#include "frame.h"
+#include "registry.h"
 
 namespace halcodec {
 namespace nvenc {
 
+// NVENC encoding pipeline. Reads raw frames from the input file described in
+// CodecParams, encodes them with the NvEncoderCuda helper and hands the
+// resulting elementary-stream packets out via GetFrame().
 
 NVEncoder::NVEncoder() {
 }
 
-void NVEncoder::Initialize(std::string input, std::string format) {
+bool NVEncoder::Initialize(const CodecParams& params) {
+    if (params.inputs.empty()) {
+        std::cerr << "NVEncoder: no input specified" << std::endl;
+        return false;
+    }
+    std::string input = params.inputs[0];
     finput_.open(input, std::ifstream::in | std::ifstream::binary);
     if (!finput_) {
         std::ostringstream err;
         err << "Unable to open input file: " << input << std::endl;
-        throw std::invalid_argument(err.str());
+        std::cerr << err.str();
+        return false;
     }
     device_ = std::make_unique<NVDevice>();
     if (!device_) {
         std::cout << "unable to create device" << std::endl;
-        return;
+        return false;
     }
-    int width;
-    int height;
-    std::regex pattern(R"((\d+)[xX](\d+))");
-    std::smatch match;
-    if (std::regex_search(input, match, pattern)) {
-        width = std::stoi(match[1].str());
-        height = std::stoi(match[2].str());
-    } else {
-        std::cerr << "Failed to match resolution in: " << input << std::endl;
+    int width = params.width;
+    int height = params.height;
+    if (width <= 0 || height <= 0) {
+        std::regex pattern(R"((\d+)[xX](\d+))");
+        std::smatch match;
+        if (std::regex_search(input, match, pattern)) {
+            width = std::stoi(match[1].str());
+            height = std::stoi(match[2].str());
+        } else {
+            std::cerr << "Failed to match resolution in: " << input << std::endl;
+            return false;
+        }
     }
     device_->createCtx(0);
     auto cudaCtx = device_->getCtx();
+    std::string format = "nv12";
+    switch (params.inputFormat) {
+        case PixelFormat::I420: format = "iyuv"; break;
+        case PixelFormat::NV12: format = "nv12"; break;
+        case PixelFormat::YUV444P: format = "yuv444"; break;
+        default: break;
+    }
     auto eFormat = [](std::string format) {
         std::vector<std::string> bufferFormatStr = {
             "iyuv", "nv12", "yv12", "yuv444", "p010", "yuv444p16", "bgra", "bgra10", "ayuv", "abgr", "abgr10",
@@ -80,6 +106,7 @@ void NVEncoder::Initialize(std::string input, std::string format) {
     encodeCLIOptions.SetInitParams(&initializeParams, eFormat);
 
     encoder_->CreateEncoder(&initializeParams);
+    return true;
 }
 
 void NVEncoder::Finalize() {
@@ -87,7 +114,7 @@ void NVEncoder::Finalize() {
     finput_.close();
 }
 
-int NVEncoder::FillData() {
+bool NVEncoder::FillFrame(const CodecFrame&) {
     int nFrameSize = encoder_->GetFrameSize();
 #if NVENCAPI_MAJOR_VERSION > 12
     uint32_t enableMVHEVC = encoder_->IsMVHEVC();
@@ -120,28 +147,24 @@ int NVEncoder::FillData() {
         encoder_->EndEncode(vPacket_);
     }
     nFrame += (int)vPacket_.size();
-    return nFrame;
+    return nFrame > 0;
 }
 
-uint8_t* NVEncoder::GetFrame(int *framesize, int *height, int *width, int *n_chan) {
-    int idx = 0;
-    *width = encoder_->GetEncodeWidth();
-    *height = encoder_->GetEncodeHeight();
-    *n_chan = 3;
-    printf("w %d, h %d\n", *width, *height);
-    return vPacket_[idx].data();
-}
-
-void NVEncoder::ReleaseFrame(uint8_t **pFrame) {
-
-}
-
-
-static bool registered = []() -> bool {
-    NVEncoder::Register();
+bool NVEncoder::GetFrame(CodecFrame& out) {
+    if (vPacket_.empty()) {
+        return false;
+    }
+    out.data = vPacket_[0].data();
+    out.size = vPacket_[0].size();
+    out.width = encoder_->GetEncodeWidth();
+    out.height = encoder_->GetEncodeHeight();
+    out.format = PixelFormat::Unknown; // encoded elementary stream
+    out.release = nullptr;             // vPacket_ owns the data
+    vPacket_.erase(vPacket_.begin());
     return true;
-}();
+}
 
+HALCODEC_CONNECT(Encoder, nvenc, NVEncoder);
 
-} // namespace layers
 } // namespace nvenc
+} // namespace halcodec

@@ -1,35 +1,31 @@
 #ifndef LAYERS_VTDECODER_H_
-#define LAYERS_VTDECODER_H_ 
+#define LAYERS_VTDECODER_H_
 
 #include <memory>
 #include <string>
 
 #include <VideoToolbox/VideoToolbox.h>
+#include "codec_config.h"
 #include "decoder.h"
+#include "frame.h"
 
-namespace halcodec { 
+namespace halcodec {
 namespace vtbox {
 
 class VTDecoder : public Decoder {
 public:
     VTDecoder() = default;
 
-    void Initialize(std::string inputfile, std::string format) override;
+    bool Initialize(const CodecParams& params) override;
     int FillinFrame() override;
     void Finalize() override;
-    uint8_t* GetFrame(int *framesize, int *height, int *width, int *n_chan) override;
-    void ReleaseFrame(uint8_t **pFrame) override;
+    bool GetFrame(CodecFrame& out) override;
     std::string getName() const override { return "vtbox"; }
 
-    static bool Register() {
-        halcodec::Decoder::RegisterDecoder("vtbox", []() {
-            return std::make_unique<VTDecoder>();
-        });
-        return true;
-    }
 private:
-    VTDecompressionSessionRef decompressionSession;
-    CMVideoFormatDescriptionRef formatDescription;
+    VTDecompressionSessionRef decompressionSession = nullptr;
+    CMVideoFormatDescriptionRef formatDescription = nullptr;
+
     static void DecompressionCallback(void* refcon,
         void* sourceFrameRefCon,
         OSStatus status,
@@ -39,7 +35,6 @@ private:
         CMTime presentationDuration);
 
     bool decodeFrame(const uint8_t* data, size_t size);
-
 };
 
 } // namespace vtbox

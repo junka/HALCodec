@@ -14,14 +14,19 @@ add_executable(codecinfo codecinfo.cc)
 
 add_executable(hal_dec hal_dec.cc parse_cli.h)
 
+# Vendor layers self-register through static initializers (HALCODEC_CONNECT).
+# On ELF, ld drops shared libs whose symbols are unreferenced by default, so
+# they must be force-loaded or registration never runs. macOS loads all linked
+# dylibs and does not need the flag.
 set(LINK_LAYERS "")
 if(APPLE)
-	list(APPEND LINK_LAYERS vtbox_layers)
+    list(APPEND LINK_LAYERS vtbox_layers)
 else()
-	list(APPEND LINK_LAYERS -Wl,--no-as-needed
-                nvenc_layers
-                nvjpeg_layers
-                -Wl,--as-needed)
+    list(APPEND LINK_LAYERS
+            -Wl,--no-as-needed
+            nvenc_layers
+            nvjpeg_layers
+            -Wl,--as-needed)
 endif()
 
 target_include_directories(hal_enc PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/../NVEnc/layers)

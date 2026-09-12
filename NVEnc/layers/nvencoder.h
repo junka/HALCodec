@@ -4,7 +4,10 @@
 #include <fstream>
 #include <string>
 
+#include "codec_config.h"
 #include "encoder.h"
+#include "frame.h"
+
 #include "nvdevice.h"
 
 #include "NvEncoder/NvEncoderCuda.h"
@@ -15,26 +18,14 @@ namespace nvenc {
 
 class NVEncoder : public halcodec::Encoder {
 public:
-    NVEncoder();
+    NVEncoder() = default;
     ~NVEncoder() = default;
-    void Initialize(std::string input, std::string format) override;
+    bool Initialize(const CodecParams& params) override;
+    bool FillFrame(const CodecFrame& in) override;
+    bool GetFrame(CodecFrame& out) override;
     void Finalize() override;
+    std::string getName() const override;
 
-    std::string getName() const override {return "nvenc";}
-
-
-    int FillData() override;
-
-    uint8_t* GetFrame(int *framesize, int *height, int *width, int *n_chan) override;
-
-    void ReleaseFrame(uint8_t **pFrame) override;
-
-    static bool Register() {
-        halcodec::Encoder::RegisterEncoder("nvenc", []() {
-            return std::make_unique<NVEncoder>();
-        });
-        return true;
-    }
 private:
     std::unique_ptr<NVDevice> device_;
     std::unique_ptr<NvEncoderCuda> encoder_;

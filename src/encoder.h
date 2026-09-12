@@ -1,12 +1,12 @@
-#ifndef ENCODER_H
-#define ENCODER_H
+#ifndef SRC_ENCODER_H
+#define SRC_ENCODER_H
 
-#include <string>
-#include <vector>
-#include <cstdint>
 #include <memory>
-#include <functional>
-#include <unordered_map>
+#include <string>
+
+#include "codec_config.h"
+#include "frame.h"
+#include "registry.h"
 
 namespace halcodec {
 
@@ -14,41 +14,34 @@ class Encoder {
 public:
     Encoder() = default;
     virtual ~Encoder() = default;
-    using Creator = std::function<std::unique_ptr<Encoder>()>;
-    static std::unordered_map<std::string, Encoder::Creator>& getRegistry() {
-        static std::unordered_map<std::string, Encoder::Creator> registry;
-        return registry;
-    }
-    // Factory method to create a Decoder instance
+
+    using Creator = Registry<Encoder>::Creator;
+
+    // Factory: instantiate a registered encoder by name (e.g. "nvenc").
     static std::unique_ptr<Encoder> Create(const std::string& type) {
-        auto& registry = getRegistry();
-        auto it = registry.find(type);
-        if (it != registry.end()) {
-            return it->second();
-        } else {
-            return nullptr;
-        }
+        return Registry<Encoder>::Create(type);
     }
 
-    static void RegisterEncoder(const std::string& type, Creator creator) {
-        getRegistry()[type] = creator;
+    static bool Register(const std::string& type, Creator creator) {
+        return Registry<Encoder>::Register(type, std::move(creator));
     }
 
-    // Initialize the encoder with specific settings
-    virtual void Initialize(std::string input, std::string format) {}
-    // Finalize the encoding process
+    // Initialize the encoder with the given configuration. Returns true on
+    // success, false otherwise.
+    virtual bool Initialize(const CodecParams& params) { (void)params; return false; }
+
+    // Feed a raw frame into the encoder.
+    virtual bool FillFrame(const CodecFrame& in) { (void)in; return false; }
+
+    // Retrieve an encoded frame. Returns true when a frame is available.
+    virtual bool GetFrame(CodecFrame& out) { (void)out; return false; }
+
+    // Finalize the encoding process and release resources.
     virtual void Finalize() {}
 
-    // Encode raw input data and return encoded output
-    virtual int FillData() { return 0;}
-    virtual uint8_t* GetFrame(int *framesize, int *height, int *width, int *n_chan) { return nullptr;}
-    virtual void ReleaseFrame(uint8_t **pFrame) {}
-
-
-    // Get the name of the encoder
     virtual std::string getName() const { return ""; }
 };
 
 } // namespace halcodec
 
-#endif // ENCODER_H
+#endif // SRC_ENCODER_H

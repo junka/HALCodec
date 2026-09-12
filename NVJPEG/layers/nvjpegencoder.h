@@ -7,7 +7,9 @@
 #include <string>
 #include <memory>
 
+#include "codec_config.h"
 #include "encoder.h"
+#include "frame.h"
 
 namespace halcodec {
 namespace nvjpeg {
@@ -17,27 +19,12 @@ public:
     NVJPEGEncoder();
     ~NVJPEGEncoder() = default;
 
-    void Initialize(std::string input, std::string format) override;
+    bool Initialize(const CodecParams& params) override;
+    bool FillFrame(const CodecFrame& input) override;
+    bool GetFrame(CodecFrame& out) override;
     void Finalize() override;
 
-    std::string getName() const override {return "nvjpeg";}
-
-
-    int FillData() override;
-
-    uint8_t* GetFrame(int *framesize, int *height, int *width, int *n_chan) override;
-
-    void ReleaseFrame(uint8_t **pFrame) override;
-
-    static bool Register() {
-        halcodec::Encoder::RegisterEncoder("nvjpeg", []() {
-            return std::make_unique<NVJPEGEncoder>();
-        });
-        return true;
-    }
-private:
-
-    void checkStatus(nvjpegStatus_t status, const std::string& errorMessage);
+    std::string getName() const override { return "nvjpegenc"; }
 
     static int dev_malloc(void **p, size_t s) { return (int)cudaMalloc(p, s); }
 
@@ -67,7 +54,7 @@ private:
     nvjpegJpegStream_t  jpeg_streams_[2]; //  2 streams for pipelining
     nvjpegEncoderParams_t encode_params_;
 
-    
+
     std::vector<uint8_t *> dev_data_;
     std::vector<size_t> file_len_;
     std::vector<nvjpegImage_t> out_;

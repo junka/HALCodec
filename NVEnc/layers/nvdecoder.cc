@@ -1,37 +1,61 @@
 #include "nvdecoder.h"
 
-#include "nvdevice.h"
+#include <iostream>
+#include <string>
 
-#include <memory>
+#include "frame.h"
+#include "registry.h"
 
 namespace halcodec {
 namespace nvenc {
 
-void NVDecoder::Initialize(std::string inputfile, std::string format) {
-    device_ = std::make_unique<NVDevice>();
-    if (!device_) {
-        std::cout << "unable to create device" << std::endl;
-        return;
+namespace {
+
+// Maps the NVDEC output surface format to the unified PixelFormat.
+PixelFormat toHalFormat(cudaVideoSurfaceFormat surfaceFormat) {
+    switch (surfaceFormat) {
+        case cudaVideoSurfaceFormat_NV12: return PixelFormat::NV12;
+        case cudaVideoSurfaceFormat_P016: return PixelFormat::P016;
+        case cudaVideoSurfaceFormat_YUV444: return PixelFormat::YUV444P;
+        case cudaVideoSurfaceFormat_YUV444_16Bit: return PixelFormat::YUV444P10LE;
+#if NVENCAPI_MAJOR_VERSION > 12
+        case cudaVideoSurfaceFormat_NV16: return PixelFormat::NV16;
+        case cudaVideoSurfaceFormat_P216: return PixelFormat::P210;
+#endif
+        default: return PixelFormat::Unknown;
     }
-    device_->createCtx(0);
+}
+
+} // namespace
+
+bool NVDecoder::Initialize(const CodecParams& params) {
+    if (params.inputs.empty()) {
+        std::cerr << "NVDecoder: no input specified" << std::endl;
+        return false;
+    }
+    device_ = std::make_unique<NVDevice>();
+    device_->createCtx(params.deviceIndex);
     auto cudaCtx = device_->getCtx();
 
     Rect cropRect = {};
     Dim resizeDim = {};
 
-    demuxer_ = std::make_unique<FFmpegDemuxer>(inputfile.c_str());
+    demuxer_ = std::make_unique<FFmpegDemuxer>(params.inputs[0].c_str());
 #if NVENCAPI_MAJOR_VERSION > 12
-    decoder_ = std::make_unique<NvDecoder>(cudaCtx, false, FFmpeg2NvCodecId(demuxer_->GetVideoCodec()),
+    decoder_ = std::make_unique<NvDecoder>(cudaCtx, false,
+        FFmpeg2NvCodecId(demuxer_->GetVideoCodec()),
         false, false, &cropRect, &resizeDim, false, 0, 0, 1000, false, 0, nullptr);
 #else
-    decoder_ = std::make_unique<NvDecoder>(cudaCtx, false, FFmpeg2NvCodecId(demuxer_->GetVideoCodec()),
+    decoder_ = std::make_unique<NvDecoder>(cudaCtx, false,
+        FFmpeg2NvCodecId(demuxer_->GetVideoCodec()),
         false, false, &cropRect, &resizeDim, false, 0, 0, 1000, false);
 #endif
     decoder_->SetOperatingPoint(0, false);
+    return true;
 }
 
 int NVDecoder::FillinFrame() {
-    uint8_t *pVideo = nullptr;
+    uint8_t* pVideo = nullptr;
     int nVideoBytes = 0;
     int nFrame = 0;
     do {
@@ -51,21 +75,25 @@ std::string NVDecoder::getName() const {
     return "nvdec";
 }
 
-uint8_t* NVDecoder::GetFrame(int *framesize, int *height, int *width, int *n_chan) {
-    uint8_t* frame = decoder_->GetLockedFrame();
-    *framesize = decoder_->GetFrameSize();
-    auto outFormat = decoder_->GetOutputFormat();
-    return frame;
-}
-
-void NVDecoder::ReleaseFrame(uint8_t **pFrame) {
-    decoder_->UnlockFrame(pFrame);
-}
-
-static bool registered = []() -> bool {
-    NVDecoder::Register();
+bool NVDecoder::GetFrame(CodecFrame& out) {
+    int64_t pts = 0;
+    out.data = decoder_->GetLockedFrame(&pts);
+    if (!out.data) {
+        return false;
+    }
+    out.size = decoder_->GetFrameSize();
+    out.width = decoder_->GetWidth();
+    out.height = decoder_->GetHeight();
+    out.format = toHalFormat(decoder_->GetOutputFormat());
+    out.strides[0] = decoder_->GetDeviceFramePitch();
+    out.pts = pts;
+    // NVDEC owns the locked frame buffer; the caller must not free it.
+    // Unlocking happens on the next locked-frame rotation inside NvDecoder.
+    out.release = nullptr;
     return true;
-}();
+}
 
-} // namespace layers
+HALCODEC_CONNECT(Decoder, nvdec, NVDecoder);
+
 } // namespace nvenc
+} // namespace halcodec

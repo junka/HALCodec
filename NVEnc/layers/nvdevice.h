@@ -2,8 +2,7 @@
 #define NVENC_LAYERS_NVDEVICE_H
 
 #include <string>
-#include <iostream>
-#include <iomanip>
+
 #include <cuda.h>
 
 #include "nvcuvid.h"
@@ -22,69 +21,30 @@ constexpr const char *kCodecNames[] = {
 };
 constexpr const char *kChromaFormat[] = { "4:0:0", "4:2:0", "4:2:2", "4:4:4" };
 
+class NVDevice : public halcodec::Device {
+public:
+    NVDevice();
+    ~NVDevice();
 
-class NVDevice : public halcodec::Device{
+    void showDecoderCapability() const override;
+    void showEncoderCapability() const override;
+
+    static bool isCodecSupported(cudaVideoCodec codec,
+                                 cudaVideoChromaFormat chromaFormat,
+                                 int bitDepth);
+
+    int getNumDevices() const override;
+    void createCtx(int idx) override;
+    void destroyCtx() override;
+
+    CUcontext getCtx() const;
+
 private:
     void createCudaContext(int idx, unsigned int flags);
     void destroyCudaContext();
-public:
-    NVDevice() {
-        int ret = cuInit(0);
-        if (ret != CUDA_SUCCESS) {
-            std::cout << "cuInit error" << std::endl;
-        }
-    };
-    ~NVDevice() {
-        destroyCudaContext();
-    };
-    static bool Register() {
-        halcodec::Device::RegisterDevice("nvidia", []() {
-            return std::make_unique<NVDevice>();
-        });
-        return true;
-    }
 
-    void showDecoderCapability() override;
-    void showEncoderCapability() override;
-
-    static bool isCodecSupported(cudaVideoCodec codec, cudaVideoChromaFormat chromaFormat, int bitDepth)
-    {
-        CUVIDDECODECAPS decodeCaps = {};
-        decodeCaps.eCodecType = codec;
-        decodeCaps.eChromaFormat = chromaFormat;
-        decodeCaps.nBitDepthMinus8 = bitDepth - 8;
-
-        CUresult ret = cuvidGetDecoderCaps(&decodeCaps);
-        if (ret != CUDA_SUCCESS) {
-            std::cout << "cuvidGetDecoderCaps error" << std::endl;
-            return false;
-        }
-        return decodeCaps.bIsSupported;
-    }
-
-    int getNumDevices() override {
-        int ngpu;
-        cuDeviceGetCount(&ngpu);
-        return ngpu;
-    }
-
-    void createCtx(int idx) override {
-        id_ = idx;
-        createCudaContext(idx, 0);
-    }
-
-    void destroyCtx() override {
-        destroyCudaContext();
-    }
-
-    CUcontext getCtx() {
-        return cuContext_;
-    }
-
-private:
     CUcontext cuContext_ = nullptr;
     CUdevice cuDevice_ = 0;
-    NV_ENCODE_API_FUNCTION_LIST encode_api_;
 };
 
 } // namespace nvenc

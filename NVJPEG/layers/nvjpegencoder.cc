@@ -1,4 +1,3 @@
-
 #include "nvjpegencoder.h"
 
 #include <cuda.h>
@@ -14,6 +13,9 @@
 #include <vector>
 #include <regex>
 
+#include "frame.h"
+#include "registry.h"
+
 namespace halcodec {
 namespace nvjpeg {
 
@@ -25,31 +27,49 @@ NVJPEGEncoder::NVJPEGEncoder() {
 }
 
 
-void NVJPEGEncoder::Initialize(std::string input, std::string format) {
-    format_ = format;
+bool NVJPEGEncoder::Initialize(const CodecParams& params) {
+    if (params.inputs.empty()) {
+        std::cerr << "NVJPEGEncoder: no input specified" << std::endl;
+        return false;
+    }
+    std::string input = params.inputs[0];
+
+    // Map the unified input format; BMP files are detected by extension and
+    // use the packed BGRI layout.
+    format_ = "yuv";
+    switch (params.inputFormat) {
+        case PixelFormat::RGB: format_ = "rgb"; break;
+        case PixelFormat::GRAY: format_ = "yuv"; break; // grey input, subsampling decided per file
+        case PixelFormat::BGR:
+            format_ = (input.size() > 4 && input.substr(input.size() - 4) == ".bmp")
+                          ? "bmp" : "bgr";
+            break;
+        default: break;
+    }
+
     CUdevice cuDevice_ = 0;
     int idx = 0;
     int ret = cuDeviceGet(&cuDevice_, idx);
     if (ret != CUDA_SUCCESS) {
         std::cout << "cuDeviceGet error" << std::endl;
-        return;
+        return false;
     }
     char szDeviceName[80];
     ret = cuDeviceGetName(szDeviceName, sizeof(szDeviceName), cuDevice_);
     if (ret != CUDA_SUCCESS) {
         std::cout << "cuDeviceGetName error" << std::endl;
-        return;
+        return false;
     }
     ret = cuCtxCreate(&cuContext_, 0, cuDevice_);
     if (ret != CUDA_SUCCESS) {
         std::cout << "cuCtxCreate error" << std::endl;
-        return;
+        return false;
     }
     cudaDeviceProp props;
     ret = cudaGetDeviceProperties(&props, 0);
     if (ret != CUDA_SUCCESS) {
         std::cout << "get device properties error" << std::endl;
-        return;
+        return false;
     }
     printf("Using GPU %d (%s, %d SMs, %d th/SM max, CC %d.%d, ECC %s)\n",
          0, props.name, props.multiProcessorCount,
@@ -66,37 +86,37 @@ void NVJPEGEncoder::Initialize(std::string input, std::string format) {
     ret = nvjpegEncoderStateCreate(nvjpegHandle_, &encoderState_, stream_);
     if (ret != NVJPEG_STATUS_SUCCESS) {
         printf("nvjpegEncoderStateCreate %d\n", ret);
-        return;
+        return false;
     }
     ret = nvjpegEncoderParamsCreate(nvjpegHandle_, &encode_params_, stream_);
     if (ret != NVJPEG_STATUS_SUCCESS) {
         printf("nvjpegEncoderParamsCreate %d\n", ret);
-        return;
+        return false;
     }
     ret = nvjpegEncoderParamsSetQuality(encode_params_, 75, stream_);
     if (ret != NVJPEG_STATUS_SUCCESS) {
         printf("nvjpegEncoderParamsSetQuality %d\n", ret);
-        return;
+        return false;
     }
     ret = nvjpegEncoderParamsSetEncoding(encode_params_, NVJPEG_ENCODING_BASELINE_DCT, stream_);
     if (ret != NVJPEG_STATUS_SUCCESS) {
         printf("nvjpegEncoderParamsSetEncoding %d\n", ret);
-        return;
+        return false;
     }
     ret = nvjpegEncoderParamsSetOptimizedHuffman(encode_params_, 1, stream_);
     if (ret != NVJPEG_STATUS_SUCCESS) {
         printf("nvjpegEncoderParamsSetOptimizedHuffman %d\n", ret);
-        return;
+        return false;
     }
     ret = nvjpegEncoderParamsSetSamplingFactors(encode_params_, NVJPEG_CSS_420, stream_);
     if (ret != NVJPEG_STATUS_SUCCESS) {
         printf("nvjpegEncoderParamsSetSamplingFactors %d\n", ret);
-        return;
+        return false;
     }
     struct stat info;
     if (stat(input.c_str(), &info) != 0) {
         std::cout << "Cannot access " << input << std::endl;
-        return;
+        return false;
     }
 
     if (info.st_mode & S_IFDIR) { // Check if input is a directory
@@ -114,7 +134,7 @@ void NVJPEGEncoder::Initialize(std::string input, std::string format) {
             closedir(dir);
         } else {
             std::cout << "Could not open directory " << input << std::endl;
-            return;
+            return false;
         }
         std::cout << "Number of files in directory: " << file_names_.size() << std::endl;
     } else if (info.st_mode & S_IFREG) { // Check if input is a regular file
@@ -122,6 +142,7 @@ void NVJPEGEncoder::Initialize(std::string input, std::string format) {
         file_names_.emplace_back(input.c_str());
     } else {
         std::cout << "Input is neither a file nor a directory" << std::endl;
+        return false;
     }
     if (file_names_.size() > 16) {
         batch_size_ = 16;
@@ -130,6 +151,7 @@ void NVJPEGEncoder::Initialize(std::string input, std::string format) {
     ret = cudaStreamCreateWithFlags(&stream_, cudaStreamNonBlocking);
     if (ret != CUDA_SUCCESS) {
         std::cerr << "Fail to create cuda stream" << std::endl;
+        return false;
     }
 
     file_iter_ = file_names_.begin();
@@ -147,6 +169,7 @@ void NVJPEGEncoder::Initialize(std::string input, std::string format) {
             out_[i].pitch[c] = 0;
         }
     }
+    return true;
 }
 
 void NVJPEGEncoder::Finalize() {
@@ -156,7 +179,7 @@ void NVJPEGEncoder::Finalize() {
     cuCtxDestroy(cuContext_);
 }
 
-int NVJPEGEncoder::FillData() {
+bool NVJPEGEncoder::FillFrame(const CodecFrame&) {
     float loopTime = 0;
     double time;
     cudaEvent_t startEvent = NULL;
@@ -165,10 +188,10 @@ int NVJPEGEncoder::FillData() {
     int ret = cudaStreamSynchronize(stream_);
     if (ret != CUDA_SUCCESS) {
         std::cerr << "Fail to sync cuda stream" << std::endl;
-        return -1;
+        return false;
     }
     if (file_iter_ == file_names_.end()) {
-        return 0;
+        return false;
     }
 
     for (int i = 0; i < batch_size_ && file_iter_ != file_names_.end(); i++, file_iter_++) {
@@ -177,7 +200,7 @@ int NVJPEGEncoder::FillData() {
         std::ifstream input_file(*file_iter_, std::ios::in | std::ios::binary | std::ios::ate);
         if (!input_file) {
             std::cerr << "Cannot open file: " << *file_iter_ << std::endl;
-            return -1;
+            return false;
         }
 
         if (std::equal(ending.rbegin(), ending.rend(), (*file_iter_).rbegin())) {
@@ -195,18 +218,18 @@ int NVJPEGEncoder::FillData() {
             cudaError_t err = cudaMalloc((void**)(&dev_data_[i]), size);
             if(cudaSuccess != err) {
                 std::cout << "error for cuda malloc" << std::endl;
-                return -1;
+                return false;
             }
             std::vector<uint8_t> data(size);
             if (!input_file.read(reinterpret_cast<char *>(data.data()), size)) {
                 std::cerr << "Failed to read file: " << *file_iter_ << std::endl;
-                return -1;
+                return false;
             }
             err = cudaMemcpy(dev_data_[i], data.data(), size, cudaMemcpyHostToDevice);
             if(cudaSuccess != err) {
                 cudaFree(dev_data_[i]);
                 std::cout << "error for cuda copy" << std::endl;
-                return -1;
+                return false;
             }
             file_len_[i] = size;
             subsamplings_[i] =  NVJPEG_CSS_420;
@@ -225,9 +248,9 @@ int NVJPEGEncoder::FillData() {
             std::vector<uint8_t> data(size);
             if (!input_file.read(reinterpret_cast<char *>(data.data()), size)) {
                 std::cerr << "Failed to read file: " << *file_iter_ << std::endl;
-                return -1;
+                return false;
             }
-            cudaMemcpy(dev_data_[i], data.data(), size, cudaMemcpyHostToDevice);   
+            cudaMemcpy(dev_data_[i], data.data(), size, cudaMemcpyHostToDevice);
             file_len_[i] = size;
             if (size == img_heights_[i] * img_widths_[i] * 3) {
                 subsamplings_[i] =  NVJPEG_CSS_444;
@@ -245,7 +268,7 @@ int NVJPEGEncoder::FillData() {
     }
 
     int channels;
-    //defaul bmp file should be BGR and 444
+    //default bmp file should be BGR and 444
     if (format_ == "bmp") {
         inputfmt_ = NVJPEG_INPUT_BGRI;
     } if (format_ == "bgri") {
@@ -283,7 +306,7 @@ int NVJPEGEncoder::FillData() {
             break;
         case NVJPEG_CSS_UNKNOWN:
             std::cout << "Unknown chroma subsampling" << std::endl;
-            return EXIT_FAILURE;
+            return false;
         }
     }
 
@@ -326,14 +349,14 @@ int NVJPEGEncoder::FillData() {
             ret = nvjpegEncodeYUV(nvjpegHandle_, encoderState_, encode_params_, &imgdesc, subsamplings_[i], img_widths_[i], img_heights_[i], stream_);
             if (ret != NVJPEG_STATUS_SUCCESS) {
                 std::cout << "fail to nvjpegEncodeYUV " << ret << std::endl;
-                return 0;
+                return false;
             }
         } else {
             // For other formats, use nvjpegEncodeImage
             ret = nvjpegEncodeImage(nvjpegHandle_, encoderState_, encode_params_, &imgdesc, inputfmt_, img_widths_[i], img_heights_[i], stream_);
             if (ret != NVJPEG_STATUS_SUCCESS) {
                 std::cout << "fail to nvjpegEncodeImage " << ret << std::endl;
-                return 0;
+                return false;
             }
         }
         ret = cudaEventRecord(stopEvent, stream_);
@@ -344,42 +367,39 @@ int NVJPEGEncoder::FillData() {
     }
 
     num_decoded += batch_size_;
-    return num_decoded;
+    return true;
 }
 
-uint8_t* NVJPEGEncoder::GetFrame(int *framesize, int *height, int *width, int *n_chan) {
+bool NVJPEGEncoder::GetFrame(CodecFrame& out) {
     int idx = batch_size_ - num_decoded;
     int total_size = 0;
     nvjpegStatus_t ret;
     ret = nvjpegEncodeRetrieveBitstream(nvjpegHandle_, encoderState_, nullptr, (size_t*)&total_size, stream_);
     if (ret != NVJPEG_STATUS_SUCCESS) {
         std::cout << "fail to retrieve bitstream for probe " << ret << std::endl;
-        return nullptr;
+        return false;
     }
     uint8_t* combined_frame = (uint8_t*)malloc(total_size);
     ret = nvjpegEncodeRetrieveBitstream(nvjpegHandle_, encoderState_, combined_frame, (size_t*)&total_size, stream_);
     if (ret != NVJPEG_STATUS_SUCCESS) {
         std::cout << "fail to retrieve bitstream" << std::endl;
-        return nullptr;
+        return false;
     }
-    *height = img_heights_[idx];
-    *width = img_widths_[idx];
-    *n_chan = 1;
+    out.data = combined_frame;
+    out.size = total_size;
+    out.width = img_widths_[idx];
+    out.height = img_heights_[idx];
+    out.format = PixelFormat::Unknown; // JPEG bitstream, not a raw pixel format
+    out.release = [this, combined_frame]() {
+        free(combined_frame);
+        num_decoded--;
+    };
     cudaFree(dev_data_[idx]);
     dev_data_[idx] = nullptr;
-    *framesize = total_size;
-    return combined_frame;
-}
-
-void NVJPEGEncoder::ReleaseFrame(uint8_t **pFrame) {
-    num_decoded --;
-    free(*pFrame);
-}
-
-static bool registered = []() -> bool {
-    NVJPEGEncoder::Register();
     return true;
-}();
+}
+
+HALCODEC_CONNECT(Encoder, nvjpegenc, NVJPEGEncoder);
 
 } // namespace nvjpeg
 } // namespace halcodec

@@ -1,37 +1,29 @@
-#ifndef NVENC_LAYERS_NVENCODER_H
-#define NVENC_LAYERS_NVENCODER_H
+#ifndef NVENC_LAYERS_NVDECODER_H
+#define NVENC_LAYERS_NVDECODER_H
 
 #include <memory>
 #include <vector>
 
+#include "codec_config.h"
 #include "decoder.h"
+#include "frame.h"
 
 #include "nvdevice.h"
 #include "NvDecoder.h"
 #include "FFmpegDemuxer.h"
 
-
 namespace halcodec {
 namespace nvenc {
 
 class NVDecoder : public halcodec::Decoder {
-
 public:
     NVDecoder() = default;
 
-    void Initialize(std::string inputfile, std::string format) override;
+    bool Initialize(const CodecParams& params) override;
     int FillinFrame() override;
     void Finalize() override;
-    uint8_t* GetFrame(int *framesize, int *height, int *width, int *n_chan) override;
-    void ReleaseFrame(uint8_t **pFrame) override;
+    bool GetFrame(CodecFrame& out) override;
     std::string getName() const override;
-
-    static bool Register() {
-        halcodec::Decoder::RegisterDecoder("nvdec", []() {
-            return std::make_unique<NVDecoder>();
-        });
-        return true;
-    }
 
 private:
     std::unique_ptr<NVDevice> device_;
@@ -42,4 +34,4 @@ private:
 } // namespace nvenc
 } // namespace halcodec
 
-#endif // NVENC_LAYERS_NVENCODER_H
+#endif // NVENC_LAYERS_NVDECODER_H

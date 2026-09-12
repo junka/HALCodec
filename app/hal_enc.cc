@@ -1,6 +1,7 @@
 #include <cstdint>
 #include <fstream>
 #include <iostream>
+#include <regex>
 
 #include <dirent.h>
 #include <unistd.h>
@@ -11,11 +12,10 @@
 #include "encoder.h"
 #include "parse_cli.h"
 
+#include "codec_config.h"
+#include "frame.h"
+
 int main(int argc, char *argv[]) {
-    std::string inputFile;
-    std::string outputFile;
-    int gpuIndex;
-    std::string format;
     CommandLineParser cli;
     cli.parse(argc, argv);
 
@@ -25,6 +25,28 @@ int main(int argc, char *argv[]) {
         return -1;
     }
     std::string input = cli.getInputFile();
+
+    std::regex pattern(R"((\d+)[xX](\d+))");
+    std::smatch match;
+    halcodec::CodecParams params;
+    params.inputs.push_back(input);
+    params.deviceIndex = cli.getGpuIndex();
+    if (cli.getFormat() == "rgb" || cli.getFormat() == "rgbi") {
+        params.inputFormat = halcodec::PixelFormat::RGB;
+    } else if (cli.getFormat() == "bgr" || cli.getFormat() == "bgri"
+               || cli.getFormat() == "bmp") {
+        params.inputFormat = halcodec::PixelFormat::BGR;
+    } else {
+        params.inputFormat = halcodec::PixelFormat::I420; // yuv default
+    }
+    if (std::regex_search(input, match, pattern)) {
+        params.width = std::stoi(match[1].str());
+        params.height = std::stoi(match[2].str());
+    }
+    if (!enc->Initialize(params)) {
+        std::cerr << "Fail to initialize encoder" << std::endl;
+        return -1;
+    }
 
     struct stat info;
     if (stat(input.c_str(), &info) != 0) {
@@ -62,29 +84,28 @@ int main(int argc, char *argv[]) {
     std::ofstream fpout(files[fidx++], std::ios::out|std::ios::binary);
     if (!fpout) {
         std::cerr << "unable to open output file" << std::endl;
+        return -1;
     }
 
-    enc->Initialize(input, cli.getFormat());
-    int n_enc = 0;
     int total_frames = 0;
-    do {
-        n_enc = enc->FillData();
-        total_frames += n_enc;
-        for (int i = 0; i < n_enc; i++) {
-            int size;
-            int width;
-            int height;
-            int n_chan;
-            auto data = enc->GetFrame(&size, &height, &width, &n_chan);
-            printf("get frame size %d, w %d, h %d\n", size, width, height);
-            fpout.write(reinterpret_cast<char *>(data), size);
-            if (enc->getName() == "nvjpeg" && fidx < files.size()) {
+    halcodec::CodecFrame frame;
+    // Feed the encoder; each successful FillFrame may produce several
+    // encapsulated packets which GetFrame drains one by one.
+    while (enc->FillFrame(frame)) {
+        while (enc->GetFrame(frame)) {
+            total_frames++;
+            printf("get frame size %zu, w %d, h %d\n",
+                   frame.size, frame.width, frame.height);
+            fpout.write(reinterpret_cast<const char *>(frame.data), frame.size);
+            if (enc->getName() == "nvjpegenc" && fidx < files.size()) {
                 fpout.close();
                 fpout.open(files[fidx++], std::ios::out|std::ios::binary);
             }
-            enc->ReleaseFrame(&data);
+            if (frame.release) {
+                frame.release();
+            }
         }
-    } while (n_enc > 0);
+    }
 
     fpout.close();
     enc->Finalize();

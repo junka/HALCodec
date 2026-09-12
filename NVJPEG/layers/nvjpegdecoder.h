@@ -5,8 +5,11 @@
 #include <nvjpeg.h>
 #include <vector>
 #include <string>
+#include <stdexcept>
 
+#include "codec_config.h"
 #include "decoder.h"
+#include "frame.h"
 
 namespace halcodec {
 namespace nvjpeg {
@@ -16,29 +19,19 @@ public:
     NVJPEGDecoder();
     ~NVJPEGDecoder() = default;
 
-    void Initialize(std::string input, std::string format) override;
+    bool Initialize(const CodecParams& params) override;
 
     int FillinFrame() override;
 
     void Finalize() override;
 
-    std::string getName() const override {return "nvjpeg";}
+    std::string getName() const override { return "nvjpeg"; }
 
-    uint8_t* GetFrame(int *framesize, int *height, int *width, int *n_chan) override;
+    bool GetFrame(CodecFrame& out) override;
 
-    void ReleaseFrame(uint8_t **pFrame) override;
-
-    static bool Register() {
-        halcodec::Decoder::RegisterDecoder("nvjpeg", []() {
-            return std::make_unique<NVJPEGDecoder>();
-        });
-        return true;
-    }
 private:
     void create_decouple_api();
     void destroy_deouple_api();
-
-    void checkStatus(nvjpegStatus_t status, const std::string& errorMessage);
 
     static int dev_malloc(void **p, size_t s) { return (int)cudaMalloc(p, s); }
 
@@ -66,7 +59,6 @@ private:
     nvjpegJpegStream_t  jpeg_streams_[2]; //  2 streams for pipelining
     nvjpegDecodeParams_t decode_params_;
 
-    
     std::vector<std::vector<char> > data_;
     std::vector<size_t> file_len_;
     std::vector<nvjpegImage_t> out_;
@@ -84,4 +76,5 @@ private:
 
 } // namespace nvjpeg
 } // namespace halcodec
+
 #endif // NVJPEGDECODER_H

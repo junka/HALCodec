@@ -7,18 +7,42 @@
 
 namespace halcodec {
 namespace vtbox {
-void VTDecoder::Initialize(std::string input, std::string format) {
-    const uint8_t* sps = nullptr;
-    size_t spsSize = 0;
-    const uint8_t* pps = nullptr;
-    size_t ppsSize = 0;
 
-    const uint8_t* parameterSetPointers[2] = { sps, pps };
-    const size_t parameterSetSizes[2] = { spsSize, ppsSize };
+bool VTDecoder::Initialize(const CodecParams& params) {
+    // Parse H.264 parameter sets from extradata (AVCC layout:
+    // [len:4][nalu][len:4][nalu] ...). SPS (type 7) and PPS (type 8) are fed
+    // to VideoToolbox to build the format description.
+    const uint8_t* parameterSetPointers[2] = { nullptr, nullptr };
+    size_t parameterSetSizes[2] = { 0, 0 };
+    size_t parameterSetCount = 0;
+
+    const auto& ext = params.extradata;
+    size_t pos = 0;
+    while (pos + 4 <= ext.size() && parameterSetCount < 2) {
+        uint32_t naluLen = (static_cast<uint32_t>(ext[pos]) << 24) |
+                           (static_cast<uint32_t>(ext[pos + 1]) << 16) |
+                           (static_cast<uint32_t>(ext[pos + 2]) << 8) |
+                           static_cast<uint32_t>(ext[pos + 3]);
+        pos += 4;
+        if (pos + naluLen > ext.size()) {
+            break;
+        }
+        uint8_t naluType = ext[pos] & 0x1F;
+        if (naluType == 7 && parameterSetCount == 0) {
+            parameterSetPointers[0] = ext.data() + pos;
+            parameterSetSizes[0] = naluLen;
+            parameterSetCount = 1;
+        } else if (naluType == 8 && parameterSetCount == 1) {
+            parameterSetPointers[1] = ext.data() + pos;
+            parameterSetSizes[1] = naluLen;
+            parameterSetCount = 2;
+        }
+        pos += naluLen;
+    }
 
     OSStatus status = CMVideoFormatDescriptionCreateFromH264ParameterSets(
         kCFAllocatorDefault,
-        2,
+        static_cast<size_t>(parameterSetCount),
         parameterSetPointers,
         parameterSetSizes,
         4,
@@ -27,7 +51,7 @@ void VTDecoder::Initialize(std::string input, std::string format) {
 
     if (status != noErr) {
         std::cerr << "Failed to create format description: " << status << std::endl;
-        return;
+        return false;
     }
 
     VTDecompressionOutputCallbackRecord callback;
@@ -45,28 +69,30 @@ void VTDecoder::Initialize(std::string input, std::string format) {
 
     if (status != noErr) {
         std::cerr << "Failed to create decompression session: " << status << std::endl;
-        return;
+        return false;
     }
 
-    return;
+    return true;
 }
 
 void VTDecoder::Finalize() {
-
-}
-
-void VTDecoder::ReleaseFrame(uint8_t **pFrame) {
-    // No-op for VideoToolbox as frames are managed by the framework
+    if (decompressionSession) {
+        VTDecompressionSessionInvalidate(decompressionSession);
+        decompressionSession = nullptr;
+    }
+    if (formatDescription) {
+        CFRelease(formatDescription);
+        formatDescription = nullptr;
+    }
 }
 
 int VTDecoder::FillinFrame() {
-    
     return 0;
 }
 
-uint8_t* VTDecoder::GetFrame(int *framesize, int *height, int *width, int *n_chan) {
-    uint8_t* frame = nullptr;
-    return nullptr;
+bool VTDecoder::GetFrame(CodecFrame& out) {
+    (void)out;
+    return false;
 }
 
 bool VTDecoder::decodeFrame(const uint8_t* data, size_t size) {
@@ -143,6 +169,10 @@ void VTDecoder::DecompressionCallback(
     CMTime presentationTimeStamp,
     CMTime presentationDuration
 ) {
+    (void)decompressionOutputRefCon;
+    (void)sourceFrameRefCon;
+    (void)infoFlags;
+    (void)presentationDuration;
     if (status != noErr) {
         std::cerr << "Decode callback error: " << status << std::endl;
         return;
@@ -154,11 +184,7 @@ void VTDecoder::DecompressionCallback(
     }
 }
 
-
-static bool registered = []() -> bool {
-    VTDecoder::Register();
-    return true;
-}();
+HALCODEC_CONNECT(Decoder, vtbox, VTDecoder);
 
 } // namespace vtbox
 } // namespace halcodec
