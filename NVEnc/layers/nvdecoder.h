@@ -8,7 +8,7 @@
 #include "decoder.h"
 #include "frame.h"
 
-#include "nvdevice.h"
+#include "cuda_context.h"
 #include "NvDecoder.h"
 #include "FFmpegDemuxer.h"
 
@@ -26,7 +26,7 @@ public:
     std::string getName() const override;
 
 private:
-    std::unique_ptr<NVDevice> device_;
+    CUDAContext cudaCtx_;
     std::unique_ptr<NvDecoder> decoder_;
     std::unique_ptr<FFmpegDemuxer> demuxer_;
 };

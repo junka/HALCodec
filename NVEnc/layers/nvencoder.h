@@ -8,7 +8,7 @@
 #include "encoder.h"
 #include "frame.h"
 
-#include "nvdevice.h"
+#include "cuda_context.h"
 
 #include "NvEncoder/NvEncoderCuda.h"
 #include "NvEncoderCLIOptions.h"
@@ -27,7 +27,7 @@ public:
     std::string getName() const override;
 
 private:
-    std::unique_ptr<NVDevice> device_;
+    CUDAContext cudaCtx_;
     std::unique_ptr<NvEncoderCuda> encoder_;
 
     std::vector<std::vector<uint8_t>> vPacket_;

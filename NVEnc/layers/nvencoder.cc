@@ -33,11 +33,12 @@ bool NVEncoder::Initialize(const CodecParams& params) {
         std::cerr << err.str();
         return false;
     }
-    device_ = std::make_unique<NVDevice>();
-    if (!device_) {
-        std::cout << "unable to create device" << std::endl;
+    if (!cudaCtx_.create(params.deviceIndex)) {
+        std::cerr << "NVEncoder: failed to create CUDA context for device "
+                  << params.deviceIndex << std::endl;
         return false;
     }
+    auto cudaCtx = cudaCtx_.get();
     int width = params.width;
     int height = params.height;
     if (width <= 0 || height <= 0) {
@@ -51,8 +52,6 @@ bool NVEncoder::Initialize(const CodecParams& params) {
             return false;
         }
     }
-    device_->createCtx(0);
-    auto cudaCtx = device_->getCtx();
     std::string format = "nv12";
     switch (params.inputFormat) {
         case PixelFormat::I420: format = "iyuv"; break;
@@ -129,7 +128,7 @@ bool NVEncoder::FillFrame(const CodecFrame&) {
     std::streamsize nRead = finput_.read(reinterpret_cast<char*>(pHostFrame.get()), nFrameSize).gcount();
     if (nRead == nFrameSize) {
         const NvEncInputFrame* encoderInputFrame = encoder_->GetNextInputFrame();
-        NvEncoderCuda::CopyToDeviceFrame(device_->getCtx(),
+        NvEncoderCuda::CopyToDeviceFrame(cudaCtx_.get(),
             pHostFrame.get() + viewID * nFrameSize, 0,
             (CUdeviceptr)encoderInputFrame->inputPtr,
             (int)encoderInputFrame->pitch,

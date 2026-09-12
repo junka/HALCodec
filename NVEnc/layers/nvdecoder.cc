@@ -33,9 +33,12 @@ bool NVDecoder::Initialize(const CodecParams& params) {
         std::cerr << "NVDecoder: no input specified" << std::endl;
         return false;
     }
-    device_ = std::make_unique<NVDevice>();
-    device_->createCtx(params.deviceIndex);
-    auto cudaCtx = device_->getCtx();
+    if (!cudaCtx_.create(params.deviceIndex)) {
+        std::cerr << "NVDecoder: failed to create CUDA context for device "
+                  << params.deviceIndex << std::endl;
+        return false;
+    }
+    auto cudaCtx = cudaCtx_.get();
 
     Rect cropRect = {};
     Dim resizeDim = {};

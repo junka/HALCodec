@@ -1,10 +1,7 @@
 cmake_minimum_required(VERSION 3.10)
 
-set(enc_src nvencoder.cc nvdecoder.cc nvdevice.cc nvdevice_caps.cc)
-set(NVENC_SDK_SRC ${NV_DEC_DIR}/NvDecoder.cpp
-                  ${NV_ENC_DIR}/NvEncoder.cpp
-                  ${NV_ENC_DIR}/NvEncoderCuda.cpp
-                  ${NV_ENC_DIR}/NvEncoderOutputInVidMemCuda.cpp)
+set(enc_src nvencoder.cc nvdecoder.cc nvidia_caps.cc)
+set(NVENC_SDK_SRC ${NV_DEC_DIR}/NvDecoder.cpp ${NV_ENC_DIR}/NvEncoder.cpp)
 
 add_library(nvenc_layers SHARED ${enc_src} ${NVENC_SDK_SRC})
 

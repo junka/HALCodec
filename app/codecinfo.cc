@@ -1,22 +1,52 @@
 #include <cstdint>
 #include <iostream>
+#include <string>
+#include <vector>
 
-#include "device.h"
+#include "parse_cli.h"
 
-int main() {
-    halcodec::Device::ShowDevices();
-    auto dev = halcodec::Device::Create("nvidia");
-    if (!dev) {
-        std::cout << "unable to create device" << std::endl;
-        return 1;
+#include "capability.h"
+#include "registry.h"
+
+int main(int argc, char* argv[]) {
+    CommandLineParser cli;
+    cli.parse(argc, argv);
+
+    // Resolve providers: a single one from -b, or every registered one.
+    std::vector<std::string> backends;
+    if (!cli.getBackend().empty()) {
+        backends.push_back(cli.getBackend());
+    } else {
+        backends = halcodec::Registry<halcodec::CapabilityProvider>::Names();
     }
-    int num = dev->getNumDevices();
-    for (int i = 0; i < num; i++) {
-        dev->createCtx(i);
-        std::cout << dev->getDeviceIdx() << ": " << dev->getDeviceName() << std::endl;
-        dev->showDecoderCapability();
+
+    if (backends.empty()) {
+        std::cout << "no capability providers registered" << std::endl;
+        return 0;
+    }
+
+    for (const auto& backend : backends) {
+        std::cout << "== backend: " << backend << " ==" << std::endl;
+        auto provider = halcodec::CapabilityProvider::Create(backend);
+        if (!provider) {
+            std::cout << "  unable to create capability provider" << std::endl;
+            continue;
+        }
+
+        auto devices = provider->getDeviceNames();
+        if (devices.empty()) {
+            std::cout << "  (no device enumeration available)" << std::endl;
+        } else {
+            for (size_t i = 0; i < devices.size(); i++) {
+                std::cout << "  device " << i << ": " << devices[i] << std::endl;
+            }
+        }
+
+        std::cout << "  decoder capabilities:" << std::endl;
+        provider->showDecoderCapability();
+        std::cout << "  encoder capabilities:" << std::endl;
+        provider->showEncoderCapability();
         std::cout << std::endl;
-        dev->showEncoderCapability();
     }
     return 0;
 }
