@@ -1,7 +1,5 @@
 #include <vector>
 #include <algorithm>
-#include <fstream>
-#include <sstream>
 #include <string>
 #include <regex>
 
@@ -13,26 +11,14 @@
 namespace halcodec {
 namespace nvenc {
 
-// NVENC encoding pipeline. Reads raw frames from the input file described in
-// CodecParams, encodes them with the NvEncoderCuda helper and hands the
-// resulting elementary-stream packets out via GetFrame().
+// NVENC encoding pipeline. Raw frames are delivered by the caller via
+// FillFrame(const CodecFrame&); the encoder converts them onto the device and
+// hands the resulting elementary-stream packets out via GetFrame().
 
 NVEncoder::NVEncoder() {
 }
 
 bool NVEncoder::Initialize(const CodecParams& params) {
-    if (params.inputs.empty()) {
-        std::cerr << "NVEncoder: no input specified" << std::endl;
-        return false;
-    }
-    std::string input = params.inputs[0];
-    finput_.open(input, std::ifstream::in | std::ifstream::binary);
-    if (!finput_) {
-        std::ostringstream err;
-        err << "Unable to open input file: " << input << std::endl;
-        std::cerr << err.str();
-        return false;
-    }
     if (!cudaCtx_.create(params.deviceIndex)) {
         std::cerr << "NVEncoder: failed to create CUDA context for device "
                   << params.deviceIndex << std::endl;
@@ -42,6 +28,7 @@ bool NVEncoder::Initialize(const CodecParams& params) {
     int width = params.width;
     int height = params.height;
     if (width <= 0 || height <= 0) {
+        std::string input = params.inputs.empty() ? "" : params.inputs[0];
         std::regex pattern(R"((\d+)[xX](\d+))");
         std::smatch match;
         if (std::regex_search(input, match, pattern)) {
@@ -110,43 +97,29 @@ bool NVEncoder::Initialize(const CodecParams& params) {
 
 void NVEncoder::Finalize() {
     encoder_->DestroyEncoder();
-    finput_.close();
 }
 
-bool NVEncoder::FillFrame(const CodecFrame&) {
-    int nFrameSize = encoder_->GetFrameSize();
-#if NVENCAPI_MAJOR_VERSION > 12
-    uint32_t enableMVHEVC = encoder_->IsMVHEVC();
-    if (enableMVHEVC) {
-        nFrameSize = nFrameSize << 1;
-    }
-#endif
-    std::unique_ptr<uint8_t[]> pHostFrame(new uint8_t[nFrameSize]);
-    int viewID = 0;
-    int nFrame = 0;
-    printf("frame size %d\n", nFrameSize);
-    std::streamsize nRead = finput_.read(reinterpret_cast<char*>(pHostFrame.get()), nFrameSize).gcount();
-    if (nRead == nFrameSize) {
-        const NvEncInputFrame* encoderInputFrame = encoder_->GetNextInputFrame();
-        NvEncoderCuda::CopyToDeviceFrame(cudaCtx_.get(),
-            pHostFrame.get() + viewID * nFrameSize, 0,
-            (CUdeviceptr)encoderInputFrame->inputPtr,
-            (int)encoderInputFrame->pitch,
-            encoder_->GetEncodeWidth(),
-            encoder_->GetEncodeHeight(),
-            CU_MEMORYTYPE_HOST,
-            encoderInputFrame->bufferFormat,
-            encoderInputFrame->chromaOffsets,
-            encoderInputFrame->numChromaPlanes);
-
-        encoder_->EncodeFrame(vPacket_);
-        printf("EncodeFrame\n");
-    } else {
-        printf("end\n");
+bool NVEncoder::FillFrame(const CodecFrame& in) {
+    if (in.size == 0) {
+        // End-of-stream marker: flush the encoder; buffered packets are then
+        // drained through GetFrame().
         encoder_->EndEncode(vPacket_);
+        return true;
     }
-    nFrame += (int)vPacket_.size();
-    return nFrame > 0;
+    const NvEncInputFrame* encoderInputFrame = encoder_->GetNextInputFrame();
+    NvEncoderCuda::CopyToDeviceFrame(cudaCtx_.get(),
+        in.data, 0,
+        (CUdeviceptr)encoderInputFrame->inputPtr,
+        (int)encoderInputFrame->pitch,
+        encoder_->GetEncodeWidth(),
+        encoder_->GetEncodeHeight(),
+        CU_MEMORYTYPE_HOST,
+        encoderInputFrame->bufferFormat,
+        encoderInputFrame->chromaOffsets,
+        encoderInputFrame->numChromaPlanes);
+
+    encoder_->EncodeFrame(vPacket_);
+    return true;
 }
 
 bool NVEncoder::GetFrame(CodecFrame& out) {

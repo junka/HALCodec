@@ -20,6 +20,8 @@ public:
     NVDecoder() = default;
 
     bool Initialize(const CodecParams& params) override;
+    int FillInput(const uint8_t* data, size_t size) override;
+    bool SignalInputComplete() override;
     int PullFrames() override;
     void Finalize() override;
     bool GetFrame(CodecFrame& out) override;
@@ -29,6 +31,10 @@ private:
     CUDAContext cudaCtx_;
     std::unique_ptr<NvDecoder> decoder_;
     std::unique_ptr<FFmpegDemuxer> demuxer_;
+
+    // True when constructed without an input file: the caller feeds compressed
+    // data via FillInput() (see Initialize()).
+    bool feedMode_ = false;
 };
 
 } // namespace nvenc

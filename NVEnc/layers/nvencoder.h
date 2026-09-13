@@ -1,8 +1,8 @@
 #ifndef NVENC_LAYERS_NVENCODER_H
 #define NVENC_LAYERS_NVENCODER_H
 
-#include <fstream>
 #include <string>
+#include <vector>
 
 #include "codec_config.h"
 #include "encoder.h"
@@ -31,8 +31,6 @@ private:
     std::unique_ptr<NvEncoderCuda> encoder_;
 
     std::vector<std::vector<uint8_t>> vPacket_;
-
-    std::ifstream finput_;
 };
 
 } // namespace nvenc

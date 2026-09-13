@@ -3,9 +3,7 @@
 
 #include <cuda.h>
 #include <nvjpeg.h>
-#include <vector>
 #include <string>
-#include <memory>
 
 #include "codec_config.h"
 #include "encoder.h"
@@ -35,37 +33,22 @@ public:
     static int host_free(void* p) { return (int)cudaFreeHost(p); }
 
 private:
-    int batch_size_ = 1;
     std::string format_;
-    std::vector<std::string> file_names_;
-    std::vector<std::string>::iterator file_iter_;
     bool pipeline_ = false;
     nvjpegHandle_t nvjpegHandle_;
 
     nvjpegEncoderState_t encoderState_;
     nvjpegInputFormat_t inputfmt_;
+    nvjpegEncoderParams_t encode_params_;
 
     cudaStream_t stream_;
 
-    //decouple
-    nvjpegJpegState_t decoupled_state_;
-    nvjpegBufferPinned_t pinned_buffers_[2]; // 2 buffers for pipelining
-    nvjpegBufferDevice_t device_buffer_;
-    nvjpegJpegStream_t  jpeg_streams_[2]; //  2 streams for pipelining
-    nvjpegEncoderParams_t encode_params_;
+    uint8_t* dev_data_ = nullptr;       // single input image uploaded to device
+    int img_width_ = 0;
+    int img_height_ = 0;
+    nvjpegChromaSubsampling_t subsampling_ = NVJPEG_CSS_420;
 
-
-    std::vector<uint8_t *> dev_data_;
-    std::vector<size_t> file_len_;
-    std::vector<nvjpegImage_t> out_;
-    std::vector<nvjpegImage_t> isz_;
-
-    std::vector<int> img_widths_;
-    std::vector<int> img_heights_;
-
-    std::vector<nvjpegChromaSubsampling_t> subsamplings_;
-
-    int num_decoded = 0;
+    bool bitstreamReady_ = false;       // one encoded JPEG pending in GetFrame()
 
     CUcontext cuContext_ = nullptr;
 };

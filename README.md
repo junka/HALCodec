@@ -116,15 +116,22 @@ Notes:
 
 ```sh
 cd build
-./app/hal_enc                                   # default backend (nvenc)
-./app/hal_enc -b nvenc                          # explicit
+./app/hal_enc -i raw_320x240.yuv -f yuv -o out.h264     # single raw stream
+./app/hal_enc -i images/ -b nvjpegenc -f rgb            # one frame per file
 ```
 
 Purpose: the encoder-side counterpart of `hal_dec`, demonstrating the
-`Encoder` factory and lifecycle (`Initialize` → `Finalize`). The `nvenc`
-backend is not implemented yet, so `Initialize()` returns `false` and the tool
-reports `Fail to initialize encoder backend` — the adapter plumbing itself is
-exercised (backend creation, `getName()`).
+`Encoder` factory and the explicit feed model. The app owns input reading:
+- single file inputs are sliced into fixed-size frames (bytes per frame are
+  derived from `-f` and the `WxH` resolution), each delivered as one
+  `CodecFrame` via `FillFrame()`; BMP input is read as a single image;
+- directory inputs feed one file per `FillFrame()` call;
+- an empty marker frame ends the stream, letting the encoder flush trailing
+  packets, drained with `GetFrame()` until it returns false.
+
+Encoders consume frame data from the `CodecFrame` parameter (`nvenc` uploads
+it to the device, `nvjpegenc` uploads it as one image) instead of opening the
+input file themselves.
 
 ### codecinfo — inspect backends
 

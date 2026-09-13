@@ -1,8 +1,10 @@
 #include <cstdint>
+#include <cstdlib>
 #include <fstream>
 #include <iostream>
 #include <regex>
 #include <string>
+#include <vector>
 
 #include <dirent.h>
 #include <unistd.h>
@@ -92,24 +94,162 @@ int main(int argc, char* argv[]) {
     }
 
     int total_frames = 0;
-    halcodec::CodecFrame frame;
-    // Feed the encoder; each successful FillFrame may produce several
-    // encapsulated packets which GetFrame drains one by one.
-    while (enc->FillFrame(frame)) {
-        while (enc->GetFrame(frame)) {
+    // The app owns input reading: raw frames are delivered one CodecFrame at
+    // a time via FillFrame(); encoders must consume the parameter instead of
+    // opening the file themselves.
+    halcodec::CodecFrame in;
+    in.width = params.width;
+    in.height = params.height;
+    in.format = params.inputFormat;
+
+    auto drain = [&]() {
+        halcodec::CodecFrame out;
+        while (enc->GetFrame(out)) {
             total_frames++;
-            printf("get frame size %zu, w %d, h %d\n",
-                   frame.size, frame.width, frame.height);
-            fpout.write(reinterpret_cast<const char *>(frame.data), frame.size);
+            fpout.write(reinterpret_cast<const char *>(out.data), out.size);
             if (enc->getName() == "nvjpegenc" && fidx < files.size()) {
                 fpout.close();
                 fpout.open(files[fidx++], std::ios::out|std::ios::binary);
             }
-            if (frame.release) {
-                frame.release();
+            if (out.release) {
+                out.release();
             }
         }
+    };
+
+    if (info.st_mode & S_IFDIR) {
+        // Feed each file in the directory as one whole image.
+        DIR *dir;
+        struct dirent *ent;
+        if ((dir = opendir(input.c_str())) != NULL) {
+            std::vector<uint8_t> buf;
+            while ((ent = readdir(dir)) != NULL) {
+                if (ent->d_type != DT_REG) {
+                    continue;
+                }
+                std::string path = input + '/' + ent->d_name;
+                if (cli.getFormat() == "bmp") {
+                    int w = 0, h = 0, n_chan = 0;
+                    BMPReader reader(path);
+                    in.data = reader.readBMP(&w, &h, &n_chan);
+                    if (!in.data) {
+                        std::cerr << "Failed to read BMP: " << path << std::endl;
+                        continue;
+                    }
+                    int rowPadding = (4 - ((w * n_chan) % 4)) % 4;
+                    in.size = (static_cast<size_t>(w) * n_chan + rowPadding) * h;
+                    in.width = w;
+                    in.height = h;
+                    enc->FillFrame(in);
+                    std::free(in.data);
+                } else {
+                    std::ifstream fin(path, std::ios::binary | std::ios::ate);
+                    if (!fin) {
+                        std::cerr << "Cannot open " << path << std::endl;
+                        continue;
+                    }
+                    std::streamsize sz = fin.tellg();
+                    fin.seekg(0, std::ios::beg);
+                    buf.resize(static_cast<size_t>(sz));
+                    fin.read(reinterpret_cast<char *>(buf.data()), sz);
+                    // Resolve dimensions from the filename when the CLI did
+                    // not carry them.
+                    int w = params.width, h = params.height;
+                    if (w <= 0 || h <= 0) {
+                        std::smatch m;
+                        if (std::regex_search(path, m, pattern)) {
+                            w = std::stoi(m[1].str());
+                            h = std::stoi(m[2].str());
+                        }
+                    }
+                    if (w <= 0 || h <= 0) {
+                        std::cerr << "Cannot determine dimensions for "
+                                  << path << std::endl;
+                        continue;
+                    }
+                    in.data = buf.data();
+                    in.size = buf.size();
+                    in.width = w;
+                    in.height = h;
+                    enc->FillFrame(in);
+                }
+                drain();
+            }
+            closedir(dir);
+        }
+    } else {
+        // Single raw file. BMP input is a single whole image (header parsed by
+        // BMPReader); any other input is sliced into fixed-size raw frames.
+        if (cli.getFormat() == "bmp") {
+            int w = 0, h = 0, n_chan = 0;
+            BMPReader reader(input);
+            in.data = reader.readBMP(&w, &h, &n_chan);
+            if (!in.data) {
+                std::cerr << "Failed to read BMP: " << input << std::endl;
+                return -1;
+            }
+            int rowPadding = (4 - ((w * n_chan) % 4)) % 4;
+            in.size = (static_cast<size_t>(w) * n_chan + rowPadding) * h;
+            in.width = w;
+            in.height = h;
+            enc->FillFrame(in);
+            std::free(in.data);
+            drain();
+            // Flush trailing packets and finish.
+            halcodec::CodecFrame eos;
+            eos.width = params.width;
+            eos.height = params.height;
+            eos.format = params.inputFormat;
+            enc->FillFrame(eos);
+            drain();
+            fpout.close();
+            enc->Finalize();
+            std::cout << "Encode total frames: " << total_frames << std::endl;
+            return 0;
+        }
+        std::ifstream fin(input, std::ios::binary | std::ios::ate);
+        if (!fin) {
+            std::cerr << "Cannot open input file: " << input << std::endl;
+            return -1;
+        }
+        std::streamsize total = fin.tellg();
+        fin.seekg(0, std::ios::beg);
+        std::vector<uint8_t> buf(static_cast<size_t>(total));
+        fin.read(reinterpret_cast<char *>(buf.data()), total);
+        if (params.width <= 0 || params.height <= 0) {
+            std::cerr << "Cannot determine frame dimensions" << std::endl;
+            return -1;
+        }
+        int64_t w = params.width, h = params.height;
+        std::string fmt = cli.getFormat();
+        size_t frameBytes = 0;
+        if (fmt == "y" || fmt == "gray") {
+            frameBytes = w * h;
+        } else if (fmt == "bgra" || fmt == "rgba") {
+            frameBytes = w * h * 4;
+        } else if (fmt == "yuv444" || fmt == "rgb" || fmt == "bgr"
+                   || fmt == "rgbi" || fmt == "bgri") {
+            frameBytes = w * h * 3;
+        } else {
+            frameBytes = w * h * 3 / 2; // nv12/iyuv/yuv default
+        }
+        in.width = params.width;
+        in.height = params.height;
+        for (size_t off = 0; off + frameBytes <= buf.size(); off += frameBytes) {
+            in.data = buf.data() + off;
+            in.size = frameBytes;
+            enc->FillFrame(in);
+            drain();
+        }
     }
+
+    // End-of-stream marker: encoders flush trailing packets, drained below.
+    halcodec::CodecFrame eos;
+    eos.width = params.width;
+    eos.height = params.height;
+    eos.format = params.inputFormat;
+    enc->FillFrame(eos);
+    drain();
 
     fpout.close();
     enc->Finalize();
