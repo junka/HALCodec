@@ -84,7 +84,7 @@ bool AMFDecoder::Initialize(const CodecParams& params) {
     return true;
 }
 
-int AMFDecoder::FillinFrame() {
+int AMFDecoder::PullFrames() {
     // Data path TODO: demux params.inputs[0], feed AMFBytes/AMFDataStream into
     // the decoder via SubmitInput, and drain via QueryOutput.
     return 0;

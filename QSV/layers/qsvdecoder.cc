@@ -70,7 +70,7 @@ bool QSVDecoder::Initialize(const CodecParams& params) {
     return true;
 }
 
-int QSVDecoder::FillinFrame() {
+int QSVDecoder::PullFrames() {
     // Data path TODO: demux params.inputs[0], feed mfxBitstream via
     // MFXVideoDECODE_DecodeHeader/DecodeAsync and drain via GetSurfacePool.
     return 0;

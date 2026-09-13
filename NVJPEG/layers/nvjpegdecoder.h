@@ -21,7 +21,7 @@ public:
 
     bool Initialize(const CodecParams& params) override;
 
-    int FillinFrame() override;
+    int PullFrames() override;
 
     void Finalize() override;
 

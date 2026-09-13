@@ -86,7 +86,7 @@ void VTDecoder::Finalize() {
     }
 }
 
-int VTDecoder::FillinFrame() {
+int VTDecoder::PullFrames() {
     return 0;
 }
 

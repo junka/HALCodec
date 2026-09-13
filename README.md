@@ -9,8 +9,10 @@ aims to simplify the usage of hw codec by exposing one unified C++ interface
 All types live in the `halcodec` namespace:
 
 - `Encoder` / `Decoder` (`encoder.h`, `decoder.h`) — symmetric codec
-  interfaces: `Initialize(CodecParams&)`, `FillFrame` / `FillinFrame`,
-  `GetFrame(CodecFrame&)`, `Finalize`.
+  interfaces: `Initialize(CodecParams&)`, `FillFrame` / `FillInput`,
+  `GetFrame(CodecFrame&)`, `Finalize`. Decoders additionally expose
+  `PullFrames()` (internal-source drive), `IsAsync()` and
+  `SignalInputComplete()` for explicitly fed streams.
 - `CodecFrame` (`frame.h`) — unified frame container carrying `data`, `size`,
   `width`, `height`, `PixelFormat`, per-plane `strides` and `pts`. Frames are
   released through `frame.release()`.
@@ -100,12 +102,15 @@ Notes:
   meaningful for backend decoders that walk the path themselves (e.g. `nvjpeg`
   on Linux); `vtbox` requires a single file, since its parameter sets come from
   one Annex-B stream.
-- **Decode loop**: `FillinFrame()` feeds input, then each returned frame is
-  written via `GetFrame()` and released with `frame.release()`. The `nvjpeg`
-  backend switches to a new output file per frame.
-- **Current status**: the `vtbox` data path is still a stub — `FillinFrame()`
-  returns `0`, so `Decode total frames: 0` is expected. `Initialize()` does
-  create a real VideoToolbox decompression session and reports `OK`.
+- **Decode loop**: synchronous backends are driven by `PullFrames()` (feeds
+  input, then each returned frame is written via `GetFrame()` and released with
+  `frame.release()`). Async backends (`vtbox`, `isAsync() == true`) are fed
+  chunk-by-chunk with `FillInput()` and drained until `GetFrame()` returns
+  false (blocking-until-EOF). The `nvjpeg` backend switches to a new output
+  file per frame.
+- **Current status**: `vtbox` decodes asynchronously via its internal queue
+  — `FillInput()` accepts Annex-B access units, frames arrive from the
+  decompression callback and `GetFrame()` blocks until the stream ends.
 
 ### hal_enc — encode
 

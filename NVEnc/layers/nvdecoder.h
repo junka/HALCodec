@@ -20,7 +20,7 @@ public:
     NVDecoder() = default;
 
     bool Initialize(const CodecParams& params) override;
-    int FillinFrame() override;
+    int PullFrames() override;
     void Finalize() override;
     bool GetFrame(CodecFrame& out) override;
     std::string getName() const override;

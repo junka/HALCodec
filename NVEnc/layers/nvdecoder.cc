@@ -57,7 +57,7 @@ bool NVDecoder::Initialize(const CodecParams& params) {
     return true;
 }
 
-int NVDecoder::FillinFrame() {
+int NVDecoder::PullFrames() {
     uint8_t* pVideo = nullptr;
     int nVideoBytes = 0;
     int nFrame = 0;

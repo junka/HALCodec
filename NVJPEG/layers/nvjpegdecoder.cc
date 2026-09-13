@@ -181,7 +181,7 @@ void NVJPEGDecoder::Finalize() {
     cuCtxDestroy(cuContext_);
 }
 
-int NVJPEGDecoder::FillinFrame() {
+int NVJPEGDecoder::PullFrames() {
     float loopTime = 0;
     double time;
     cudaEvent_t startEvent = NULL;

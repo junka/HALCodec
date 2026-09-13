@@ -184,7 +184,7 @@ int main(int argc, char* argv[]) {
     int n_dec = 0;
     int total_frames = 0;
     do {
-        n_dec = dec->FillinFrame();
+        n_dec = dec->PullFrames();
         total_frames += n_dec;
         for (int i = 0; i < n_dec; i++) {
             halcodec::CodecFrame frame;
