@@ -2,8 +2,10 @@
 #define BMP_WRITE_H
 
 #include <cstdint>
+#include <cstring>
 #include <string>
 #include <fstream>
+#include <vector>
 
 #pragma pack(push, 1)
 
@@ -55,10 +57,8 @@ public:
     int writeBMP(const uint8_t *data, int width, int height, int n_chan) {
         int extrabytes;
         int paddedsize;
-        int x;
         int y;
-        int n;
-        uint8_t red, green, blue;
+        int x;
         extrabytes = (4 - ((width * n_chan) % 4)) % 4;  // How many bytes of padding to add to each
         paddedsize = ((width * n_chan) + extrabytes) * height;
 
@@ -83,43 +83,45 @@ public:
             }
             file_.write(reinterpret_cast<const char*>(palette), 256 * sizeof(struct BMPColor));
         }
-        // BMP image format is written from bottom to top...
+        // BMP image format is written from bottom to top; each row is packed
+        // in a buffer and written in a single call instead of byte-by-byte.
+        std::vector<uint8_t> row(static_cast<size_t>(width) * n_chan + extrabytes);
+        const size_t plane = static_cast<size_t>(width) * height;  // bytes per component plane
         for (y = height - 1; y >= 0; y--) {
-            for (x = 0; x <= width - 1; x++) {
-                if (format_ == "y") {
-                    red = data[y * width + x];
-                    file_.write(reinterpret_cast<const char*>(&red), 1);
-                } else {
+            size_t px = 0;
+            if (format_ == "y") {
+                const uint8_t* src = data + static_cast<size_t>(y) * width;
+                memcpy(row.data(), src, width);
+            } else {
+                for (x = 0; x < width; x++) {
+                    uint8_t r, g, b;
                     if (format_ == "rgb") {
-                        red = data[y * width + x];
-                        green = data[y * width + x + width * height];
-                        blue = data[y * width + x + width * height * 2];
+                        r = data[static_cast<size_t>(y) * width + x];
+                        g = data[static_cast<size_t>(y) * width + x + plane];
+                        b = data[static_cast<size_t>(y) * width + x + plane * 2];
                     } else if (format_ == "bgr") {
-                        red = data[y * width + x + width * height * 2];
-                        green = data[y * width + x + width * height];
-                        blue = data[y * width + x];
+                        b = data[static_cast<size_t>(y) * width + x];
+                        g = data[static_cast<size_t>(y) * width + x + plane];
+                        r = data[static_cast<size_t>(y) * width + x + plane * 2];
                     } else if (format_ == "rgbi") {
-                        red = data[(y * width + x) * 3];
-                        green = data[(y * width + x) * 3 + 1];
-                        blue = data[(y * width + x) * 3 + 2];
-                    } else if (format_ == "bgri") {
-                        blue = data[(y * width + x) * 3];
-                        green = data[(y * width + x) * 3 + 1];
-                        red = data[(y * width + x) * 3 + 2];
+                        const uint8_t* c = data + (static_cast<size_t>(y) * width + x) * 3;
+                        r = c[0];
+                        g = c[1];
+                        b = c[2];
+                    } else {  // bgri
+                        const uint8_t* c = data + (static_cast<size_t>(y) * width + x) * 3;
+                        b = c[0];
+                        g = c[1];
+                        r = c[2];
                     }
                     // Also, it's written in (b,g,r) format...
-                    file_.write(reinterpret_cast<const char*>(&blue), 1);
-                    file_.write(reinterpret_cast<const char*>(&green), 1);
-                    file_.write(reinterpret_cast<const char*>(&red), 1);
+                    row[px++] = b;
+                    row[px++] = g;
+                    row[px++] = r;
                 }
             }
-            if (extrabytes)  // See above - BMP lines must be of lengths divisible by 4.
-            {
-                for (n = 1; n <= extrabytes; n++) {
-                    const char *pad = "\0";
-                    file_.write(pad, 1);
-                }
-            }
+            file_.write(reinterpret_cast<const char*>(row.data()),
+                        static_cast<std::streamsize>(row.size()));
         }
 
         return 0;

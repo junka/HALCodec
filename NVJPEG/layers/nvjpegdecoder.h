@@ -71,6 +71,10 @@ private:
 
     int num_decoded = 0;
 
+    // Reused host buffer for combined frame output (avoids per-frame malloc).
+    uint8_t* combined_host_ = nullptr;
+    size_t combined_cap_ = 0;
+
     CUcontext cuContext_ = nullptr;
 };
 

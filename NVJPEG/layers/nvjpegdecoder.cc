@@ -170,6 +170,9 @@ void NVJPEGDecoder::destroy_deouple_api() {
 }
 
 void NVJPEGDecoder::Finalize() {
+    delete[] combined_host_;
+    combined_host_ = nullptr;
+    combined_cap_ = 0;
     cudaStreamDestroy(stream_);
 
     if (batch_size_ == 1) {
@@ -304,12 +307,15 @@ bool NVJPEGDecoder::GetFrame(CodecFrame& out) {
         }
     }
 
-    // Allocate memory for the combined frame
-    uint8_t* combined_frame = (uint8_t*)malloc(total_size);
-    if (!combined_frame) {
-        std::cerr << "Failed to allocate memory for combined frame" << std::endl;
-        return false;
+    // Reuse the member host buffer, growing it only when needed, instead of
+    // allocating a fresh buffer on every frame.
+    uint8_t* combined_frame = nullptr;
+    if (total_size > combined_cap_) {
+        delete[] combined_host_;
+        combined_host_ = new uint8_t[total_size];
+        combined_cap_ = total_size;
     }
+    combined_frame = combined_host_;
 
     // Copy each channel into the combined buffer
     int offset = 0;
@@ -353,19 +359,17 @@ bool NVJPEGDecoder::GetFrame(CodecFrame& out) {
                         break;
                     default:
                         std::cerr << "Unsupported chroma subsampling type" << std::endl;
-                        free(combined_frame);
                         return false;
                 }
 
                 int channel_height = img_heights_[idx] / subsample_factor_h;
-                int channel_width = out_[idx].pitch[c];
-
-                for (int h = 0; h < channel_height; h++) {
-                    cudaMemcpy(combined_frame + offset + h * channel_width,
-                               out_[idx].channel[c] + h * out_[idx].pitch[c],
-                               channel_width, cudaMemcpyDeviceToHost);
-                }
-                offset += channel_height * channel_width;
+                // The source rows (pitch bytes wide) are copied verbatim, so a
+                // single 2D transfer replaces the original row-by-row loop.
+                cudaMemcpy2D(combined_frame + offset, out_[idx].pitch[c],
+                             out_[idx].channel[c], out_[idx].pitch[c],
+                             out_[idx].pitch[c], channel_height,
+                             cudaMemcpyDeviceToHost);
+                offset += channel_height * out_[idx].pitch[c];
             }
         }
     } else if (outputfmt_ == NVJPEG_OUTPUT_Y) {
@@ -408,8 +412,9 @@ bool NVJPEGDecoder::GetFrame(CodecFrame& out) {
         case NVJPEG_OUTPUT_BGRI: out.format = PixelFormat::BGR; break;
         default: out.format = PixelFormat::Unknown; break;
     }
-    out.release = [this, combined_frame]() {
-        ::free(combined_frame);
+    out.release = [this]() {
+        // The combined buffer is owned by the decoder (combined_host_) and is
+        // reused across frames; only the outstanding-frame count is decremented.
         num_decoded--;
     };
 
