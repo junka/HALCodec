@@ -181,33 +181,71 @@ int main(int argc, char* argv[]) {
         return -1;
     }
 
-    int n_dec = 0;
     int total_frames = 0;
-    do {
-        n_dec = dec->PullFrames();
-        total_frames += n_dec;
-        for (int i = 0; i < n_dec; i++) {
-            halcodec::CodecFrame frame;
-            if (!dec->GetFrame(frame)) {
-                break;
-            }
-            if (cli.getFormat() == "y" || cli.getFormat() == "bgr" || cli.getFormat() == "rgb"
-                 || cli.getFormat() == "rgbi" || cli.getFormat() == "bgri") {
-                BMPWriter writer(files[fidx++], cli.getFormat());
-                writer.writeBMP(frame.data, frame.width, frame.height,
-                                cli.getFormat() == "y" ? 1 : 3);
-            } else {
-                fpout.write(reinterpret_cast<const char*>(frame.data), frame.size);
-                if (dec->getName() == "nvjpeg" && fidx < files.size()) {
-                    fpout.close();
-                    fpout.open(files[fidx++], std::ios::out|std::ios::binary);
-                }
-            }
-            if (frame.release) {
-                frame.release();
+    auto writeFrame = [&](halcodec::CodecFrame& frame) {
+        if (cli.getFormat() == "y" || cli.getFormat() == "bgr"
+            || cli.getFormat() == "rgb" || cli.getFormat() == "rgbi"
+            || cli.getFormat() == "bgri") {
+            BMPWriter writer(files[fidx++], cli.getFormat());
+            writer.writeBMP(frame.data, frame.width, frame.height,
+                            cli.getFormat() == "y" ? 1 : 3);
+        } else {
+            fpout.write(reinterpret_cast<const char*>(frame.data), frame.size);
+            if (dec->getName() == "nvjpeg" && fidx < files.size()) {
+                fpout.close();
+                fpout.open(files[fidx++], std::ios::out|std::ios::binary);
             }
         }
-    } while (n_dec > 0);
+        if (frame.release) {
+            frame.release();
+        }
+    };
+
+    if (dec->isAsync()) {
+        // Async backends (vtbox): feed the Annex-B stream chunk-by-chunk,
+        // signal EOF, then drain frames until GetFrame() returns false.
+        std::ifstream fin(input, std::ios::binary);
+        if (!fin) {
+            std::cerr << "unable to open input file: " << input << std::endl;
+            return -1;
+        }
+        const size_t kChunkSize = 1 << 20;  // 1 MiB
+        std::vector<uint8_t> chunk(kChunkSize);
+        while (fin) {
+            fin.read(reinterpret_cast<char*>(chunk.data()),
+                     static_cast<std::streamsize>(chunk.size()));
+            std::streamsize got = fin.gcount();
+            if (got <= 0) {
+                break;
+            }
+            if (dec->FillInput(chunk.data(), static_cast<size_t>(got)) < 0) {
+                std::cerr << "decoder rejected input (FillInput failed)" << std::endl;
+                return -1;
+            }
+        }
+        dec->SignalInputComplete();
+        halcodec::CodecFrame frame;
+        while (dec->GetFrame(frame)) {
+            total_frames++;
+            writeFrame(frame);
+        }
+    } else {
+        // Synchronous backends (nvdec, nvjpeg): pull a batch of frames and
+        // drain it via GetFrame(), repeating until the internal source is
+        // exhausted.
+        int n_dec = 0;
+        do {
+            n_dec = dec->PullFrames();
+            total_frames += n_dec;
+            for (int i = 0; i < n_dec; i++) {
+                halcodec::CodecFrame frame;
+                if (!dec->GetFrame(frame)) {
+                    break;
+                }
+                writeFrame(frame);
+            }
+        } while (n_dec > 0);
+    }
 
     if (dec->getName() != "nvjpeg") {
         fpout.close();
