@@ -52,7 +52,41 @@ VideoToolbox/layers/ Apple adapter (vtbox namespace)
 AMF/layers/          AMD adapter (amd namespace), Linux-only
 QSV/layers/          Intel QSV/libvpl adapter (qsv namespace), Linux-only
 app/                 example CLIs
+tools/               helper scripts (SDK update/import)
 ```
+
+## SDK updates (`tools/update_sdks.sh`)
+
+The vendored SDKs (NVIDIA Video Codec SDK, AMD AMF, Intel oneVPL) live under
+`NVEnc/`, `AMF/` and `QSV/`. `tools/update_sdks.sh` downloads and installs
+them, preferring GitHub releases:
+
+1. the corresponding repo's latest-release **asset** (matched per-SDK);
+2. if no asset matches, the release tag's **source tarball** as a fallback;
+3. NVIDIA SDK has no public download source — download it from the NVIDIA
+   site, then import the local zip with `--import`.
+
+```sh
+tools/update_sdks.sh                 # update all SDKs (skip already up-to-date)
+tools/update_sdks.sh amf qsv         # update only the listed SDKs
+tools/update_sdks.sh -v 2.16.0 qsv   # pin a specific release tag (default: latest)
+tools/update_sdks.sh --check         # compare local vs upstream, download nothing
+tools/update_sdks.sh --force amf     # re-download even if already present
+tools/update_sdks.sh --prune amf     # also drop .gitignore'd big dirs (AMF Thirdparty)
+tools/update_sdks.sh --prune-old     # remove older version dirs of that SDK
+tools/update_sdks.sh --import video_codec_sdk_13.x.x.zip nvdec  # offline import
+```
+
+Notes:
+
+- The `latest` release is resolved via the GitHub API first; when the API is
+  rate-limited or offline it falls back to parsing the `/releases/latest` page
+  or `git ls-remote --tags`, so an anonymous checkout still works.
+- Install a new version by simply updating to a newer release, or by
+  `-v <ver>` / `--import` for NVIDIA. Old directories can be swept with
+  `--prune-old`.
+- `--prune` additionally removes the large dirs that `.gitignore` also
+  excludes (`AMF/AMF-*/Thirdparty`, CI metadata under `.github/`).
 
 ## Command-line tools (`app/`)
 
