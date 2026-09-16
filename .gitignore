@@ -51,3 +51,10 @@ AMF/AMF-*/Thirdparty/
 # libvpl SDK (QSV): track the full source (needed at build time), skip CI
 # metadata (akin to .git).
 QSV/libvpl-*/.github/
+
+# vpl-gpu-rt (libmfx-gen implementation) is built from source into a ~1G tree
+# with a full build/ dir; not tracked. Fetch via tools/update_sdks.sh vplgpu.
+QSV/vpl-gpu-rt-*/
+
+# Decode test output (raw NV12 produced by hal_dec -f yuv).
+QSV/libvpl-*/examples/content/*.yuv

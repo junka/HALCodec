@@ -13,4 +13,4 @@ endif()
 set(NVJPEG_SRC nvjpegdecoder.cc nvjpegencoder.cc)
 
 add_library(nvjpeg_layers SHARED ${NVJPEG_SRC})
-target_link_libraries(nvjpeg_layers PUBLIC nvjpeg cudart)
+target_link_libraries(nvjpeg_layers PUBLIC halcodec_core nvjpeg cudart)

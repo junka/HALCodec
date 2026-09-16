@@ -30,7 +30,7 @@ private:
     CUDAContext cudaCtx_;
     std::unique_ptr<NvEncoderCuda> encoder_;
 
-    std::vector<std::vector<uint8_t>> vPacket_;
+    std::vector<NvEncOutputFrame> vPacket_;
 };
 
 } // namespace nvenc

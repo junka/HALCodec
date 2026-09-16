@@ -3,7 +3,7 @@
 #
 #   用法:
 #      tools/update_sdks.sh              # 更新全部 SDK（本地已是最新版本的跳过）
-#      tools/update_sdks.sh amf qsv      # 只更新指定 SDK (nvdec|amf|qsv)
+#      tools/update_sdks.sh amf qsv vplgpu # 只更新指定 SDK (nvdec|amf|qsv|vplgpu)
 #      tools/update_sdks.sh -v 2.16.0 qsv      # 指定 release tag（默认 latest）
 #      tools/update_sdks.sh --check      # 只对比本地版本与上游 latest，不下载
 #      tools/update_sdks.sh --force amf  # 本地已存在也重新下载覆盖
@@ -17,6 +17,9 @@
 #     2) 无匹配资产时回退到该 release tag 的源码包 (codeload tarball)
 #     3) nvdec 无公开下载源, 提示官网下载后走 --import 导入
 #   网络受限时用 GITHUB_TOKEN 环境变量提升 GitHub API 配额。
+#   GitHub 代理: curl 不遵循 git 的 url.*.insteadOf 重写规则, 脚本会显式读取
+#   该规则 (如 gh-proxy.org) 并套用到 github.com 下载 URL; 也可用环境变量
+#   GITHUB_PROXY 强制指定前缀式代理 (如 GITHUB_PROXY=https://gh-proxy.org/)。
 set -euo pipefail
 
 # 仓库根 = 脚本所在目录的上一级 (脚本位于 tools/ 下)
@@ -29,10 +32,44 @@ SDKS=(
   $'nvdec\tNVIDIA/video-codec-sdk\t\.zip\tNVEnc\tVideo_Codec_SDK_\tmanual'
   $'amf\tGPUOpen-LibrariesAndSDKs/AMF\t\.zip\tAMF\tAMF-\tauto'
   $'qsv\tintel/libvpl\t\.(tar\.gz|tgz)\tQSV\tlibvpl-\tauto'
+  $'vplgpu\tIntel/vpl-gpu-rt\t\.tar\.gz\tQSV\tvpl-gpu-rt-\tauto'
 )
 
 # 统一浏览器 UA；GitHub HTML/重定向对 curl 默认 UA 较敏感
 UA="Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 Chrome/120 Safari/537.36"
+
+# GitHub 前缀式代理: curl 不读 git 的 url.*.insteadOf 配置, 这里手动对齐 —
+# 优先级: 环境变量 GITHUB_PROXY > git config 中匹配 github.com 的 insteadOf 规则 > 无代理。
+# 返回形如 "https://gh-proxy.org/" 的前缀(可能为空), wrap_github() 负责拼接。
+detect_github_proxy() {
+  if [[ -n "${GITHUB_PROXY:-}" ]]; then
+    printf '%s\n' "${GITHUB_PROXY%/}/"
+    return
+  fi
+  local rule
+  rule="$(git config --global --get-regexp '^url\..*\.insteadof$' 2>/dev/null | while read -r key val; do
+    # key 形如 url.https://gh-proxy.org/https://github.com/.insteadof,
+    # 提取其中的 github.com 前缀, 与 val 比对得到代理前缀
+    if [[ "$key" == *github.com* ]]; then
+      local proxy="${key#url.}"; proxy="${proxy%.insteadof}"
+      proxy="${proxy%"https://github.com/"}"
+      if [[ "$val" == "https://github.com/" ]]; then
+        printf '%s\n' "${proxy%/}/"
+        break
+      fi
+    fi
+  done)"
+  printf '%s\n' "$rule"
+}
+
+GITHUB_PROXY_PREFIX="$(detect_github_proxy)"
+if [[ -n "$GITHUB_PROXY_PREFIX" ]]; then
+  echo "github proxy: $GITHUB_PROXY_PREFIX (from git insteadOf / GITHUB_PROXY)"
+fi
+
+wrap_github() { # $1 = https://github.com/... URL -> 套用代理前缀
+  printf '%s\n' "${GITHUB_PROXY_PREFIX}$1"
+}
 
 CHECK=0
 FORCE=0
@@ -62,7 +99,13 @@ while [[ $# -gt 0 ]]; do
 done
 
 api() { # $1 = API 路径，输出 JSON 到 stdout
-  local url="https://api.github.com/$1"
+  # api.github.com 在本机同样受 SSL/证书问题影响, 一并通过代理路由
+  local url
+  if [[ -n "$GITHUB_PROXY_PREFIX" ]]; then
+    url="${GITHUB_PROXY_PREFIX}https://api.github.com/$1"
+  else
+    url="https://api.github.com/$1"
+  fi
   if [[ -n "${GITHUB_TOKEN:-}" ]]; then
     curl -fsSL -A "$UA" -H "Authorization: token ${GITHUB_TOKEN}" "$url"
   else
@@ -93,9 +136,11 @@ PYEOF
 }
 
 # 免 API 兜底: 取仓库最新的版本号 tag（git ls-remote，无需浏览器 UA）
+# 接受 "v1.2.3" 与带前缀的 "intel-onevpl-26.3.4" 两种风格, 只要求 tag 以
+# 数字版本号结尾。
 latest_tag_via_git() { # $1 = owner/repo
   git ls-remote --tags "https://github.com/$1" 2>/dev/null \
-    | awk '{sub("refs/tags/", "", $2); if ($2 ~ /^v?[0-9]+(\.[0-9]+)+$/ && $2 !~ /\^\{\}/) print $2}' \
+    | awk '{sub("refs/tags/", "", $2); if ($2 ~ /[0-9]+(\.[0-9]+)+$/ && $2 !~ /\^\{\}/) print $2}' \
     | python3 -c '
 import re, sys
 def key(v):
@@ -105,13 +150,20 @@ print(max(vs, key=key) if vs else "")
 '
 }
 
-# 归一化版本号: v2.17.0 -> 2.17.0
-normalize_ver() { sed -E 's/^[vV]//' <<<"$1"; }
+# 归一化版本号: v2.17.0 -> 2.17.0; intel-onevpl-26.3.4 -> 26.3.4
+# 只取末尾的数字版本号, 丢弃前缀/字母。
+normalize_ver() {
+  python3 -c '
+import re, sys
+m = re.search(r"[0-9]+(\.[0-9]+)+", sys.argv[1])
+print(m.group(0) if m else sys.argv[1])
+' "$1"
+}
 
 # 本地已安装的最高版本（按数值语义比较，兼容 macOS 无 sort -V）
 local_version() { # $1 = sdk 名
   local name="$1" base="" prefix=""
-  IFS=$'\t' read -r _ _ _ base prefix _ <<<"$(printf '%s\n' "${SDKS[@]}" | grep -E "^${name}\t")"
+  IFS=$'\t' read -r _ _ _ base prefix _ <<<"$(printf '%s\n' "${SDKS[@]}" | grep -E "^${name}$(printf '\t')")"
   local versions=()
   for d in "$ROOT/$base"/${prefix}*/; do
     [[ -d "$d" ]] || continue
@@ -188,10 +240,11 @@ place_check() { # $1 = 目标目录  $2 = sdk 名
 }
 
 # 解析上游 (GitHub release 优先) 得到 tag/ver
-# 原始 tag 存入全局 _UPSTREAM_TAG（供源码包下载 URL 使用，可能带 v 前缀），
-# 归一化后的 ver 输出到 stdout（用作目标目录名）。
-_UPSTREAM_TAG=""
-resolve_upstream() { # $1=repo  $2=临时目录 -> 输出 ver 到 stdout
+# 输出 "原始tag<TAB>归一化ver" 到 stdout: 原始 tag 供源码包下载 URL 使用
+# (可能带 v/前缀, 如 v2.17.0 或 intel-onevpl-26.2.4), ver 用作目标目录名。
+# 注: 不再用全局变量传递 tag, 因为 resolve_upstream 在命令替换子 shell 中
+# 调用, 父进程看不到副作用。
+resolve_upstream() { # $1=repo  $2=临时目录 -> 输出 "tag\tver" 到 stdout
   local repo="$1" work="$2"
   local json_file="$work/release.json" tag=""
   if [[ -n "$TAG" ]]; then
@@ -203,24 +256,22 @@ resolve_upstream() { # $1=repo  $2=临时目录 -> 输出 ver 到 stdout
   else
     # API 不可用(限流/离线): 免 API 兜底。优先从 /releases/latest 页面
     # 提取 tag; 页面不可解析时回退到 git ls-remote 的最新版本 tag。
-    # 页面里存在 "*name" 之类的模板占位符, 必须过滤, 且 tag 需以版本号开头。
     tag="$(curl -fsSL -A "$UA" -L \
-           "https://github.com/$repo/releases/latest" 2>/dev/null \
+           "$(wrap_github "https://github.com/$repo/releases/latest")" 2>/dev/null \
            | grep -oE 'releases/tag/[A-Za-z0-9._-]+' \
            | sed -E 's#releases/tag/##' \
-           | grep -E '^v?[0-9]+(\.[0-9]+)+' \
+           | grep -E '[0-9]+(\.[0-9]+)+' \
            | head -1)"
     if [[ -z "$tag" ]]; then
       tag="$(latest_tag_via_git "$repo")"
-      echo "  (API unavailable, resolved latest tag via git: $tag)"
+      echo "  (API unavailable, resolved latest tag via git: $tag)" >&2
     else
-      echo "  (API unavailable, resolved tag via release page: $tag)"
+      echo "  (API unavailable, resolved tag via release page: $tag)" >&2
     fi
     [[ -n "$tag" ]] || { echo "failed to resolve latest release tag" >&2; return 1; }
   fi
   [[ -n "$tag" ]] || { echo "release has no tag" >&2; return 1; }
-  _UPSTREAM_TAG="$tag"
-  normalize_ver "$tag"
+  printf '%s\t%s\n' "$tag" "$(normalize_ver "$tag")"
 }
 
 update_sdk() { # $1 = 配置行
@@ -244,10 +295,11 @@ update_sdk() { # $1 = 配置行
   # 因此把路径字面量内插进 trap 命令(路径来自 mktemp, 不含单引号字符)。
   trap "rm -rf '$work'" RETURN
 
-  # ---- 解析上游版本 ----
-  local ver
-  ver="$(resolve_upstream "$repo" "$work")"
-  echo "  upstream: $ver   local: $(local_version "$name")"
+  # ---- 解析上游版本: resolve_upstream 输出 "原始tag\t归一化ver" ----
+  local upstream tag ver
+  upstream="$(resolve_upstream "$repo" "$work")" || return 1
+  IFS=$'\t' read -r tag ver <<<"$upstream"
+  echo "  upstream: $ver (tag: $tag)   local: $(local_version "$name")"
   if [[ "$CHECK" == 1 ]]; then
     return 0
   fi
@@ -267,10 +319,12 @@ update_sdk() { # $1 = 配置行
   if [[ -n "$url" ]]; then
     echo "  downloading asset: $url"
   else
-    # 源码包 URL 必须用原始 tag (可能带 v 前缀), 如 v2.17.0
-    url="https://github.com/$repo/archive/refs/tags/${_UPSTREAM_TAG}.tar.gz"
+    # 源码包 URL 必须用原始 tag (可能带 v 前缀或仓库前缀), 如 v2.17.0
+    url="https://github.com/$repo/archive/refs/tags/${tag}.tar.gz"
     echo "  no matching asset, fallback to source tarball: $url"
   fi
+  # curl 不走 git insteadOf, 下载前显式套用代理前缀
+  url="$(wrap_github "$url")"
 
   local ar="$work/$(basename "${url%%\?*}")"
   if ! curl -fsSL -A "$UA" -L "$url" -o "$ar"; then
@@ -286,7 +340,7 @@ update_sdk() { # $1 = 配置行
 import_sdk() { # $1 = 本地压缩包路径  $2 = sdk 名
   local ar="$1" name="$2"
   [[ -f "$ar" ]] || { echo "no such file: $ar" >&2; return 1; }
-  IFS=$'\t' read -r _ repo _ base prefix mode <<<"$(printf '%s\n' "${SDKS[@]}" | grep -E "^${name}\t")"
+  IFS=$'\t' read -r _ repo _ base prefix mode <<<"$(printf '%s\n' "${SDKS[@]}" | grep -E "^${name}$(printf '\t')")"
   if [[ -z "$base" || "$mode" != "manual" ]]; then
     echo "sdk '$name' not importable (requires manual mode)" >&2
     available_sdks
@@ -310,7 +364,7 @@ import_sdk() { # $1 = 本地压缩包路径  $2 = sdk 名
   place_check "$target" "$name"
 }
 
-available_sdks() { echo "available: nvdec|amf|qsv"; }
+available_sdks() { echo "available: nvdec|amf|qsv|vplgpu"; }
 
 main() {
   # ---- main ----
@@ -325,7 +379,7 @@ main() {
 
   if [[ "${#SELECTED[@]}" -gt 0 ]]; then
     for s in "${SELECTED[@]}"; do
-      line="$(printf '%s\n' "${SDKS[@]}" | grep -E "^${s}\t" || true)"
+      line="$(printf '%s\n' "${SDKS[@]}" | grep -E "^${s}$(printf '\t')" || true)"
       if [[ -z "$line" ]]; then
         echo "unknown sdk: $s" >&2
         available_sdks >&2

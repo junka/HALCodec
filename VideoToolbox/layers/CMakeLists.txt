@@ -14,7 +14,7 @@ find_library(CORE_FOUNDATION_FRAMEWORK CoreFoundation REQUIRED)
 find_library(CORE_MEDIA_FRAMEWORK CoreMedia REQUIRED)
 find_library(CORE_VIDEO_FRAMEWORK CoreVideo REQUIRED)
 
-target_link_libraries(vtbox_layers PUBLIC ${CMAKE_DL_LIBS}
+target_link_libraries(vtbox_layers PUBLIC halcodec_core ${CMAKE_DL_LIBS}
     ${VIDEO_TOOLBOX_FRAMEWORK}
     ${CORE_FOUNDATION_FRAMEWORK}
     ${CORE_MEDIA_FRAMEWORK}

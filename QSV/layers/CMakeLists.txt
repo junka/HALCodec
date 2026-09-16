@@ -8,4 +8,4 @@ add_library(qsv_layers SHARED ${qsv_src})
 # runtime, so there is no static link dependency. QSV_SDK_DIR is set by the
 # top-level CMakeLists when it locates the libvpl SDK (version-independent).
 target_include_directories(qsv_layers PUBLIC ${QSV_SDK_DIR}/api)
-target_link_libraries(qsv_layers PUBLIC ${CMAKE_DL_LIBS})
+target_link_libraries(qsv_layers PUBLIC halcodec_core ${CMAKE_DL_LIBS})

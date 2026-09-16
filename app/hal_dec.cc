@@ -15,6 +15,7 @@
 #include "codec_config.h"
 #include "decoder.h"
 #include "frame.h"
+#include "plugin_loader.h"
 
 namespace {
 
@@ -94,7 +95,7 @@ bool ExtractParameterSets(const uint8_t* data, size_t size,
 #ifdef __APPLE__
 const char* kDefaultDecoder = "vtbox";
 #else
-const char* kDefaultDecoder = "nvdec";
+const char* kDefaultDecoder = ""; // resolved at runtime to first available
 #endif
 
 } // namespace
@@ -108,8 +109,23 @@ int main(int argc, char* argv[]) {
         return 2;
     }
 
+#ifndef __APPLE__
+    // Load vendor backends lazily so the binary runs without NVIDIA libs.
+    halcodec::LoadBackends();
+#endif
+
     std::string backend = cli.getBackend().empty() ? kDefaultDecoder
                                                    : cli.getBackend();
+#ifndef __APPLE__
+    if (backend.empty()) {
+        auto names = halcodec::Registry<halcodec::Decoder>::Names();
+        if (names.empty()) {
+            std::cerr << "No decoder backend available" << std::endl;
+            return -1;
+        }
+        backend = names.front();
+    }
+#endif
     auto dec = halcodec::Decoder::Create(backend);
     if (!dec) {
         std::cerr << "Fail to create decoder backend: " << backend << std::endl;

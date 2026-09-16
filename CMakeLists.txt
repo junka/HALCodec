@@ -9,13 +9,60 @@ set(CMAKE_CXX_EXTENSIONS OFF)
 # Add src directory to include paths
 include_directories(${CMAKE_SOURCE_DIR}/src)
 
-# Collect all source files in src directory
-file(GLOB_RECURSE SRC ${CMAKE_SOURCE_DIR}/src/*.cc ${CMAKE_SOURCE_DIR}/src/*.h)
+# Core library: owns the process-wide Registry singletons. Backends (linked or
+# dlopen'd) and executables all depend on it so a backend registered at runtime
+# is visible to the app. Without a shared core, each .so gets its own
+# function-local static Map and runtime-loaded backends vanish.
+add_library(halcodec_core SHARED ${CMAKE_SOURCE_DIR}/src/registry.cc)
+set_target_properties(halcodec_core PROPERTIES
+    CXX_VISIBILITY_PRESET hidden
+    VISIBILITY_INLINES_HIDDEN ON)
+# Export only the Registry<Encoder/Decoder/CapabilityProvider> instantiations.
+target_link_libraries(halcodec_core PUBLIC ${CMAKE_DL_LIBS})
 
 if(UNIX AND NOT APPLE)
     find_package(CUDA QUIET)
     if(CUDA_FOUND)
-        add_subdirectory(NVEnc)
+        # Locate the NVIDIA Video Codec SDK under NVEnc/Video_Codec_SDK_*.
+        # By default the highest installed version is picked; pin a specific
+        # version with -DNVCODEC_SDK_VERSION=<ver> (e.g. 12.1.14). Mirrors the
+        # version-independent glob used for AMF/QSV, but NVEnc additionally
+        # resolves stub libraries at link time, so the selected SDK_DIR must
+        # carry both headers and Lib/.
+        file(GLOB NVCODEC_SDK_CANDIDATES ${CMAKE_SOURCE_DIR}/NVEnc/Video_Codec_SDK_*)
+        if(NVCODEC_SDK_VERSION)
+            set(NVCODEC_SDK_DIR ${CMAKE_SOURCE_DIR}/NVEnc/Video_Codec_SDK_${NVCODEC_SDK_VERSION})
+            if(NOT IS_DIRECTORY ${NVCODEC_SDK_DIR})
+                message(FATAL_ERROR "NVCODEC_SDK_VERSION=${NVCODEC_SDK_VERSION} selected but "
+                    "directory not found: ${NVCODEC_SDK_DIR}. Available: ${NVCODEC_SDK_CANDIDATES}")
+            endif()
+        else()
+            # Pick the candidate with the highest version number (semver-ish).
+            set(_nvcodec_best "")
+            set(_nvcodec_best_key "0")
+            foreach(_candidate ${NVCODEC_SDK_CANDIDATES})
+                get_filename_component(_ver ${_candidate} NAME)
+                string(REPLACE "Video_Codec_SDK_" "" _ver "${_ver}")
+                string(REGEX MATCHALL "[0-9]+" _parts "${_ver}")
+                set(_key "0")
+                foreach(_p ${_parts})
+                    string(REGEX REPLACE "^0+(.)" "\\1" _p "${_p}")
+                    set(_key "${_key}.${_p}")
+                endforeach()
+                if(_key STRGREATER _nvcodec_best_key)
+                    set(_nvcodec_best_key ${_key})
+                    set(_nvcodec_best ${_candidate})
+                endif()
+            endforeach()
+            set(NVCODEC_SDK_DIR ${_nvcodec_best})
+        endif()
+        if(NVCODEC_SDK_DIR)
+            message(STATUS "NvCodec SDK found: ${NVCODEC_SDK_DIR}")
+            add_subdirectory(NVEnc)
+        else()
+            message(WARNING "No NVIDIA Video Codec SDK found under NVEnc/Video_Codec_SDK_*; "
+                "skipping NVEnc. Import one with tools/update_sdks.sh --import <zip> nvdec")
+        endif()
         add_subdirectory(NVJPEG)
     endif()
     # Locate the AMF SDK regardless of its version directory (AMF/AMF-*/).

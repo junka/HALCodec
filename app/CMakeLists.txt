@@ -14,29 +14,46 @@ add_executable(codecinfo codecinfo.cc)
 
 add_executable(hal_dec hal_dec.cc parse_cli.h)
 
-# Vendor layers self-register through static initializers (HALCODEC_CONNECT).
-# On ELF, ld drops shared libs whose symbols are unreferenced by default, so
-# they must be force-loaded or registration never runs. macOS loads all linked
-# dylibs and does not need the flag.
-set(LINK_LAYERS "")
+# Backends are loaded at runtime via dlopen (see src/plugin_loader.h) instead of
+# link-time binding. Link-time binding forces the dynamic loader to resolve every
+# backend's NEEDED entries (libnvidia-encode.so.1, libnvjpeg.so.12, ...) at
+# process start, which makes the executable unusable on machines lacking those
+# driver libraries. With dlopen, a backend whose deps are missing is simply
+# skipped and the rest still work.
+#
+# macOS is the exception: VideoToolbox is a system framework always present on
+# Apple platforms, so vtbox_layers stays link-time bound there.
 if(APPLE)
-    list(APPEND LINK_LAYERS vtbox_layers)
+    target_link_libraries(hal_enc PUBLIC vtbox_layers halcodec_core Boost::program_options)
+    target_link_libraries(codecinfo PUBLIC vtbox_layers halcodec_core Boost::program_options)
+    target_link_libraries(hal_dec PUBLIC vtbox_layers halcodec_core Boost::program_options)
 else()
-    list(APPEND LINK_LAYERS
-            -Wl,--no-as-needed
-            nvenc_layers
-            nvjpeg_layers
-            -Wl,--as-needed)
-    if(AMF_SDK_DIR)
-        list(APPEND LINK_LAYERS -Wl,--no-as-needed amf_layers -Wl,--as-needed)
+    target_link_libraries(hal_enc PUBLIC halcodec_core Boost::program_options ${CMAKE_DL_LIBS})
+    target_link_libraries(codecinfo PUBLIC halcodec_core Boost::program_options ${CMAKE_DL_LIBS})
+    target_link_libraries(hal_dec PUBLIC halcodec_core Boost::program_options ${CMAKE_DL_LIBS})
+
+    # Stage backend .so's next to the executables so plugin_loader's ExeDir()
+    # search finds them in the build tree. Each exe depends on the backends so
+    # a backend rebuild triggers the exe's POST_BUILD copy.
+    set(_halcodec_backends "")
+    if(TARGET nvenc_layers)
+        list(APPEND _halcodec_backends nvenc_layers)
     endif()
-    if(QSV_SDK_DIR)
-        list(APPEND LINK_LAYERS -Wl,--no-as-needed qsv_layers -Wl,--as-needed)
+    if(TARGET nvjpeg_layers)
+        list(APPEND _halcodec_backends nvjpeg_layers)
     endif()
+    if(TARGET amf_layers)
+        list(APPEND _halcodec_backends amf_layers)
+    endif()
+    if(TARGET qsv_layers)
+        list(APPEND _halcodec_backends qsv_layers)
+    endif()
+    foreach(_tgt hal_enc codecinfo hal_dec)
+        foreach(_layer ${_halcodec_backends})
+            add_dependencies(${_tgt} ${_layer})
+            add_custom_command(TARGET ${_tgt} POST_BUILD
+                COMMAND ${CMAKE_COMMAND} -E copy_if_different
+                    $<TARGET_FILE:${_layer}> $<TARGET_FILE_DIR:${_tgt}>)
+        endforeach()
+    endforeach()
 endif()
-
-target_link_libraries(hal_enc PUBLIC ${LINK_LAYERS} Boost::program_options)
-
-target_link_libraries(codecinfo PUBLIC ${LINK_LAYERS} Boost::program_options)
-
-target_link_libraries(hal_dec PUBLIC ${LINK_LAYERS} Boost::program_options)

@@ -9,4 +9,4 @@ add_library(amf_layers SHARED ${enc_src})
 # top-level CMakeLists when it locates the AMF SDK (version-independent).
 target_include_directories(amf_layers PUBLIC
         ${AMF_SDK_DIR}/amf/public/include)
-target_link_libraries(amf_layers PUBLIC ${CMAKE_DL_LIBS})
+target_link_libraries(amf_layers PUBLIC halcodec_core ${CMAKE_DL_LIBS})

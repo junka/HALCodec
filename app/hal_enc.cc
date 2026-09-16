@@ -17,13 +17,26 @@
 
 #include "codec_config.h"
 #include "frame.h"
+#include "plugin_loader.h"
 
 int main(int argc, char* argv[]) {
     CommandLineParser cli;
     cli.parse(argc, argv);
 
-    std::string backend = cli.getBackend().empty() ? "nvenc"
-                                                   : cli.getBackend();
+    // Load vendor backends lazily so the binary runs without NVIDIA libs.
+    halcodec::LoadBackends();
+
+    std::string backend = cli.getBackend();
+    if (backend.empty()) {
+        // Default to the first available encoder backend instead of hard-coding
+        // "nvenc", which may be absent on this machine.
+        auto names = halcodec::Registry<halcodec::Encoder>::Names();
+        if (names.empty()) {
+            std::cerr << "No encoder backend available" << std::endl;
+            return -1;
+        }
+        backend = names.front();
+    }
     auto enc = halcodec::Encoder::Create(backend);
     if (!enc) {
         std::cerr << "Fail to create encoder backend: " << backend << std::endl;

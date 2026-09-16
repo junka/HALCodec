@@ -35,7 +35,7 @@ bool QSVEncoder::Initialize(const CodecParams& params) {
         impl_ = nullptr;
         return false;
     }
-    if (impl_->runtime.initEx(&impl_->session) != MFX_ERR_NONE) {
+    if (impl_->runtime.createSession(&impl_->session) != MFX_ERR_NONE) {
         delete impl_;
         impl_ = nullptr;
         return false;

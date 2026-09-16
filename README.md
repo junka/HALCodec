@@ -66,6 +66,10 @@ them, preferring GitHub releases:
 3. NVIDIA SDK has no public download source — download it from the NVIDIA
    site, then import the local zip with `--import`.
 
+Supported SDKs: `nvdec` (NVIDIA, manual), `amf` (AMD), `qsv` (Intel oneVPL
+dispatcher headers), `vplgpu` (Intel oneVPL GPU Runtime — the `libmfx-gen`
+implementation, source only; see [Building the QSV runtime](#building-the-qsv-runtime) below).
+
 ```sh
 tools/update_sdks.sh                 # update all SDKs (skip already up-to-date)
 tools/update_sdks.sh amf qsv         # update only the listed SDKs
@@ -82,11 +86,45 @@ Notes:
 - The `latest` release is resolved via the GitHub API first; when the API is
   rate-limited or offline it falls back to parsing the `/releases/latest` page
   or `git ls-remote --tags`, so an anonymous checkout still works.
+- **GitHub proxy:** `curl` does not honor git's `url.*.insteadOf` rewrite, so
+  the script reads that config (or the `GITHUB_PROXY` env var) and applies the
+  prefix to both `github.com` download URLs and `api.github.com` API calls.
+  This lets `update_sdks.sh` work behind a mirror like `gh-proxy.org` without
+  any extra flags.
 - Install a new version by simply updating to a newer release, or by
   `-v <ver>` / `--import` for NVIDIA. Old directories can be swept with
   `--prune-old`.
 - `--prune` additionally removes the large dirs that `.gitignore` also
   excludes (`AMF/AMF-*/Thirdparty`, CI metadata under `.github/`).
+
+### Building the QSV runtime
+
+`qsv` (the oneVPL *dispatcher* headers under `QSV/libvpl-*/api`) lets the
+adapter compile and `dlopen("libvpl.so.2")` at runtime, but the dispatcher
+alone cannot create a session — it needs an **implementation** library
+(`libmfx-gen.so.1.2`, the oneVPL GPU Runtime). On a machine with an Intel iGPU
+but no packaged runtime, fetch and build it from source:
+
+```sh
+# 1. fetch the source (uses gh-proxy automatically, as above)
+tools/update_sdks.sh vplgpu            # -> QSV/vpl-gpu-rt-<ver>/
+
+# 2. install build dependencies (one-time; needs sudo)
+sudo apt-get install -y libva-dev libdrm-dev cmake build-essential
+
+# 3. build + install the runtime (produces libmfx-gen.so.1.2)
+cd QSV/vpl-gpu-rt-<ver>
+mkdir build && cd build
+cmake .. -DCMAKE_INSTALL_PREFIX=/usr/local -DCMAKE_BUILD_TYPE=Release
+make -j"$(nproc)"
+sudo make install
+sudo ldconfig
+```
+
+After `libmfx-gen.so.1.2` is on the loader path, `MFXCreateSession` succeeds
+and the `qsvdec`/`qsvenc` data paths become exercisable. The build also needs
+the Intel Media Driver (iHD VA-API) and gmmlib at runtime; on Ubuntu these
+ship as `intel-media-va-driver` and `libigdgmm12`.
 
 ## Command-line tools (`app/`)
 

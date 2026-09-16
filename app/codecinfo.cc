@@ -6,11 +6,16 @@
 #include "parse_cli.h"
 
 #include "capability.h"
+#include "plugin_loader.h"
 #include "registry.h"
 
 int main(int argc, char* argv[]) {
     CommandLineParser cli;
     cli.parse(argc, argv);
+
+    // Load vendor backends (nvenc_layers, qsv_layers, ...) via dlopen. Backends
+    // whose driver libs are missing are skipped, so this runs on any machine.
+    halcodec::LoadBackends();
 
     // Resolve providers: a single one from -b, or every registered one.
     std::vector<std::string> backends;

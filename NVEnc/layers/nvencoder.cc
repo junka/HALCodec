@@ -15,9 +15,6 @@ namespace nvenc {
 // FillFrame(const CodecFrame&); the encoder converts them onto the device and
 // hands the resulting elementary-stream packets out via GetFrame().
 
-NVEncoder::NVEncoder() {
-}
-
 bool NVEncoder::Initialize(const CodecParams& params) {
     if (!cudaCtx_.create(params.deviceIndex)) {
         std::cerr << "NVEncoder: failed to create CUDA context for device "
@@ -99,6 +96,10 @@ void NVEncoder::Finalize() {
     encoder_->DestroyEncoder();
 }
 
+std::string NVEncoder::getName() const {
+    return "nvenc";
+}
+
 bool NVEncoder::FillFrame(const CodecFrame& in) {
     if (in.size == 0) {
         // End-of-stream marker: flush the encoder; buffered packets are then
@@ -126,8 +127,8 @@ bool NVEncoder::GetFrame(CodecFrame& out) {
     if (vPacket_.empty()) {
         return false;
     }
-    out.data = vPacket_[0].data();
-    out.size = vPacket_[0].size();
+    out.data = vPacket_[0].frame.data();
+    out.size = vPacket_[0].frame.size();
     out.width = encoder_->GetEncodeWidth();
     out.height = encoder_->GetEncodeHeight();
     out.format = PixelFormat::Unknown; // encoded elementary stream
