@@ -31,31 +31,53 @@
 #include <string>
 #include <vector>
 
+#ifdef __APPLE__
+#include <limits.h>
+#include <mach-o/dyld.h>
+#endif
+
 namespace halcodec {
 
 inline std::string ExeDir() {
+#ifdef __APPLE__
+    // macOS has no /proc; _NSGetExecutablePath returns a possibly-relative
+    // path, so normalize it with realpath.
+    char exe[PATH_MAX] = {0};
+    uint32_t sz = sizeof(exe);
+    if (_NSGetExecutablePath(exe, &sz) != 0) return ".";
+    char resolved[PATH_MAX] = {0};
+    if (!::realpath(exe, resolved)) {
+        std::string p(exe);
+        size_t slash = p.find_last_of('/');
+        return slash == std::string::npos ? "." : p.substr(0, slash);
+    }
+    std::string path(resolved);
+#else
     char link[4096] = {0};
     ssize_t n = readlink("/proc/self/exe", link, sizeof(link) - 1);
     if (n <= 0) return ".";
     std::string path(link, static_cast<size_t>(n));
+#endif
     size_t slash = path.find_last_of('/');
     return slash == std::string::npos ? "." : path.substr(0, slash);
 }
 
 inline bool EndsWithLayersSo(const char* name) {
     if (!name) return false;
+    if (!std::strstr(name, "_layers")) return false;
     size_t n = std::strlen(name);
-    const char* suffix = ".so";
-    size_t s = std::strlen(suffix);
-    if (n < s) return false;
-    // accept both lib*_layers.so and *_layers.so
-    if (std::strcmp(name + n - s, suffix) != 0) return false;
-    return std::strstr(name, "_layers") != nullptr;
+    // accept .so (Linux) and .dylib (macOS), with optional "lib" prefix
+    static const char* const kSuffixes[] = {".so", ".dylib"};
+    for (const char* suffix : kSuffixes) {
+        size_t s = std::strlen(suffix);
+        if (n > s && std::strcmp(name + n - s, suffix) == 0) return true;
+    }
+    return false;
 }
 
-// Load every lib*_layers.so found in the resolved backend directory.
-// Returns the number of backends successfully loaded. Logs a warning per
-// failure but never aborts.
+// Load every backend shared library (*_layers.so / *_layers.dylib) found in
+// the resolved backend directory. Returns the number of backends successfully
+// loaded. Logs a warning per failure but never aborts.
 inline int LoadBackends(const std::string& explicitDir = "") {
     std::vector<std::string> candidates;
     if (!explicitDir.empty()) {
