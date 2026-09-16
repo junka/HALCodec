@@ -94,6 +94,9 @@ bool ExtractParameterSets(const uint8_t* data, size_t size,
 
 #ifdef __APPLE__
 const char* kDefaultDecoder = "vtbox";
+#elif defined(__aarch64__)
+// Linux aarch64: DRIVE OS platform default is the NvMedia backend.
+const char* kDefaultDecoder = "nvmedia";
 #else
 const char* kDefaultDecoder = ""; // resolved at runtime to first available
 #endif

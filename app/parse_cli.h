@@ -20,7 +20,7 @@ public:
                 ("help,h", "Show help message")
                 ("input,i", po::value<std::string>(&inputFile_), "Input file")
                 ("output,o", po::value<std::string>(&outputFile_), "Output file (optional, defaults to input file name with format extension)")
-                ("backend,b", po::value<std::string>(&backend_), "Backend name (vtbox/nvdec/nvjpeg/nvenc); defaults per application")
+                ("backend,b", po::value<std::string>(&backend_), "Backend name (vtbox/nvdec/nvjpeg/nvenc/amfdec/qsvdec/nvmedia); defaults per application")
                 ("gpu", po::value<int>(&gpuIndex_)->default_value(0), "GPU index")
                 ("format,f", po::value<std::string>(&format_)->default_value("yuv"),
                  "Output planar format: yuv/y/rbg/bgr/bgri/rgbi for nvjpeg decoding")

@@ -33,9 +33,14 @@ All types live in the `halcodec` namespace:
 | NVIDIA NVJPEG | `nvjpeg` | -        | -             | Linux + CUDA |
 | AMD AMF     | `amfdec` | `amfenc` (empty) | `amf`    | Linux + AMD |
 | Intel QSV   | `qsvdec` | `qsvenc` (empty) | `qsv`    | Linux + Intel iGPU |
+| NVIDIA DRIVE NvMedia | `nvmedia` | `nvmedia` (empty) | `nvmedia` | Linux (DRIVE OS) aarch64 |
 | Apple VideoToolbox | `vtbox`  | -        | `vtbox`       | macOS        |
 
-NvMedia (tegra) is planned. The AMF adapter is built only when the AMF SDK
+The NvMedia adapter targets NVIDIA DRIVE OS (Linux aarch64) and is built only
+when the SDK headers are present under `NvMedia/include/nvmedia_6x` plus
+`lib-target/`. Its data path is currently an initialization stub (the IDE/IEP
+engines are created, decode/encode frames are not yet wired). The AMF adapter
+is built only when the AMF SDK
 headers are present under `AMF/AMF-*/amf/public/include`; the AMF runtime
 (`libamfrt64.so.1`) is dlopen'd at runtime and is required on the machine
 where the binary runs. Same for QSV: built only when libvpl headers exist
@@ -51,6 +56,7 @@ NVJPEG/layers/       NVIDIA JPEG adapter (nvjpeg namespace)
 VideoToolbox/layers/ Apple adapter (vtbox namespace)
 AMF/layers/          AMD adapter (amd namespace), Linux-only
 QSV/layers/          Intel QSV/libvpl adapter (qsv namespace), Linux-only
+NvMedia/layers/      NVIDIA DRIVE OS adapter (nvmedia namespace), Linux-aarch64-only
 app/                 example CLIs
 tools/               helper scripts (SDK update/import)
 ```
@@ -134,8 +140,8 @@ backend with `-b/--backend`; when omitted, the platform default is used:
 
 | Tool      | Default backend         | Alternative backends |
 |-----------|-------------------------|----------------------|
-| `hal_dec` | macOS: `vtbox`, Linux: `nvdec` | `nvjpeg`, `amfdec`, `qsvdec` |
-| `hal_enc` | `nvenc`                 | `amfenc`, `qsvenc` |
+| `hal_dec` | macOS: `vtbox`; Linux aarch64: `nvmedia`; other Linux: `nvdec` | `nvjpeg`, `amfdec`, `qsvdec` |
+| `hal_enc` | `nvenc`                 | `amfenc`, `qsvenc`, `nvmedia` |
 | `codecinfo` | all registered capability providers | `-b` restricts to one |
 
 Common options (from `app/parse_cli.h`):
