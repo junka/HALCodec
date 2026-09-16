@@ -55,11 +55,16 @@ public:
         decodeGetVideoParam_ = reinterpret_cast<MFXVideoDECODEGetVideoParamFn>(
             dlsym(handle_, "MFXVideoDECODE_GetVideoParam"));
         encodeInit_ = reinterpret_cast<MFXVideoENCODEInitFn>(dlsym(handle_, "MFXVideoENCODE_Init"));
+        encodeQuery_ = reinterpret_cast<MFXVideoENCODEQueryFn>(dlsym(handle_, "MFXVideoENCODE_Query"));
+        encodeFrameAsync_ = reinterpret_cast<MFXVideoENCODEEncodeFrameAsyncFn>(
+            dlsym(handle_, "MFXVideoENCODE_EncodeFrameAsync"));
+        getSurfaceForEncode_ = reinterpret_cast<MFXMemoryGetSurfaceForEncodeFn>(
+            dlsym(handle_, "MFXMemory_GetSurfaceForEncode"));
         encodeTerminate_ =
             reinterpret_cast<MFXVideoENCODETerminateFn>(dlsym(handle_, "MFXVideoENCODE_Close"));
         if (!createSession_ || !close_ || !decodeInit_ || !encodeInit_
                 || !decodeFrameAsync_ || !syncOperation_ || !decodeTerminate_
-                || !encodeTerminate_) {
+                || !encodeTerminate_ || !encodeFrameAsync_ || !getSurfaceForEncode_) {
             std::cerr << "QSV: required libvpl symbols not found" << std::endl;
             return false;
         }
@@ -140,6 +145,16 @@ public:
     mfxStatus encodeInit(mfxSession session, mfxVideoParam* par) const {
         return encodeInit_(session, par);
     }
+    mfxStatus encodeQuery(mfxSession session, mfxVideoParam* in, mfxVideoParam* out) const {
+        return encodeQuery_(session, in, out);
+    }
+    mfxStatus encodeFrameAsync(mfxSession session, mfxFrameSurface1* surf,
+                               mfxBitstream* bs, mfxSyncPoint* sync) const {
+        return encodeFrameAsync_(session, nullptr, surf, bs, sync);
+    }
+    mfxStatus getSurfaceForEncode(mfxSession session, mfxFrameSurface1** surf) const {
+        return getSurfaceForEncode_(session, surf);
+    }
     mfxStatus encodeTerminate(mfxSession session) const { return encodeTerminate_(session); }
 
 private:
@@ -160,6 +175,12 @@ private:
     using MFXVideoCORESyncOperationFn = mfxStatus(MFX_CDECL*)(mfxSession, mfxSyncPoint, mfxU32);
     using MFXVideoDECODEGetVideoParamFn = mfxStatus(MFX_CDECL*)(mfxSession, mfxVideoParam*);
     using MFXVideoENCODEInitFn = mfxStatus(MFX_CDECL*)(mfxSession, mfxVideoParam*);
+    using MFXVideoENCODEQueryFn = mfxStatus(MFX_CDECL*)(mfxSession,
+        mfxVideoParam*, mfxVideoParam*);
+    using MFXVideoENCODEEncodeFrameAsyncFn = mfxStatus(MFX_CDECL*)(mfxSession,
+        mfxEncodeCtrl*, mfxFrameSurface1*, mfxBitstream*, mfxSyncPoint*);
+    using MFXMemoryGetSurfaceForEncodeFn = mfxStatus(MFX_CDECL*)(mfxSession,
+        mfxFrameSurface1**);
     using MFXVideoENCODETerminateFn = mfxStatus(MFX_CDECL*)(mfxSession);
 
     void* handle_ = nullptr;
@@ -177,6 +198,9 @@ private:
     MFXVideoCORESyncOperationFn syncOperation_ = nullptr;
     MFXVideoDECODEGetVideoParamFn decodeGetVideoParam_ = nullptr;
     MFXVideoENCODEInitFn encodeInit_ = nullptr;
+    MFXVideoENCODEQueryFn encodeQuery_ = nullptr;
+    MFXVideoENCODEEncodeFrameAsyncFn encodeFrameAsync_ = nullptr;
+    MFXMemoryGetSurfaceForEncodeFn getSurfaceForEncode_ = nullptr;
     MFXVideoENCODETerminateFn encodeTerminate_ = nullptr;
 };
 
