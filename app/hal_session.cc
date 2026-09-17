@@ -72,10 +72,26 @@ int main(int argc, char* argv[]) {
         }
     }
 
-    // Open N decode streams sharing the backend.
+    // Open N decode streams sharing the backend. We feed each stream its raw
+    // Annex-B bytes ourselves (below), so backends must open in feed mode:
+    // pass the codec name (derived from the input extension) rather than the
+    // file path. Passing inputs[] would make NVDEC/NVDEC-style backends open
+    // an internal demuxer and ignore FillInput().
+    auto codecFromExt = [](const std::string& path) {
+        auto dot = path.find_last_of('.');
+        std::string ext = (dot == std::string::npos) ? "" : path.substr(dot + 1);
+        if (ext == "h264" || ext == "264") return "h264";
+        if (ext == "hevc" || ext == "h265" || ext == "265") return "hevc";
+        if (ext == "av1")  return "av1";
+        if (ext == "mpg2" || ext == "m2v") return "mpeg2";
+        if (ext == "mp4")  return "mpeg4";
+        if (ext == "vp8")  return "vp8";
+        if (ext == "vp9")  return "vp9";
+        return "h264"; // default
+    };
     std::vector<halcodec::CodecParams> params(N);
     for (size_t s = 0; s < N; s++) {
-        params[s].inputs.push_back(inputs[s]);
+        params[s].codec = codecFromExt(inputs[s]);
         params[s].deviceIndex = cli.getGpuIndex();
         if (cli.getFormat() == "rgb" || cli.getFormat() == "rgbi") {
             params[s].outputFormat = halcodec::PixelFormat::RGB;
