@@ -55,8 +55,12 @@ int main(int argc, char* argv[]) {
     } else if (cli.getFormat() == "bgr" || cli.getFormat() == "bgri"
                || cli.getFormat() == "bmp") {
         params.inputFormat = halcodec::PixelFormat::BGR;
+    } else if (cli.getFormat() == "nv12") {
+        params.inputFormat = halcodec::PixelFormat::NV12;
+    } else if (cli.getFormat() == "yuv444") {
+        params.inputFormat = halcodec::PixelFormat::YUV444P;
     } else {
-        params.inputFormat = halcodec::PixelFormat::I420; // yuv default
+        params.inputFormat = halcodec::PixelFormat::I420; // yuv/iyuv default
     }
     if (std::regex_search(input, match, pattern)) {
         params.width = std::stoi(match[1].str());

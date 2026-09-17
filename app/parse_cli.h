@@ -24,7 +24,7 @@ public:
                 ("backend,b", po::value<std::string>(&backend_), "Backend name (vtbox/nvdec/nvjpeg/nvenc/amfdec/qsvdec/nvmedia); defaults per application")
                 ("gpu", po::value<int>(&gpuIndex_)->default_value(0), "GPU index")
                 ("format,f", po::value<std::string>(&format_)->default_value("yuv"),
-                 "Output planar format: yuv/y/rbg/bgr/bgri/rgbi for nvjpeg decoding")
+                 "Format: yuv(i420)/nv12/yuv444/y(rgb gray)/bgr/bgri/rgbi/bgra/rgba/bmp")
                 ("codec,c", po::value<std::string>(&codec_)->default_value("h264"))
                 ("colorspace,c", po::value<std::string>(&cs_)->default_value("420"), "Color sapce: 420/444/410");
 
