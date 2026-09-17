@@ -114,6 +114,12 @@ int main(int argc, char* argv[]) {
     in.width = params.width;
     in.height = params.height;
     in.format = params.inputFormat;
+    // Raw input backing store for the single-file path. Kept in outer scope so
+    // it outlives the final drain(): async encoders defer GetFrame() until after
+    // the feed loop, and their worker thread still references the frame data
+    // pointers handed to FillFrame(). Destroying this buffer before drain()
+    // would leave the worker reading freed memory.
+    std::vector<uint8_t> rawBuf;
 
     auto drain = [&]() {
         halcodec::CodecFrame out;
@@ -213,7 +219,6 @@ int main(int argc, char* argv[]) {
             in.width = w;
             in.height = h;
             enc->FillFrame(in);
-            std::free(in.data);
             drainIfSync();
             // Flush trailing packets and finish.
             halcodec::CodecFrame eos;
@@ -223,6 +228,9 @@ int main(int argc, char* argv[]) {
             enc->FillFrame(eos);
             if (asyncEnc) enc->SignalInputComplete();
             drain();
+            // The frame data is only safe to free once the async worker has
+            // drained; for sync backends drainIfSync() already consumed it.
+            std::free(in.data);
             fpout.close();
             enc->Finalize();
             std::cout << "Encode total frames: " << total_frames << std::endl;
@@ -235,8 +243,8 @@ int main(int argc, char* argv[]) {
         }
         std::streamsize total = fin.tellg();
         fin.seekg(0, std::ios::beg);
-        std::vector<uint8_t> buf(static_cast<size_t>(total));
-        fin.read(reinterpret_cast<char *>(buf.data()), total);
+        rawBuf.resize(static_cast<size_t>(total));
+        fin.read(reinterpret_cast<char *>(rawBuf.data()), total);
         if (params.width <= 0 || params.height <= 0) {
             std::cerr << "Cannot determine frame dimensions" << std::endl;
             return -1;
@@ -256,8 +264,8 @@ int main(int argc, char* argv[]) {
         }
         in.width = params.width;
         in.height = params.height;
-        for (size_t off = 0; off + frameBytes <= buf.size(); off += frameBytes) {
-            in.data = buf.data() + off;
+        for (size_t off = 0; off + frameBytes <= rawBuf.size(); off += frameBytes) {
+            in.data = rawBuf.data() + off;
             in.size = frameBytes;
             enc->FillFrame(in);
             drainIfSync();

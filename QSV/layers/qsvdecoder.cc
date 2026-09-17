@@ -1,13 +1,12 @@
 #include "qsvdecoder.h"
 
-#include <cstdio>
+#include <condition_variable>
 #include <cstdlib>
 #include <cstring>
-#include <fstream>
-#include <memory>
+#include <iostream>
+#include <mutex>
 #include <queue>
-#include <string>
-#include <vector>
+#include <thread>
 
 #include "qsv_common.h"
 #include "registry.h"
@@ -17,30 +16,10 @@ namespace qsv {
 
 namespace {
 
-// Bitstream buffer size matches the hello-decode reference (oneVPL samples):
-// large enough to hold several access units of a small test stream in one
-// ReadEncodedStream refill.
-constexpr mfxU32 kBitstreamBytes = 2 * 1024 * 1024;
-// MFXVideoCORE_SyncOperation / Synchronize wait, in milliseconds.
+// Bitstream buffer for DecodeHeader + the working bitstream. The FillInput
+// path appends into this; the worker consumes it.
+constexpr mfxU32 kBitstreamBytes = 4 * 1024 * 1024;
 constexpr mfxU32 kSyncTimeoutMs = 1000;
-
-// Moves the unconsumed tail of the bitstream to the front and tops it up from
-// the input file, mirroring ReadEncodedStream() from the oneVPL samples.
-// Returns false on EOF (no bytes read this refill).
-bool RefillBitstream(mfxBitstream& bs, std::ifstream& in) {
-    if (bs.DataOffset > 0 && bs.DataLength > 0) {
-        std::memmove(bs.Data, bs.Data + bs.DataOffset, bs.DataLength);
-    }
-    bs.DataOffset = 0;
-    mfxU32 room = bs.MaxLength - bs.DataLength;
-    if (room == 0) {
-        return true; // buffer full, nothing to read
-    }
-    in.read(reinterpret_cast<char*>(bs.Data + bs.DataLength), room);
-    auto got = static_cast<mfxU32>(in.gcount());
-    bs.DataLength += got;
-    return got > 0;
-}
 
 // Copies an NV12 internal-memory surface into a tightly-packed malloc'd buffer
 // (Y plane w*h followed by interleaved UV plane w*h/2), pitch-aware. The
@@ -55,12 +34,10 @@ uint8_t* CopyNV12(const mfxFrameSurface1* surf) {
     if (!dst) {
         return nullptr;
     }
-    // Y plane.
     for (mfxU16 i = 0; i < h; i++) {
         std::memcpy(dst + static_cast<size_t>(w) * i,
                     surf->Data.Y + static_cast<size_t>(pitch) * i, w);
     }
-    // Interleaved UV plane (one row per pair of luma rows, same pitch).
     uint8_t* dstUV = dst + yBytes;
     for (mfxU16 i = 0; i < h / 2; i++) {
         std::memcpy(dstUV + static_cast<size_t>(w) * i,
@@ -71,23 +48,235 @@ uint8_t* CopyNV12(const mfxFrameSurface1* surf) {
 
 } // namespace
 
-// PIMPL keeps the libvpl session handle out of the public header.
+// PIMPL keeps the libvpl session handle, the worker thread, and the
+// synchronization primitives out of the public header.
+//
+// Async model: the caller drives input via FillInput() (append into bs_) and
+// SignalInputComplete() (mark EOF). An internal worker thread consumes bs_,
+// drives MFXVideoDECODE_DecodeFrameAsync, synchronizes completed surfaces, and
+// pushes decoded CodecFrames onto frames_. GetFrame() blocks on frames_ being
+// non-empty or the worker having finished. This lets the hardware pipeline
+// multiple DecodeFrameAsync submissions deep instead of serializing on each.
 class QSVDecoder::Impl {
 public:
     QSVRuntime runtime;
     mfxSession session = nullptr;
-    bool inited = false;
+    bool inited = false;     // decodeInit succeeded
+    bool headerParsed = false;
+    mfxU32 codecId = 0;
 
-    // Input elementary stream (Annex-B H.264/HEVC/AV1).
-    std::ifstream source;
+    // Working bitstream. FillInput appends into the tail; the worker compacts
+    // and consumes from DataOffset.
     mfxBitstream bs{};
-    bool eof = false;       // input file exhausted
-    bool draining = false;  // feeding NULL bitstream to flush delayed frames
 
-    // Decoded frames queued for GetFrame() to drain.
+    std::mutex mu;
+    std::condition_variable cvInput;   // worker waits for new input / EOF
+    std::condition_variable cvFrames;  // GetFrame waits for frames / done
+    bool eof = false;       // SignalInputComplete called
+    bool finished = false;  // worker has drained the decoder
+    bool workerError = false;
     std::queue<CodecFrame> frames;
+    std::thread worker;
+
+    // Pending surfaces submitted to the decoder but not yet synchronized.
+    struct Pending {
+        mfxFrameSurface1* surf;
+        mfxSyncPoint sync;
+    };
+    std::vector<Pending> pending;
+
+    void startWorker() {
+        worker = std::thread([this] { run(); });
+    }
+
+    // Compacts the bitstream (moves unconsumed tail to the front). Caller
+    // holds mu.
+    void compactLocked() {
+        if (bs.DataOffset > 0 && bs.DataLength > 0) {
+            std::memmove(bs.Data, bs.Data + bs.DataOffset, bs.DataLength);
+        }
+        bs.DataOffset = 0;
+    }
+
+    // Appends caller data into bs_, growing if needed. Caller holds mu.
+    void appendLocked(const uint8_t* data, size_t size) {
+        size_t need = bs.DataLength + size;
+        if (need > bs.MaxLength) {
+            // Grow the buffer to fit, preserving existing data.
+            mfxU32 newSize = static_cast<mfxU32>(need);
+            mfxU8* p = static_cast<mfxU8*>(std::realloc(bs.Data, newSize));
+            if (!p) {
+                workerError = true;
+                return;
+            }
+            bs.Data = p;
+            bs.MaxLength = newSize;
+        }
+        std::memcpy(bs.Data + bs.DataLength, data, size);
+        bs.DataLength += static_cast<mfxU32>(size);
+    }
+
+    // Worker: lazily parses the header (once enough data has arrived), then
+    // decodes until EOF + drain complete.
+    void run() {
+        // Phase 1: accumulate data until DecodeHeader succeeds, then Init.
+        while (!headerParsed) {
+            std::unique_lock<std::mutex> lk(mu);
+            cvInput.wait(lk, [this] { return eof || workerError || bs.DataLength > 0; });
+            if (workerError) goto out;
+            if (bs.DataLength == 0) {
+                // EOF with no data at all.
+                if (eof) { workerError = true; }
+                goto out;
+            }
+            {
+                compactLocked();
+                mfxVideoParam par{};
+                par.mfx.CodecId = codecId;
+                par.IOPattern = MFX_IOPATTERN_OUT_SYSTEM_MEMORY;
+                mfxStatus sts = runtime.decodeHeader(session, &bs, &par);
+                if (sts == MFX_ERR_MORE_DATA) {
+                    if (eof) {
+                        std::cerr << "QSVDecoder: EOF before header parsed\n";
+                        workerError = true;
+                        goto out;
+                    }
+                    // Need more input; loop waits for FillInput.
+                    if (!eof) {
+                        // Wait for more data. Release lock and re-loop.
+                        continue;
+                    }
+                } else if (sts != MFX_ERR_NONE) {
+                    std::cerr << "QSVDecoder: DecodeHeader failed: " << sts << "\n";
+                    workerError = true;
+                    goto out;
+                } else {
+                    sts = runtime.decodeInit(session, &par);
+                    if (sts != MFX_ERR_NONE) {
+                        std::cerr << "QSVDecoder: decodeInit failed: " << sts << "\n";
+                        workerError = true;
+                        goto out;
+                    }
+                    inited = true;
+                    headerParsed = true;
+                    cvFrames.notify_all();
+                }
+            }
+        }
+
+        // Phase 2: decode loop.
+        while (true) {
+            mfxBitstream* bsPtr = nullptr;
+            {
+                std::unique_lock<std::mutex> lk(mu);
+                // Consume any data first; if none and not EOF, wait.
+                cvInput.wait(lk, [this] {
+                    return eof || workerError || bs.DataLength > 0;
+                });
+                if (workerError) goto out;
+                compactLocked();
+                if (bs.DataLength > 0) {
+                    bsPtr = &bs;
+                } else if (eof) {
+                    bsPtr = nullptr; // drain mode
+                } else {
+                    continue;
+                }
+            }
+
+            mfxFrameSurface1* surfOut = nullptr;
+            mfxSyncPoint syncp{};
+            mfxStatus sts = runtime.decodeFrameAsync(session, bsPtr, nullptr,
+                                                    &surfOut, &syncp);
+            switch (sts) {
+                case MFX_ERR_NONE: {
+                    // Track the surface for batched synchronization.
+                    std::lock_guard<std::mutex> lk(mu);
+                    pending.push_back({surfOut, syncp});
+                    // Synchronize a batch when several are in flight.
+                    if (pending.size() >= 4) {
+                        drainPendingLocked();
+                    }
+                    break;
+                }
+                case MFX_ERR_MORE_DATA: {
+                    std::lock_guard<std::mutex> lk(mu);
+                    if (eof) {
+                        // Flush any remaining pending surfaces, then done.
+                        drainPendingLocked();
+                        finished = true;
+                        cvFrames.notify_all();
+                        goto out;
+                    }
+                    // Need more input; loop back to wait.
+                    break;
+                }
+                case MFX_ERR_MORE_SURFACE:
+                case MFX_WRN_DEVICE_BUSY:
+                    break;
+                default:
+                    std::cerr << "QSVDecoder: DecodeFrameAsync error: " << sts << "\n";
+                    workerError = true;
+                    cvFrames.notify_all();
+                    goto out;
+            }
+        }
+    out:
+        {
+            std::lock_guard<std::mutex> lk(mu);
+            finished = true;
+            cvFrames.notify_all();
+        }
+    }
+
+    // Synchronizes and copies out all pending surfaces into frames_. Caller
+    // holds mu. Surfaces with MFX_WRN_IN_EXECUTION are retried inline.
+    void drainPendingLocked() {
+        for (auto& p : pending) {
+            mfxFrameSurfaceInterface* fi = p.surf->FrameInterface;
+            mfxStatus sts = MFX_WRN_IN_EXECUTION;
+            while (sts == MFX_WRN_IN_EXECUTION) {
+                sts = fi->Synchronize(p.surf, kSyncTimeoutMs);
+            }
+            if (sts != MFX_ERR_NONE) {
+                fi->Release(p.surf);
+                continue;
+            }
+            sts = fi->Map(p.surf, MFX_MAP_READ);
+            if (sts != MFX_ERR_NONE) {
+                fi->Release(p.surf);
+                continue;
+            }
+            CodecFrame frame;
+            frame.width = p.surf->Info.CropW;
+            frame.height = p.surf->Info.CropH;
+            frame.format = PixelFormat::NV12;
+            frame.size = static_cast<size_t>(frame.width) * frame.height * 3 / 2;
+            frame.strides[0] = static_cast<size_t>(frame.width);
+            frame.data = CopyNV12(p.surf);
+            uint8_t* owned = frame.data;
+            frame.release = [owned]() { std::free(owned); };
+            fi->Unmap(p.surf);
+            fi->Release(p.surf);
+            if (frame.data) {
+                frames.push(std::move(frame));
+            }
+        }
+        pending.clear();
+        cvFrames.notify_all();
+    }
 
     ~Impl() {
+        {
+            std::lock_guard<std::mutex> lk(mu);
+            eof = true;
+            finished = true; // force worker exit if still looping
+            cvInput.notify_all();
+            cvFrames.notify_all();
+        }
+        if (worker.joinable()) {
+            worker.join();
+        }
         while (!frames.empty()) {
             if (frames.front().release) {
                 frames.front().release();
@@ -110,10 +299,6 @@ bool QSVDecoder::Initialize(const CodecParams& params) {
     if (impl_) {
         return false; // already initialized
     }
-    if (params.inputs.empty()) {
-        std::cerr << "QSVDecoder: input file required" << std::endl;
-        return false;
-    }
     impl_ = new Impl;
     if (!impl_->runtime.init()) {
         delete impl_;
@@ -125,16 +310,7 @@ bool QSVDecoder::Initialize(const CodecParams& params) {
         impl_ = nullptr;
         return false;
     }
-
-    // Open the Annex-B elementary stream and prepare the bitstream buffer.
-    impl_->source.open(params.inputs[0], std::ios::binary);
-    if (!impl_->source) {
-        std::cerr << "QSVDecoder: cannot open input " << params.inputs[0]
-                  << std::endl;
-        delete impl_;
-        impl_ = nullptr;
-        return false;
-    }
+    impl_->codecId = mapCodec(params.codec);
     impl_->bs.MaxLength = kBitstreamBytes;
     impl_->bs.Data = static_cast<mfxU8*>(std::calloc(impl_->bs.MaxLength, 1));
     if (!impl_->bs.Data) {
@@ -143,147 +319,66 @@ bool QSVDecoder::Initialize(const CodecParams& params) {
         impl_ = nullptr;
         return false;
     }
-    impl_->bs.CodecId = mapCodec(params.codec);
+    impl_->bs.CodecId = impl_->codecId;
+    // The worker lazily parses the header (DecodeHeader) once FillInput has
+    // delivered enough data, then calls decodeInit and begins decoding.
+    impl_->startWorker();
+    std::cout << "QSVDecoder: async session up, codec=" << params.codec << std::endl;
+    return true;
+}
 
-    // Prime the bitstream and pre-parse the header so the decoder is
-    // initialized with the stream's real width/height/FourCC rather than a
-    // guess. DecodeHeader consumes SPS/PPS and advances DataOffset.
-    RefillBitstream(impl_->bs, impl_->source);
-    mfxVideoParam par{};
-    par.mfx.CodecId = impl_->bs.CodecId;
-    par.IOPattern = MFX_IOPATTERN_OUT_SYSTEM_MEMORY;
-    mfxStatus sts = impl_->runtime.decodeHeader(impl_->session, &impl_->bs, &par);
-    if (sts != MFX_ERR_NONE) {
-        std::cerr << "QSVDecoder: MFXVideoDECODE_DecodeHeader failed: " << sts
-                  << std::endl;
-        delete impl_;
-        impl_ = nullptr;
+int QSVDecoder::FillInput(const uint8_t* data, size_t size) {
+    if (!impl_ || size == 0) {
+        return 0;
+    }
+    {
+        std::lock_guard<std::mutex> lk(impl_->mu);
+        impl_->appendLocked(data, size);
+    }
+    impl_->cvInput.notify_one();
+    return 0;
+}
+
+bool QSVDecoder::SignalInputComplete() {
+    if (!impl_) {
         return false;
     }
+    {
+        std::lock_guard<std::mutex> lk(impl_->mu);
+        impl_->eof = true;
+    }
+    impl_->cvInput.notify_one();
+    return true;
+}
 
-    sts = impl_->runtime.decodeInit(impl_->session, &par);
-    if (sts != MFX_ERR_NONE) {
-        std::cerr << "QSVDecoder: MFXVideoDECODE_Init failed: " << sts << std::endl;
-        delete impl_;
-        impl_ = nullptr;
+bool QSVDecoder::GetFrame(CodecFrame& out) {
+    if (!impl_) {
         return false;
     }
-    impl_->inited = true;
-    std::cout << "QSVDecoder: libvpl session up, codec=" << params.codec << " "
-              << par.mfx.FrameInfo.Width << "x" << par.mfx.FrameInfo.Height
-              << std::endl;
+    std::unique_lock<std::mutex> lk(impl_->mu);
+    impl_->cvFrames.wait(lk, [this] {
+        return impl_->finished || impl_->workerError ||
+               !impl_->frames.empty();
+    });
+    if (impl_->workerError && impl_->frames.empty()) {
+        return false;
+    }
+    if (impl_->frames.empty()) {
+        return false; // finished and drained
+    }
+    out = std::move(impl_->frames.front());
+    impl_->frames.pop();
     return true;
 }
 
 int QSVDecoder::PullFrames() {
-    if (!impl_ || !impl_->inited) {
-        return -1;
-    }
-    int produced = 0;
-    mfxSession session = impl_->session;
-
-    // Decode a batch: keep feeding the bitstream until either a few frames are
-    // ready or the stream is fully drained. Returning with produced>0 lets the
-    // caller drain via GetFrame() and re-enter PullFrames() for the next batch.
-    while (produced < 4) {
-        if (!impl_->draining) {
-            // Top up the bitstream whenever there is room; once EOF is hit we
-            // switch to drain mode (NULL bitstream) on the next MORE_DATA.
-            if (impl_->bs.DataLength == 0 ||
-                impl_->bs.DataLength < impl_->bs.MaxLength) {
-                if (!impl_->eof) {
-                    bool got = RefillBitstream(impl_->bs, impl_->source);
-                    if (!got) {
-                        impl_->eof = true;
-                    }
-                }
-            }
-        }
-
-        mfxBitstream* bsPtr = impl_->draining ? nullptr : &impl_->bs;
-        mfxFrameSurface1* surfOut = nullptr;
-        mfxSyncPoint syncp{};
-        mfxStatus sts = impl_->runtime.decodeFrameAsync(session, bsPtr, nullptr,
-                                                       &surfOut, &syncp);
-
-        switch (sts) {
-            case MFX_ERR_NONE: {
-                // Internal-memory surface: synchronize, map, copy out, release.
-                mfxFrameSurfaceInterface* fi = surfOut->FrameInterface;
-                sts = fi->Synchronize(surfOut, kSyncTimeoutMs);
-                if (sts == MFX_WRN_IN_EXECUTION) {
-                    // Not ready yet; keep the surface, retry next iteration.
-                    fi->Release(surfOut);
-                    break;
-                }
-                if (sts != MFX_ERR_NONE) {
-                    std::cerr << "QSVDecoder: Synchronize failed: " << sts
-                              << std::endl;
-                    fi->Release(surfOut);
-                    return produced > 0 ? produced : -1;
-                }
-                sts = fi->Map(surfOut, MFX_MAP_READ);
-                if (sts != MFX_ERR_NONE) {
-                    std::cerr << "QSVDecoder: Map failed: " << sts << std::endl;
-                    fi->Release(surfOut);
-                    return produced > 0 ? produced : -1;
-                }
-                CodecFrame frame;
-                frame.width = surfOut->Info.CropW;
-                frame.height = surfOut->Info.CropH;
-                frame.format = PixelFormat::NV12;
-                frame.size = static_cast<size_t>(frame.width) * frame.height * 3 / 2;
-                frame.strides[0] = static_cast<size_t>(frame.width);
-                frame.data = CopyNV12(surfOut);
-                // Capture the malloc'd pointer by value for cleanup.
-                uint8_t* owned = frame.data;
-                frame.release = [owned]() { std::free(owned); };
-                fi->Unmap(surfOut);
-                fi->Release(surfOut);
-                if (frame.data) {
-                    impl_->frames.push(std::move(frame));
-                    produced++;
-                }
-                break;
-            }
-            case MFX_ERR_MORE_DATA:
-                if (impl_->draining) {
-                    // No more frames will come out; stream fully drained.
-                    return produced;
-                }
-                if (impl_->eof) {
-                    impl_->draining = true;
-                }
-                // otherwise the refill at the top of the loop feeds more data.
-                break;
-            case MFX_ERR_MORE_SURFACE:
-                // Internal-memory mode allocates surfaces itself; this should
-                // not occur, but if it does just continue.
-                break;
-            case MFX_WRN_DEVICE_BUSY:
-                // Retry after a brief yield.
-                break;
-            default:
-                std::cerr << "QSVDecoder: DecodeFrameAsync error: " << sts
-                          << std::endl;
-                return produced > 0 ? produced : -1;
-        }
-    }
-    return produced;
+    // Async-only backend; the sync PullFrames contract is not used.
+    return 0;
 }
 
 void QSVDecoder::Finalize() {
     delete impl_;
     impl_ = nullptr;
-}
-
-bool QSVDecoder::GetFrame(CodecFrame& out) {
-    if (!impl_ || impl_->frames.empty()) {
-        return false;
-    }
-    out = std::move(impl_->frames.front());
-    impl_->frames.pop();
-    return true;
 }
 
 std::string QSVDecoder::getName() const {

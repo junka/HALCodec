@@ -2,9 +2,12 @@
 
 #include <cstring>
 #include <cstdlib>
+#include <condition_variable>
 #include <memory>
+#include <mutex>
 #include <queue>
-#include <string>
+#include <thread>
+#include <vector>
 
 #include "qsv_common.h"
 #include "registry.h"
@@ -19,6 +22,13 @@ namespace {
 // SyncOperation so the same buffer is reused for the next frame.
 constexpr mfxU32 kBitstreamBytes = 2 * 1024 * 1024;
 constexpr mfxU32 kSyncTimeoutMs = 1000;
+// How many EncodeFrameAsync submissions to keep in flight before forcing a
+// synchronization. Deeper pipelining raises throughput by overlapping host
+// input copy with GPU encoding of prior frames.
+constexpr size_t kMaxInFlight = 4;
+// Size of the rotating bitstream pool. Each in-flight submission gets its own
+// buffer so outputs never collide while we defer synchronization.
+constexpr size_t kBitstreamPool = kMaxInFlight + 1;
 
 // Align a dimension up to a multiple of 16 (oneVPL requires Width/Height
 // aligned to macroblocks for hardware encode).
@@ -76,7 +86,16 @@ CodecFrame TakeBitstream(mfxBitstream& bs) {
 
 } // namespace
 
-// PIMPL keeps the libvpl session handle out of the public header.
+// PIMPL keeps the libvpl session handle, the worker thread, and the
+// synchronization primitives out of the public header.
+//
+// Async model: the caller drives input via FillFrame() (queue a raw frame) and
+// SignalInputComplete() (mark EOF). An internal worker thread pulls frames,
+// drives MFXVideoENCODE_EncodeFrameAsync keeping several submissions in flight,
+// batch-synchronizes completed syncpoints, and pushes encoded CodecFrames onto
+// packets_. GetFrame() blocks on packets_ being non-empty or the worker having
+// finished. This lets the hardware pipeline submissions deep instead of
+// serializing on each frame's completion.
 class QSVEncoder::Impl {
 public:
     QSVRuntime runtime;
@@ -84,13 +103,238 @@ public:
     bool inited = false;
 
     mfxVideoParam par{};
-    mfxBitstream bs{};
-    bool draining = false;  // EOS signaled; flushing delayed frames
+    // Rotating pool of output bitstreams so deferred (batched) synchronization
+    // never lets two in-flight outputs share a buffer.
+    std::vector<mfxBitstream> bsPool;
+    size_t bsNext = 0;  // next pool slot to hand to EncodeFrameAsync
 
-    // Encoded access units queued for GetFrame() to drain.
-    std::queue<CodecFrame> packets;
+    std::mutex mu;
+    std::condition_variable cvInput;   // worker waits for new input / EOF
+    std::condition_variable cvPackets; // GetFrame waits for packets / done
+    bool eof = false;       // SignalInputComplete called
+    bool finished = false;  // worker has drained the encoder
+    bool workerError = false;
+    std::queue<CodecFrame> inFrames;  // raw input awaiting submission
+    std::queue<CodecFrame> packets;   // encoded access units for GetFrame
+    std::thread worker;
+
+    // Pending EncodeFrameAsync submissions awaiting synchronization. Each
+    // carries the syncpoint and the pool slot whose bitstream holds its output.
+    struct Pending {
+        mfxSyncPoint sync;
+        mfxBitstream* bs;
+    };
+    std::vector<Pending> pending;
+
+    void startWorker() {
+        worker = std::thread([this] { run(); });
+    }
+
+    // Synchronizes and copies out all pending submissions into packets_.
+    // Caller holds mu. The freed pool slots become available again.
+    void drainPendingLocked() {
+        for (auto& p : pending) {
+            if (!p.sync) {
+                continue;
+            }
+            mfxStatus sts = MFX_WRN_IN_EXECUTION;
+            while (sts == MFX_WRN_IN_EXECUTION) {
+                sts = runtime.syncOperation(session, p.sync, kSyncTimeoutMs);
+            }
+            if (sts != MFX_ERR_NONE) {
+                std::cerr << "QSVEncoder: SyncOperation failed: " << sts << "\n";
+                p.bs->DataOffset = 0;
+                p.bs->DataLength = 0;
+                continue;
+            }
+            if (p.bs->DataLength > 0) {
+                packets.push(TakeBitstream(*p.bs));
+            } else {
+                p.bs->DataOffset = 0;
+                p.bs->DataLength = 0;
+            }
+        }
+        pending.clear();
+        cvPackets.notify_all();
+    }
+
+    // Hands out the next free bitstream slot. Caller holds mu.
+    mfxBitstream* nextBitstreamLocked() {
+        mfxBitstream* bs = &bsPool[bsNext];
+        bsNext = (bsNext + 1) % bsPool.size();
+        bs->DataOffset = 0;
+        bs->DataLength = 0;
+        return bs;
+    }
+
+    void run() {
+        while (true) {
+            CodecFrame input;
+            bool gotFrame = false;
+            {
+                std::unique_lock<std::mutex> lk(mu);
+                cvInput.wait(lk, [this] {
+                    return eof || workerError || !inFrames.empty();
+                });
+                if (workerError) goto out;
+                if (!inFrames.empty()) {
+                    input = std::move(inFrames.front());
+                    inFrames.pop();
+                    gotFrame = true;
+                } else if (eof) {
+                    // EOF with no queued frames: drain the encoder and finish.
+                    lk.unlock();
+                    if (!drainEncoder()) {
+                        std::lock_guard<std::mutex> lk2(mu);
+                        workerError = true;
+                        cvPackets.notify_all();
+                        goto out;
+                    }
+                    std::lock_guard<std::mutex> lk2(mu);
+                    drainPendingLocked();
+                    finished = true;
+                    cvPackets.notify_all();
+                    goto out;
+                } else {
+                    continue;
+                }
+            }
+
+            if (gotFrame) {
+                // A zero-size frame is the implicit end-of-stream marker (the
+                // same contract sync backends use). Treat it as EOF rather than
+                // submitting an empty surface; the remaining queued frames
+                // (if any) are still submitted first on subsequent iterations.
+                if (input.size == 0) {
+                    std::lock_guard<std::mutex> lk(mu);
+                    eof = true;
+                } else if (!submitFrame(input)) {
+                    std::lock_guard<std::mutex> lk(mu);
+                    workerError = true;
+                    cvPackets.notify_all();
+                    goto out;
+                }
+                if (input.release) {
+                    input.release();
+                }
+            }
+        }
+    out:
+        {
+            std::lock_guard<std::mutex> lk(mu);
+            finished = true;
+            cvPackets.notify_all();
+        }
+    }
+
+    // Submits one raw frame: get surface, copy NV12 in, EncodeFrameAsync. Does
+    // NOT synchronize per-frame; batches synchronization when kMaxInFlight
+    // submissions are outstanding. Returns false on a fatal submit error.
+    bool submitFrame(const CodecFrame& input) {
+        mfxSession s = session;
+        mfxFrameSurface1* surf = nullptr;
+        mfxStatus sts = runtime.getSurfaceForEncode(s, &surf);
+        if (sts != MFX_ERR_NONE) {
+            std::cerr << "QSVEncoder: GetSurfaceForEncode failed: " << sts << "\n";
+            return false;
+        }
+        sts = surf->FrameInterface->Map(surf, MFX_MAP_WRITE);
+        if (sts != MFX_ERR_NONE) {
+            std::cerr << "QSVEncoder: surface Map failed: " << sts << "\n";
+            surf->FrameInterface->Release(surf);
+            return false;
+        }
+        mfxStatus fillSts = FillSurfaceFromFrame(surf, input);
+        mfxStatus unmapSts = surf->FrameInterface->Unmap(surf);
+        if (fillSts != MFX_ERR_NONE) {
+            std::cerr << "QSVEncoder: input frame incompatible: " << fillSts << "\n";
+            surf->FrameInterface->Release(surf);
+            return false;
+        }
+        if (unmapSts != MFX_ERR_NONE) {
+            std::cerr << "QSVEncoder: surface Unmap failed: " << unmapSts << "\n";
+            surf->FrameInterface->Release(surf);
+            return false;
+        }
+
+        mfxBitstream* bs = nullptr;
+        {
+            std::lock_guard<std::mutex> lk(mu);
+            // Keep the pipeline bounded: if too many submissions are in flight,
+            // synchronize the oldest before submitting more.
+            if (pending.size() >= kMaxInFlight) {
+                drainPendingLocked();
+            }
+            bs = nextBitstreamLocked();
+        }
+        mfxSyncPoint syncp{};
+        sts = runtime.encodeFrameAsync(s, surf, bs, &syncp);
+        // The encoder holds its own reference once submitted; release ours.
+        surf->FrameInterface->Release(surf);
+
+        if (sts == MFX_ERR_NONE) {
+            std::lock_guard<std::mutex> lk(mu);
+            pending.push_back({syncp, bs});
+        } else if (sts == MFX_ERR_MORE_DATA) {
+            // Encoder buffered the frame; output comes with a later submission.
+            // The bitstream slot was untouched; release it back implicitly by
+            // leaving it reset (nextBitstreamLocked resets on handout).
+            std::lock_guard<std::mutex> lk(mu);
+            // No pending entry: nothing to synchronize for this submission.
+        } else {
+            std::cerr << "QSVEncoder: EncodeFrameAsync error: " << sts << "\n";
+            return false;
+        }
+        return true;
+    }
+
+    // Drains delayed frames by submitting NULL surfaces until the encoder
+    // returns MFX_ERR_MORE_DATA. Synchronizes each emitted output. Returns
+    // false on a fatal drain error.
+    bool drainEncoder() {
+        mfxSession s = session;
+        while (true) {
+            mfxBitstream* bs = nullptr;
+            {
+                std::lock_guard<std::mutex> lk(mu);
+                if (pending.size() >= kMaxInFlight) {
+                    drainPendingLocked();
+                }
+                bs = nextBitstreamLocked();
+            }
+            mfxSyncPoint syncp{};
+            mfxStatus sts = runtime.encodeFrameAsync(s, nullptr, bs, &syncp);
+            if (sts == MFX_ERR_NONE) {
+                std::lock_guard<std::mutex> lk(mu);
+                pending.push_back({syncp, bs});
+            } else if (sts == MFX_ERR_MORE_DATA || sts == MFX_ERR_NOT_ENOUGH_BUFFER) {
+                // Encoder fully flushed.
+                break;
+            } else {
+                std::cerr << "QSVEncoder: drain EncodeFrameAsync error: " << sts << "\n";
+                return false;
+            }
+        }
+        return true;
+    }
 
     ~Impl() {
+        {
+            std::lock_guard<std::mutex> lk(mu);
+            eof = true;
+            finished = true; // force worker exit if still looping
+            cvInput.notify_all();
+            cvPackets.notify_all();
+        }
+        if (worker.joinable()) {
+            worker.join();
+        }
+        while (!inFrames.empty()) {
+            if (inFrames.front().release) {
+                inFrames.front().release();
+            }
+            inFrames.pop();
+        }
         while (!packets.empty()) {
             if (packets.front().release) {
                 packets.front().release();
@@ -103,8 +347,10 @@ public:
         if (session) {
             runtime.close(session);
         }
-        if (bs.Data) {
-            std::free(bs.Data);
+        for (auto& bs : bsPool) {
+            if (bs.Data) {
+                std::free(bs.Data);
+            }
         }
     }
 };
@@ -171,16 +417,20 @@ bool QSVEncoder::Initialize(const CodecParams& params) {
         return false;
     }
 
-    impl_->bs.MaxLength = kBitstreamBytes;
-    impl_->bs.Data = static_cast<mfxU8*>(std::calloc(impl_->bs.MaxLength, 1));
-    if (!impl_->bs.Data) {
-        std::cerr << "QSVEncoder: bitstream alloc failed" << std::endl;
-        delete impl_;
-        impl_ = nullptr;
-        return false;
+    impl_->bsPool.resize(kBitstreamPool);
+    for (auto& bs : impl_->bsPool) {
+        bs.MaxLength = kBitstreamBytes;
+        bs.Data = static_cast<mfxU8*>(std::calloc(bs.MaxLength, 1));
+        if (!bs.Data) {
+            std::cerr << "QSVEncoder: bitstream alloc failed" << std::endl;
+            delete impl_;
+            impl_ = nullptr;
+            return false;
+        }
     }
     impl_->inited = true;
-    std::cout << "QSVEncoder: libvpl session up, codec=" << params.codec << " "
+    impl_->startWorker();
+    std::cout << "QSVEncoder: async session up, codec=" << params.codec << " "
               << params.width << "x" << params.height << std::endl;
     return true;
 }
@@ -189,84 +439,43 @@ bool QSVEncoder::FillFrame(const CodecFrame& input) {
     if (!impl_ || !impl_->inited) {
         return false;
     }
-    mfxSession session = impl_->session;
+    // Frames are queued for the worker; a zero-size frame is interpreted by
+    // the worker as the implicit end-of-stream marker (the sync-backend
+    // contract). SignalInputComplete() is the explicit async EOF path.
+    {
+        std::lock_guard<std::mutex> lk(impl_->mu);
+        impl_->inFrames.push(input);
+    }
+    impl_->cvInput.notify_one();
+    return true;
+}
 
-    // End-of-stream marker (size == 0): drain delayed frames by submitting
-    // NULL surfaces until the encoder returns MFX_ERR_MORE_DATA.
-    if (input.size == 0) {
-        impl_->draining = true;
-        while (true) {
-            mfxSyncPoint syncp{};
-            mfxStatus sts = impl_->runtime.encodeFrameAsync(session, nullptr,
-                                                           &impl_->bs, &syncp);
-            if (sts == MFX_ERR_NONE && syncp) {
-                sts = impl_->runtime.syncOperation(session, syncp, kSyncTimeoutMs);
-                if (sts != MFX_ERR_NONE && sts != MFX_WRN_IN_EXECUTION) {
-                    std::cerr << "QSVEncoder: drain SyncOperation failed: "
-                              << sts << std::endl;
-                    return false;
-                }
-                impl_->packets.push(TakeBitstream(impl_->bs));
-            } else if (sts == MFX_ERR_MORE_DATA || sts == MFX_ERR_NOT_ENOUGH_BUFFER) {
-                return true; // encoder fully flushed
-            } else {
-                std::cerr << "QSVEncoder: drain EncodeFrameAsync error: " << sts
-                          << std::endl;
-                return false;
-            }
-        }
-    }
-
-    // Normal frame: get an internal surface, copy the NV12 input in, submit.
-    mfxFrameSurface1* surf = nullptr;
-    mfxStatus sts = impl_->runtime.getSurfaceForEncode(session, &surf);
-    if (sts != MFX_ERR_NONE) {
-        std::cerr << "QSVEncoder: GetSurfaceForEncode failed: " << sts << std::endl;
+bool QSVEncoder::SignalInputComplete() {
+    if (!impl_) {
         return false;
     }
-    sts = surf->FrameInterface->Map(surf, MFX_MAP_WRITE);
-    if (sts != MFX_ERR_NONE) {
-        std::cerr << "QSVEncoder: surface Map failed: " << sts << std::endl;
-        surf->FrameInterface->Release(surf);
-        return false;
+    {
+        std::lock_guard<std::mutex> lk(impl_->mu);
+        impl_->eof = true;
     }
-    sts = FillSurfaceFromFrame(surf, input);
-    mfxStatus unmapSts = surf->FrameInterface->Unmap(surf);
-    if (sts != MFX_ERR_NONE) {
-        std::cerr << "QSVEncoder: input frame incompatible: " << sts << std::endl;
-        surf->FrameInterface->Release(surf);
-        return false;
-    }
-    if (unmapSts != MFX_ERR_NONE) {
-        std::cerr << "QSVEncoder: surface Unmap failed: " << unmapSts << std::endl;
-        surf->FrameInterface->Release(surf);
-        return false;
-    }
-
-    mfxSyncPoint syncp{};
-    sts = impl_->runtime.encodeFrameAsync(session, surf, &impl_->bs, &syncp);
-    // The encoder holds its own reference once submitted; release ours.
-    surf->FrameInterface->Release(surf);
-
-    if (sts == MFX_ERR_NONE && syncp) {
-        sts = impl_->runtime.syncOperation(session, syncp, kSyncTimeoutMs);
-        if (sts != MFX_ERR_NONE && sts != MFX_WRN_IN_EXECUTION) {
-            std::cerr << "QSVEncoder: SyncOperation failed: " << sts << std::endl;
-            return false;
-        }
-        impl_->packets.push(TakeBitstream(impl_->bs));
-    } else if (sts == MFX_ERR_MORE_DATA) {
-        // Encoder buffered the frame; output comes with a later submission.
-    } else if (sts != MFX_ERR_NONE) {
-        std::cerr << "QSVEncoder: EncodeFrameAsync error: " << sts << std::endl;
-        return false;
-    }
+    impl_->cvInput.notify_one();
     return true;
 }
 
 bool QSVEncoder::GetFrame(CodecFrame& out) {
-    if (!impl_ || impl_->packets.empty()) {
+    if (!impl_) {
         return false;
+    }
+    std::unique_lock<std::mutex> lk(impl_->mu);
+    impl_->cvPackets.wait(lk, [this] {
+        return impl_->finished || impl_->workerError ||
+               !impl_->packets.empty();
+    });
+    if (impl_->workerError && impl_->packets.empty()) {
+        return false;
+    }
+    if (impl_->packets.empty()) {
+        return false; // finished and drained
     }
     out = std::move(impl_->packets.front());
     impl_->packets.pop();
