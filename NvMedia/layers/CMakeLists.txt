@@ -11,9 +11,23 @@ target_include_directories(nvmedia_layers PUBLIC
         ${NVMEDIA_SDK_DIR}/include
         ${NVMEDIA_SDK_DIR}/include/nvmedia_6x)
 
-# Stub only calls IDE/IEP GetVersion/Create/Destroy; the symbols live in
-# libnvmedia_ide_sci.so / libnvmedia_iep_sci.so. The full data path would
-# additionally need the NvSci libs (see samples/nvmedia_6x/ide/Makefile:
-# -lnvscibuf -lnvscisync -lnvmedia_ide_parser -lz -lm).
+# NvSci-backed API surface (see samples/nvmedia_6x/iep/Makefile) and the
+# non-safety IEP init entry points used by the encoder.
+target_compile_definitions(nvmedia_layers PRIVATE
+        NVMEDIA_NVSCI_ENABLE
+        NV_IS_SAFETY=0)
+
+# Full data-path library set, mirroring the sample link lines:
+#   ide:  -lnvscibuf -lnvscisync -lnvmedia_ide_parser -lnvmedia_ide_sci -lz -lm
+#   iep:  -lnvscibuf -lnvscisync -lnvmedia_iep_sci
 link_directories(${NVMEDIA_SDK_DIR}/lib-target)
-target_link_libraries(nvmedia_layers PUBLIC -lnvmedia_ide_sci -lnvmedia_iep_sci)
+target_link_libraries(nvmedia_layers PUBLIC
+        halcodec_core
+        ${CMAKE_DL_LIBS}
+        -lnvscibuf
+        -lnvscisync
+        -lnvmedia_ide_parser
+        -lnvmedia_ide_sci
+        -lnvmedia_iep_sci
+        -lz
+        -lm)
