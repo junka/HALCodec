@@ -18,7 +18,8 @@ public:
             po::options_description desc("Allowed options");
             desc.add_options()
                 ("help,h", "Show help message")
-                ("input,i", po::value<std::string>(&inputFile_), "Input file")
+                ("input,i", po::value<std::vector<std::string>>(&inputFiles_),
+                 "Input file (may be repeated for multi-stream apps)")
                 ("output,o", po::value<std::string>(&outputFile_), "Output file (optional, defaults to input file name with format extension)")
                 ("backend,b", po::value<std::string>(&backend_), "Backend name (vtbox/nvdec/nvjpeg/nvenc/amfdec/qsvdec/nvmedia); defaults per application")
                 ("gpu", po::value<int>(&gpuIndex_)->default_value(0), "GPU index")
@@ -39,9 +40,9 @@ public:
             po::notify(vm);
 
             // If output is not provided, derive it from input
-            if (!vm.count("output") && vm.count("input")) {
-                std::string inputFileName = inputFile_;
-                size_t lastDot = inputFile_.find_last_of('.');
+            if (!vm.count("output") && !inputFiles_.empty()) {
+                std::string inputFileName = inputFiles_.front();
+                size_t lastDot = inputFileName.find_last_of('.');
                 if (lastDot != std::string::npos) {
                     input_format_ = inputFileName.substr(lastDot+1);
                     inputFileName = inputFileName.substr(0, lastDot);
@@ -54,7 +55,12 @@ public:
         }
     }
 
-    const std::string& getInputFile() const { return inputFile_; }
+    const std::string& getInputFile() const {
+        // Single-file apps read the first -i; multi-stream apps use getInputFiles().
+        static const std::string empty;
+        return inputFiles_.empty() ? empty : inputFiles_.front();
+    }
+    const std::vector<std::string>& getInputFiles() const { return inputFiles_; }
     const std::string& getOutputFile() const { return outputFile_; }
     const std::string& getBackend() const { return backend_; }
     int getGpuIndex() const { return gpuIndex_; }
@@ -63,7 +69,7 @@ public:
     const std::string& getColorSpace() const { return cs_; }
 
 private:
-    std::string inputFile_;
+    std::vector<std::string> inputFiles_;
     std::string outputFile_;
     std::string backend_;
     int gpuIndex_;

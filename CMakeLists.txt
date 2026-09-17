@@ -13,7 +13,9 @@ include_directories(${CMAKE_SOURCE_DIR}/src)
 # dlopen'd) and executables all depend on it so a backend registered at runtime
 # is visible to the app. Without a shared core, each .so gets its own
 # function-local static Map and runtime-loaded backends vanish.
-add_library(halcodec_core SHARED ${CMAKE_SOURCE_DIR}/src/registry.cc)
+add_library(halcodec_core SHARED
+    ${CMAKE_SOURCE_DIR}/src/registry.cc
+    ${CMAKE_SOURCE_DIR}/src/session.cc)
 set_target_properties(halcodec_core PROPERTIES
     CXX_VISIBILITY_PRESET hidden
     VISIBILITY_INLINES_HIDDEN ON)
