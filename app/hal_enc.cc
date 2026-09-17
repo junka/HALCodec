@@ -129,6 +129,13 @@ int main(int argc, char* argv[]) {
             }
         }
     };
+    // Async encoders pipeline hardware submissions across frames: FillFrame
+    // returns without blocking on completion, so we defer draining until the
+    // stream is complete (deeper pipeline, higher throughput). Sync encoders
+    // drain after every submission as before. nvjpegenc is always sync (one
+    // image per output file), so per-frame draining there is unaffected.
+    const bool asyncEnc = enc->isAsync();
+    auto drainIfSync = [&]() { if (!asyncEnc) drain(); };
 
     if (info.st_mode & S_IFDIR) {
         // Feed each file in the directory as one whole image.
@@ -186,7 +193,7 @@ int main(int argc, char* argv[]) {
                     in.height = h;
                     enc->FillFrame(in);
                 }
-                drain();
+                drainIfSync();
             }
             closedir(dir);
         }
@@ -207,13 +214,14 @@ int main(int argc, char* argv[]) {
             in.height = h;
             enc->FillFrame(in);
             std::free(in.data);
-            drain();
+            drainIfSync();
             // Flush trailing packets and finish.
             halcodec::CodecFrame eos;
             eos.width = params.width;
             eos.height = params.height;
             eos.format = params.inputFormat;
             enc->FillFrame(eos);
+            if (asyncEnc) enc->SignalInputComplete();
             drain();
             fpout.close();
             enc->Finalize();
@@ -252,7 +260,7 @@ int main(int argc, char* argv[]) {
             in.data = buf.data() + off;
             in.size = frameBytes;
             enc->FillFrame(in);
-            drain();
+            drainIfSync();
         }
     }
 
@@ -262,6 +270,7 @@ int main(int argc, char* argv[]) {
     eos.height = params.height;
     eos.format = params.inputFormat;
     enc->FillFrame(eos);
+    if (asyncEnc) enc->SignalInputComplete();
     drain();
 
     fpout.close();
