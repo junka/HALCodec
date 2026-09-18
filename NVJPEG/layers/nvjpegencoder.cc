@@ -53,9 +53,18 @@ bool NVJPEGEncoder::Initialize(const CodecParams& params) {
         std::cout << "cuCtxCreate error" << std::endl;
         return false;
     }
+    // Create the CUDA stream BEFORE any nvjpeg call: nvjpegCreateEx and the
+    // state/params creation below all reference stream_, so it must be valid
+    // first. (Previously this was at the end of Initialize, leaving stream_
+    // uninitialized during nvjpeg setup — undefined behavior / segfault.)
+    ret = cudaStreamCreateWithFlags(&stream_, cudaStreamNonBlocking);
+    if (ret != cudaSuccess) {
+        std::cerr << "Fail to create cuda stream" << std::endl;
+        return false;
+    }
     cudaDeviceProp props;
     ret = cudaGetDeviceProperties(&props, 0);
-    if (ret != CUDA_SUCCESS) {
+    if (ret != cudaSuccess) {
         std::cout << "get device properties error" << std::endl;
         return false;
     }
@@ -102,11 +111,6 @@ bool NVJPEGEncoder::Initialize(const CodecParams& params) {
         return false;
     }
 
-    ret = cudaStreamCreateWithFlags(&stream_, cudaStreamNonBlocking);
-    if (ret != CUDA_SUCCESS) {
-        std::cerr << "Fail to create cuda stream" << std::endl;
-        return false;
-    }
     return true;
 }
 
@@ -132,7 +136,7 @@ bool NVJPEGEncoder::FillFrame(const CodecFrame& in) {
         return false;
     }
 
-    if (cudaStreamSynchronize(stream_) != CUDA_SUCCESS) {
+    if (cudaStreamSynchronize(stream_) != cudaSuccess) {
         std::cerr << "Fail to sync cuda stream" << std::endl;
         return false;
     }
@@ -179,7 +183,7 @@ bool NVJPEGEncoder::FillFrame(const CodecFrame& in) {
         inputfmt_ = NVJPEG_INPUT_BGR;
     }
 
-    if (cudaDeviceSynchronize() != CUDA_SUCCESS) {
+    if (cudaDeviceSynchronize() != cudaSuccess) {
         return false;
     }
 
