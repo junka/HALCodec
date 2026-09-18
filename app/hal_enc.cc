@@ -16,6 +16,7 @@
 #include "parse_cli.h"
 
 #include "codec_config.h"
+#include "encode_config.h"
 #include "frame.h"
 #include "plugin_loader.h"
 
@@ -66,6 +67,27 @@ int main(int argc, char* argv[]) {
         params.width = std::stoi(match[1].str());
         params.height = std::stoi(match[2].str());
     }
+
+    // Encoder tuning: load JSON config (if any), then apply CLI single-item
+    // overrides on top. CLI items left at their sentinels are skipped so they
+    // don't clobber values that came from the JSON file.
+    params.codec = cli.getCodec();
+    if (!cli.getEncodeConfigFile().empty()) {
+        halcodec::LoadEncodeConfig(cli.getEncodeConfigFile(), params.encode);
+    }
+    if (!cli.getPreset().empty())       params.encode.preset = cli.getPreset();
+    if (!cli.getTuning().empty())       params.encode.tuningInfo = cli.getTuning();
+    if (!cli.getRateControl().empty())  params.encode.rateControl = cli.getRateControl();
+    if (cli.getBitrateKbps() >= 0)      params.encode.bitrateKbps = cli.getBitrateKbps();
+    if (cli.getMaxBitrateKbps() >= 0)   params.encode.maxBitrateKbps = cli.getMaxBitrateKbps();
+    if (cli.getQp() >= 0)               params.encode.qp = cli.getQp();
+    if (cli.getGopLength() >= 0)        params.encode.gopLength = cli.getGopLength();
+    if (cli.getNumBFrames() >= 0)       params.encode.numBFrames = cli.getNumBFrames();
+    if (cli.getFps() > 0)               params.encode.frameRateNum = cli.getFps();
+    if (!cli.getProfile().empty())      params.encode.profile = cli.getProfile();
+    if (!cli.getLevel().empty())        params.encode.level = cli.getLevel();
+    if (cli.getLowDelay())              params.encode.lowDelay = true;
+
     if (!enc->Initialize(params)) {
         std::cerr << "Fail to initialize encoder backend: " << backend << std::endl;
         return -1;

@@ -1,0 +1,12 @@
+{
+    "codec": "h264",
+    "preset": "p1",
+    "tuningInfo": "ull",
+    "rateControl": "cbr",
+    "bitrateKbps": 6000,
+    "gopLength": 30,
+    "numBFrames": 0,
+    "frameRateNum": 30,
+    "frameRateDen": 1,
+    "lowDelay": true
+}

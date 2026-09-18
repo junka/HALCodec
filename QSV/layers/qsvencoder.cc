@@ -377,21 +377,52 @@ bool QSVEncoder::Initialize(const CodecParams& params) {
 
     mfxVideoParam& par = impl_->par;
     par.mfx.CodecId = mapCodec(params.codec);
+    // Unified EncodeConfig overrides; sentinels fall back to the prior
+    // hardcoded defaults (BALANCED / 8 Mbps / CBR / 30 fps).
+    const auto& ec = params.encode;
     par.mfx.TargetUsage = MFX_TARGETUSAGE_BALANCED;
-    par.mfx.TargetKbps = 8000; // ~8 Mbps
-    // CBR is used over VBR because the libmfx-gen implementation on this
-    // (Arrow Lake) iGPU rejects VBR at frame-submit time for AVC (-5
-    // MFX_ERR_INVALID_VIDEO_PARAM), even though Init accepts it; HEVC tolerates
-    // VBR. CBR works for both, so it is the safe default here.
+    if (!ec.preset.empty()) {
+        if (ec.preset == "fast" || ec.preset == "speed")
+            par.mfx.TargetUsage = MFX_TARGETUSAGE_BEST_SPEED;
+        else if (ec.preset == "slow" || ec.preset == "best" || ec.preset == "quality")
+            par.mfx.TargetUsage = MFX_TARGETUSAGE_BEST_QUALITY;
+        else if (ec.preset == "balanced")
+            par.mfx.TargetUsage = MFX_TARGETUSAGE_BALANCED;
+    }
+    par.mfx.TargetKbps = ec.bitrateKbps > 0
+        ? static_cast<mfxU16>(ec.bitrateKbps)
+        : 8000; // ~8 Mbps default
+    // Rate control: CBR is the safe default (libmfx-gen rejects VBR for AVC on
+    // Arrow Lake iGPU at submit time). ec.rateControl overrides only when set.
     par.mfx.RateControlMethod = MFX_RATECONTROL_CBR;
+    if (!ec.rateControl.empty()) {
+        if (ec.rateControl == "vbr")      par.mfx.RateControlMethod = MFX_RATECONTROL_VBR;
+        else if (ec.rateControl == "cqp") par.mfx.RateControlMethod = MFX_RATECONTROL_CQP;
+        else if (ec.rateControl == "icq") par.mfx.RateControlMethod = MFX_RATECONTROL_ICQ;
+        // "cbr" or unknown => CBR (default)
+    }
+    if (ec.qp >= 0) {
+        par.mfx.QPI = par.mfx.QPP = par.mfx.QPB = static_cast<mfxU16>(ec.qp);
+    }
+    // GOP / B-frame: GopPicSize/GopRefDist are direct fields on mfxInfoMFX
+    // (no extension buffer needed). GopRefDist=1 => I/P only (no B-frames).
+    if (ec.gopLength > 0) {
+        par.mfx.GopPicSize = static_cast<mfxU16>(ec.gopLength);
+    }
+    int bframes = ec.lowDelay ? 0 : ec.numBFrames;
+    if (bframes >= 0) {
+        par.mfx.GopRefDist = static_cast<mfxU16>(bframes + 1);
+    }
     par.mfx.FrameInfo.FourCC = MFX_FOURCC_NV12;
     par.mfx.FrameInfo.ChromaFormat = MFX_CHROMAFORMAT_YUV420;
     par.mfx.FrameInfo.CropW = static_cast<mfxU16>(params.width);
     par.mfx.FrameInfo.CropH = static_cast<mfxU16>(params.height);
     par.mfx.FrameInfo.Width = Align16(params.width);
     par.mfx.FrameInfo.Height = Align16(params.height);
-    par.mfx.FrameInfo.FrameRateExtN = 30;
-    par.mfx.FrameInfo.FrameRateExtD = 1;
+    par.mfx.FrameInfo.FrameRateExtN = ec.frameRateNum > 0
+        ? static_cast<mfxU16>(ec.frameRateNum) : 30;
+    par.mfx.FrameInfo.FrameRateExtD = ec.frameRateDen > 0
+        ? static_cast<mfxU16>(ec.frameRateDen) : 1;
     par.mfx.FrameInfo.PicStruct = MFX_PICSTRUCT_PROGRESSIVE;
     par.IOPattern = MFX_IOPATTERN_IN_SYSTEM_MEMORY;
 
