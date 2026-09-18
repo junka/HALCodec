@@ -57,4 +57,5 @@ QSV/libvpl-*/.github/
 QSV/vpl-gpu-rt-*/
 
 # Decode test output (raw NV12 produced by hal_dec -f yuv).
-QSV/libvpl-*/examples/content/*.yuv
+QSV/libvpl-*/examples/content/*.yuvtest_cars_320x240.bmp
+test_cars_320x240.jpg

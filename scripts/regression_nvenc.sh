@@ -36,16 +36,34 @@ fail() { printf '\033[1;31mFAIL: %s\033[0m\n' "$*" >&2; exit 1; }
 [ -f "$ASSET_H264" ] || fail "missing asset $ASSET_H264"
 [ -f "$ASSET_NV12" ] || fail "missing asset $ASSET_NV12"
 
+# JPEG/BMP assets for the NVJPEG path are generated from NV12 frame 0 via
+# ffmpeg (available on the build host). The CUDA 12 runtime libs
+# (libcudart.so.12, libnvjpeg.so.12) are also deployed: the remote driver
+# doesn't ship them in ldconfig, so libnvjpeg_layers.so won't load without.
+JPEG_ASSET="$REPO/test_cars_320x240.jpg"
+BMP_ASSET="$REPO/test_cars_320x240.bmp"
+CUDART_LOCAL="$(ldd "$BUILD/app/libnvjpeg_layers.so" 2>/dev/null | grep -oE '/[^ ]*libcudart\.so\.[0-9]+' | head -1)"
+NVJPEG_LOCAL="$(ldd "$BUILD/app/libnvjpeg_layers.so" 2>/dev/null | grep -oE '/[^ ]*libnvjpeg\.so\.[0-9]+' | head -1)"
+
 # ---------------------------------------------------------------------------
 # 1. Build locally.
 # ---------------------------------------------------------------------------
 log "build (local)"
 cmake --S "$REPO" --B "$BUILD" -DCMAKE_BUILD_TYPE=Release >/dev/null 2>&1 || true
-cmake --build "$BUILD" --target hal_dec hal_enc hal_session nvenc_layers -j
+cmake --build "$BUILD" --target hal_dec hal_enc hal_session nvenc_layers nvjpeg_layers -j
 
 # POST_BUILD copy only fires on exe relink; refresh the app-dir copy explicitly
 # so the deployed .so matches the freshly built one.
 cp "$BUILD/NVEnc/layers/libnvenc_layers.so" "$BUILD/app/libnvenc_layers.so"
+cp "$BUILD/NVJPEG/layers/libnvjpeg_layers.so" "$BUILD/app/libnvjpeg_layers.so"
+
+# Generate JPEG/BMP test assets from NV12 frame 0 for the NVJPEG path.
+command -v ffmpeg >/dev/null || fail "ffmpeg required to generate JPEG/BMP assets"
+[ -f "$JPEG_ASSET" ] || ffmpeg -y -f rawvideo -pix_fmt nv12 -s 320x240 \
+    -i "$ASSET_NV12" -vframes 1 -q:v 2 "$JPEG_ASSET" >/dev/null 2>&1
+[ -f "$BMP_ASSET" ] || ffmpeg -y -f rawvideo -pix_fmt nv12 -s 320x240 \
+    -i "$ASSET_NV12" -vframes 1 "$BMP_ASSET" >/dev/null 2>&1
+[ -f "$JPEG_ASSET" ] && [ -f "$BMP_ASSET" ] || fail "failed to generate JPEG/BMP assets"
 
 # ---------------------------------------------------------------------------
 # 2. Stage binaries + core lib + boost + full transitive .so dependency tree
@@ -64,7 +82,11 @@ mkdir -p "$STAGE/configs"
 cp "$REPO/configs/encode_hq.json" "$REPO/configs/encode_lowdelay.json" "$STAGE/configs/" 2>/dev/null || true
 cp /lib/x86_64-linux-gnu/libboost_program_options.so.1.83.0 "$STAGE/" 2>/dev/null || \
     ldd "$BUILD/app/hal_dec" | grep -oE '/[^ ]*libboost_program_options[^ ]*' | head -1 | xargs -I{} cp -L {} "$STAGE/"
-cp "$ASSET_H264" "$ASSET_NV12" "$STAGE/"
+# CUDA 12 runtime needed by libnvjpeg_layers.so (cudart + nvjpeg). The remote
+# driver doesn't ship these in ldconfig; copy the resolved real .so files.
+[ -n "$CUDART_LOCAL" ] && cp -L "$CUDART_LOCAL" "$STAGE/libcudart.so.12"
+[ -n "$NVJPEG_LOCAL" ] && cp -L "$NVJPEG_LOCAL" "$STAGE/libnvjpeg.so.12"
+cp "$ASSET_H264" "$ASSET_NV12" "$JPEG_ASSET" "$BMP_ASSET" "$STAGE/"
 
 # Recursively resolve every .so the binaries/layer-libs need; copy real paths.
 ldd "$BUILD/app/hal_dec" "$BUILD/app/hal_enc" "$BUILD/app/hal_session" \
@@ -155,5 +177,26 @@ for s in 0 1 2; do
     [ "$SZ" = "3456000" ] || fail "stream $s size $SZ != 3456000"
     run "cmp -s dec.yuv sess.$s.nv12" || fail "stream $s not byte-identical to single-stream decode"
 done
+
+# ---------------------------------------------------------------------------
+# 7. Regression 4: NVJPEG decode (JPEG -> YUV) + NVJPEG encode (BMP -> JPEG).
+#    Exercises the nvjpeg/nvjpegenc backends, which require the CUDA 12
+#    runtime libs deployed alongside. Quality is not asserted (GPU vs software
+#    JPEG IDCT differ within spec), only that both directions produce a
+#    non-empty, structurally valid output.
+# ---------------------------------------------------------------------------
+log "regression 4: NVJPEG decode (JPEG -> YUV)"
+run ./hal_dec -b nvjpeg -i test_cars_320x240.jpg -o nvjpeg_dec.yuv -f yuv 2>&1 | tail -3
+NVJPEG_DEC_BYTES=$(run 'stat -c %s nvjpeg_dec.yuv')
+[ "$NVJPEG_DEC_BYTES" -ge 115200 ] || fail "nvjpeg decode size $NVJPEG_DEC_BYTES < 115200 (320x240 YUV420)"
+# Y plane must be sane (not all-zero / all-255).
+run 'python3 -c "d=open(\"nvjpeg_dec.yuv\",\"rb\").read()[:320*240]; assert 10 < sum(d)/len(d) < 246, \"Y mean out of range\""'
+
+log "regression 4b: NVJPEG encode (BMP -> JPEG)"
+run ./hal_enc -b nvjpegenc -i test_cars_320x240.bmp -o nvjpeg_enc.jpg -f bmp 2>&1 | tail -3
+run 'bash -c "[ -s nvjpeg_enc.jpg ]"' || fail "nvjpeg encode produced no output"
+# The encoded JPEG must start with the SOI marker (FF D8).
+run 'bash -c "od -A n -t x1 -N 2 nvjpeg_enc.jpg | grep -qi \"ff d8\""' \
+    || fail "nvjpeg-encoded JPEG missing SOI marker"
 
 log "ALL REGRESSIONS PASSED"
