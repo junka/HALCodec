@@ -7,6 +7,7 @@
 #include <memory>
 #include <mutex>
 #include <string>
+#include <vector>
 
 #include <VideoToolbox/VideoToolbox.h>
 #include "codec_config.h"
@@ -40,6 +41,12 @@ private:
     std::condition_variable cv_;
     bool eof_ = false;
 
+    // Bytes of the NAL that was still unterminated when the previous FillInput
+    // chunk ended (it may continue inside the next chunk). Feed chunks are
+    // fixed-size reads, so a NAL can straddle a chunk boundary; assembling AU
+    // boundaries from an unterminated NAL would truncate its slices.
+    std::vector<uint8_t> pending_;
+
     static void DecompressionCallback(void* refcon,
         void* sourceFrameRefCon,
         OSStatus status,
@@ -52,6 +59,11 @@ private:
     // it is freed automatically when VideoToolbox finishes with the sample
     // (via the block buffer's custom deallocator), or immediately on failure.
     bool decodeFrameAsync(uint8_t* data, size_t size);
+
+    // Submits one AVCC access unit for async decoding. The AU bytes are
+    // copied into an independent buffer (ownership passed to decodeFrameAsync)
+    // because the source buffer is reused by the next feed chunk.
+    void submitAvccAu(const std::vector<uint8_t>& au);
 };
 
 } // namespace vtbox
