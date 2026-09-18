@@ -245,6 +245,33 @@ std::string inputFormatsToString(const std::vector<NV_ENC_BUFFER_FORMAT>& format
 
 } // namespace
 
+// Codec-level NVDEC support probe: a single cuvidGetDecoderCaps query at
+// 8-bit 4:2:0. Exposed so backends can refuse Initialize() before attempting
+// NvDecoder construction. Creates a transient CUDA context (cuvidGetDecoderCaps
+// requires one to be current on the calling thread).
+bool nvdecSupportsCodec(int deviceIndex, cudaVideoCodec codec) {
+    if (codec < 0 || codec >= cudaVideoCodec_NumCodecs) {
+        return false;
+    }
+    CUDAContext cudaCtx;
+    if (!cudaCtx.create(deviceIndex)) {
+        return false;
+    }
+    CUVIDDECODECAPS decodeCaps = {};
+    decodeCaps.eCodecType = codec;
+    decodeCaps.eChromaFormat = cudaVideoChromaFormat_420;
+    decodeCaps.nBitDepthMinus8 = 0;
+    cuvidGetDecoderCaps(&decodeCaps);
+    return decodeCaps.bIsSupported != 0;
+}
+
+const char* nvdecCodecName(cudaVideoCodec codec) {
+    if (codec >= 0 && codec < cudaVideoCodec_NumCodecs) {
+        return kCodecNames[codec];
+    }
+    return "Unknown";
+}
+
 class NVCodecCapsProvider : public CapabilityProvider {
 public:
     std::string getName() const override { return "nvidia"; }
@@ -265,6 +292,16 @@ public:
     }
 
     void showDecoderCapability() const override {
+        // cuvidGetDecoderCaps requires a CUDA context to be current on the
+        // calling thread; create a transient one for the query (mirrors
+        // showEncoderCapability and nvdecSupportsCodec). Without this every
+        // probe returns bIsSupported=0 and the table prints empty.
+        CUDAContext cudaCtx;
+        if (!cudaCtx.create(0)) {
+            std::cerr << "NVCodecCapsProvider: failed to create CUDA context"
+                      << std::endl;
+            return;
+        }
         printDecoderHeader();
 
         for (int codec = 0; codec < static_cast<int>(cudaVideoCodec_NumCodecs); ++codec) {

@@ -8,6 +8,7 @@
 
 #include "frame.h"
 #include "registry.h"
+#include "nvidia_caps.h"
 
 namespace halcodec {
 namespace nvenc {
@@ -271,6 +272,18 @@ bool NVDecoder::Initialize(const CodecParams& params) {
             codecFromName(params.codec.empty() ? "h264" : params.codec);
         if (codec == cudaVideoCodec_NumCodecs) {
             std::cerr << "NVDecoder: unknown codec: " << params.codec << std::endl;
+            return false;
+        }
+        // Codec-level capability probe: refuse up front if this GPU's NVDEC
+        // engine doesn't support the codec (e.g. JPEG on some SKUs), instead
+        // of failing deep inside NvDecoder construction. Single JPEG files
+        // can still be decoded via the nvjpeg backend in that case.
+        if (!nvdecSupportsCodec(params.deviceIndex, codec)) {
+            std::cerr << "NVDecoder: codec " << nvdecCodecName(codec)
+                      << " not supported by NVDEC on device "
+                      << params.deviceIndex
+                      << " (for single JPEG images try -b nvjpeg)"
+                      << std::endl;
             return false;
         }
 #if NVENCAPI_MAJOR_VERSION > 12
