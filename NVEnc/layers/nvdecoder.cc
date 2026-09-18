@@ -309,13 +309,26 @@ bool NVDecoder::Initialize(const CodecParams& params) {
     auto cudaCtx = cudaCtx_.get();
 
     demuxer_ = std::make_unique<FFmpegDemuxer>(params.inputs[0].c_str());
+    cudaVideoCodec codec = FFmpeg2NvCodecId(demuxer_->GetVideoCodec());
+    // Codec-level capability probe (mirrors the feed-mode path): refuse up
+    // front if this GPU's NVDEC engine doesn't support the demuxed codec,
+    // instead of failing deep inside NvDecoder construction. Single JPEG
+    // files can still be decoded via the nvjpeg backend in that case.
+    if (!nvdecSupportsCodec(params.deviceIndex, codec)) {
+        std::cerr << "NVDecoder: codec " << nvdecCodecName(codec)
+                  << " not supported by NVDEC on device "
+                  << params.deviceIndex
+                  << " (for single JPEG images try -b nvjpeg)"
+                  << std::endl;
+        return false;
+    }
 #if NVENCAPI_MAJOR_VERSION > 12
     decoder_ = std::make_unique<NvDecoder>(cudaCtx, false,
-        FFmpeg2NvCodecId(demuxer_->GetVideoCodec()),
+        codec,
         false, false, &cropRect, &resizeDim, false, 0, 0, 1000, false, 0, nullptr);
 #else
     decoder_ = std::make_unique<NvDecoder>(cudaCtx, false,
-        FFmpeg2NvCodecId(demuxer_->GetVideoCodec()),
+        codec,
         false, false, &cropRect, &resizeDim, false, 0, 0, 1000, false);
 #endif
     decoder_->SetOperatingPoint(0, false);
