@@ -26,7 +26,20 @@ public:
                 ("format,f", po::value<std::string>(&format_)->default_value("yuv"),
                  "Format: yuv(i420)/nv12/yuv444/y(rgb gray)/bgr/bgri/rgbi/bgra/rgba/bmp")
                 ("codec,c", po::value<std::string>(&codec_)->default_value("h264"))
-                ("colorspace,c", po::value<std::string>(&cs_)->default_value("420"), "Color sapce: 420/444/410");
+                ("colorspace,c", po::value<std::string>(&cs_)->default_value("420"), "Color sapce: 420/444/410")
+                ("encode-config", po::value<std::string>(&encodeConfigFile_), "JSON encoder config file (overrides defaults; CLI items below override this)")
+                ("preset", po::value<std::string>(&preset_), "Encoder preset (NVENC p1..p7; QSV fast/balanced/slow/best)")
+                ("tuning", po::value<std::string>(&tuning_), "NVENC tuning info (hq/ll/ull/low_latency_p)")
+                ("rc", po::value<std::string>(&rateControl_), "Rate control: cbr/vbr/cqp/icq")
+                ("bitrate", po::value<int>(&bitrateKbps_), "Target bitrate in kbps")
+                ("maxbitrate", po::value<int>(&maxBitrateKbps_), "VBR max bitrate in kbps")
+                ("qp", po::value<int>(&qp_), "Constant QP (CQP mode); overrides bitrate when >=0")
+                ("gop", po::value<int>(&gopLength_), "GOP / IDR length")
+                ("bframes", po::value<int>(&numBFrames_), "Number of B-frames (0 for low delay)")
+                ("fps", po::value<int>(&fps_), "Frame rate (numerator; denominator=1)")
+                ("profile", po::value<std::string>(&profile_), "Codec profile (baseline/main/high)")
+                ("level", po::value<std::string>(&level_), "Codec level (auto/4.0/4.1...)")
+                ("lowdelay", po::bool_switch(&lowDelay_), "Low-delay mode (0 B-frames, short GOP)");
 
             // Parse the command line
             po::variables_map vm;
@@ -67,6 +80,24 @@ public:
     const std::string& getFormat() const { return format_; }
     const std::string& getInputFormat() const { return input_format_; }
     const std::string& getColorSpace() const { return cs_; }
+    const std::string& getCodec() const { return codec_; }
+
+    // Encoder config: returns the JSON file path (may be empty) plus the
+    // single-item CLI overrides. The caller (hal_enc) is responsible for
+    // loading the JSON first, then applying these overrides on top.
+    const std::string& getEncodeConfigFile() const { return encodeConfigFile_; }
+    const std::string& getPreset() const { return preset_; }
+    const std::string& getTuning() const { return tuning_; }
+    const std::string& getRateControl() const { return rateControl_; }
+    int getBitrateKbps() const { return bitrateKbps_; }
+    int getMaxBitrateKbps() const { return maxBitrateKbps_; }
+    int getQp() const { return qp_; }
+    int getGopLength() const { return gopLength_; }
+    int getNumBFrames() const { return numBFrames_; }
+    int getFps() const { return fps_; }
+    const std::string& getProfile() const { return profile_; }
+    const std::string& getLevel() const { return level_; }
+    bool getLowDelay() const { return lowDelay_; }
 
 private:
     std::vector<std::string> inputFiles_;
@@ -77,6 +108,21 @@ private:
     std::string input_format_;
     std::string cs_;
     std::string codec_;
+
+    // Encoder tuning overrides (sentinel defaults mean "not set on CLI").
+    std::string encodeConfigFile_;
+    std::string preset_;
+    std::string tuning_;
+    std::string rateControl_;
+    int bitrateKbps_ = -1;
+    int maxBitrateKbps_ = -1;
+    int qp_ = -1;
+    int gopLength_ = -1;
+    int numBFrames_ = -1;
+    int fps_ = -1;
+    std::string profile_;
+    std::string level_;
+    bool lowDelay_ = false;
 };
 
 #endif // PARSE_CLI_H

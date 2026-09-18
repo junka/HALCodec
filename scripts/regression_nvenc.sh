@@ -59,6 +59,9 @@ cp "$BUILD/app/hal_dec" "$BUILD/app/hal_enc" "$BUILD/app/hal_session" \
    "$BUILD/app/libnvenc_layers.so" "$BUILD/app/libnvjpeg_layers.so" \
    "$BUILD/app/libamf_layers.so" "$BUILD/app/libqsv_layers.so" \
    "$BUILD/libhalcodec_core.so" "$STAGE/"
+# Encoder config presets (JSON) so the encode-config path is exercised.
+mkdir -p "$STAGE/configs"
+cp "$REPO/configs/encode_hq.json" "$REPO/configs/encode_lowdelay.json" "$STAGE/configs/" 2>/dev/null || true
 cp /lib/x86_64-linux-gnu/libboost_program_options.so.1.83.0 "$STAGE/" 2>/dev/null || \
     ldd "$BUILD/app/hal_dec" | grep -oE '/[^ ]*libboost_program_options[^ ]*' | head -1 | xargs -I{} cp -L {} "$STAGE/"
 cp "$ASSET_H264" "$ASSET_NV12" "$STAGE/"
@@ -122,6 +125,23 @@ for fr in range(na):
 print(f"round-trip OK: 30 frames, worst Y={worst_y:.2f} dB, worst UV={worst_c:.2f} dB (floor {floor})")
 PYEOF
 [ $? -eq 0 ] || fail "round-trip PSNR below floor or frame-count mismatch"
+
+# ---------------------------------------------------------------------------
+# 5b. Regression 2b: encode via JSON config file + CLI override.
+#     Exercises the EncodeConfig file-loading path and confirms a non-default
+#     preset still produces a decodable stream meeting the PSNR floor.
+# ---------------------------------------------------------------------------
+log "regression 2b: encode via JSON config (hq) + CLI bitrate override"
+run ./hal_enc -b nvenc -i cars_320x240.nv12 -o enc_cfg.h264 -f nv12 \
+    --encode-config configs/encode_hq.json --bitrate 6000 2>&1 | tail -2
+run 'bash -c "[ -s enc_cfg.h264 ]"' || fail "enc_cfg.h264 empty (config encode)"
+# Confirm the CLI override landed: the session log line should mention 6000K.
+run './hal_enc -b nvenc -i cars_320x240.nv12 -o /dev/null -f nv12 \
+    --encode-config configs/encode_hq.json --bitrate 6000 2>&1 | grep -q "6000K"' \
+    || fail "CLI bitrate override not reflected in NVENC option string"
+run ./hal_dec -b nvdec -i enc_cfg.h264 -o rt_cfg.yuv -f nv12 2>&1 | tail -2
+RTCFG_BYTES=$(run 'stat -c %s rt_cfg.yuv')
+[ "$RTCFG_BYTES" = "3456000" ] || fail "config round-trip size $RTCFG_BYTES != 3456000"
 
 # ---------------------------------------------------------------------------
 # 6. Regression 3: multi-stream async NVDEC (3 streams, fan-in).

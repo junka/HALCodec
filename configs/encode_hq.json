@@ -1,0 +1,14 @@
+{
+    "codec": "h264",
+    "preset": "p4",
+    "tuningInfo": "hq",
+    "rateControl": "vbr",
+    "bitrateKbps": 8000,
+    "maxBitrateKbps": 12000,
+    "gopLength": 60,
+    "numBFrames": 2,
+    "frameRateNum": 30,
+    "frameRateDen": 1,
+    "profile": "high",
+    "lowDelay": false
+}

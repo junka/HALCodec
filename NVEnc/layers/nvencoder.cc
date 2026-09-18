@@ -292,15 +292,60 @@ bool NVEncoder::Initialize(const CodecParams& params) {
     NV_ENC_CONFIG encodeConfig = { NV_ENC_CONFIG_VER };
 
     initializeParams.encodeConfig = &encodeConfig;
-    NvEncoderInitParam encodeCLIOptions("-codec h264 -preset p1 -tuninginfo hq -fps 1 -rc vbr -bitrate 10M");
+
+    // Build the NVENC CLI option string from the unified EncodeConfig. Fields
+    // left at their sentinels fall back to the prior hardcoded defaults
+    // (p1 / hq / 1 fps / vbr / 10M), preserving existing behavior when no
+    // config is supplied.
+    const auto& ec = params.encode;
+    std::string codecStr = params.codec.empty() ? "h264" : params.codec;
+    std::string presetStr = ec.preset.empty() ? "p1" : ec.preset;
+    std::string tuningStr = ec.tuningInfo.empty() ? "hq" : ec.tuningInfo;
+    int fpsNum = ec.frameRateNum > 0 ? ec.frameRateNum : 1;
+    int fpsDen = ec.frameRateDen > 0 ? ec.frameRateDen : 1;
+    // lowDelay => P1/fastest tuning + no B-frames (applied to encodeConfig below).
+    if (ec.lowDelay) {
+        presetStr = "p1";
+        tuningStr = "ull";
+    }
+    std::string rcStr = ec.rateControl.empty()
+        ? "vbr"
+        : ec.rateControl;  // cbr/vbr/cqp map directly to NVENC rc names
+    int bitrate = ec.bitrateKbps > 0 ? ec.bitrateKbps : 10000;
+    // NVENC -bitrate suffix: M = Mbps, K = kbps, bare = bps. Our value is in
+    // kbps, so emit it as "<kbps>K" to preserve the exact intended rate.
+    std::string cli = "-codec " + codecStr
+                    + " -preset " + presetStr
+                    + " -tuninginfo " + tuningStr
+                    + " -fps " + std::to_string(fpsNum)
+                    + " -rc " + rcStr
+                    + " -bitrate " + std::to_string(bitrate) + "K";
+    if (ec.maxBitrateKbps > 0 && ec.maxBitrateKbps != bitrate) {
+        cli += " -maxbitrate " + std::to_string(ec.maxBitrateKbps) + "K";
+    }
+    if (ec.qp >= 0) {
+        cli += " -qp " + std::to_string(ec.qp);
+    }
+    if (ec.gopLength > 0) {
+        cli += " -gop " + std::to_string(ec.gopLength);
+    }
+    // -bf sets frameIntervalP = numBFrames+1 internally.
+    int bframes = ec.lowDelay ? 0 : ec.numBFrames;
+    if (bframes >= 0) {
+        cli += " -bf " + std::to_string(bframes);
+    }
+    if (!ec.profile.empty()) {
+        cli += " -profile " + ec.profile;
+    }
+    NvEncoderInitParam encodeCLIOptions(cli.c_str());
     encoder_->CreateDefaultEncoderParams(&initializeParams, encodeCLIOptions.GetEncodeGUID(), encodeCLIOptions.GetPresetGUID(), encodeCLIOptions.GetTuningInfo());
     encodeCLIOptions.SetInitParams(&initializeParams, eFormat);
 
     encoder_->CreateEncoder(&initializeParams);
     pipe_ = std::make_unique<AsyncPipe>(encoder_.get(), cudaCtx);
     pipe_->start();
-    std::cout << "NVEncoder: async session up, codec=h264 " << width << "x"
-              << height << std::endl;
+    std::cout << "NVEncoder: async session up, codec=" << codecStr << " "
+              << width << "x" << height << " (" << cli << ")" << std::endl;
     return true;
 }
 
