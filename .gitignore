@@ -57,5 +57,11 @@ QSV/libvpl-*/.github/
 QSV/vpl-gpu-rt-*/
 
 # Decode test output (raw NV12 produced by hal_dec -f yuv).
-QSV/libvpl-*/examples/content/*.yuvtest_cars_320x240.bmp
+QSV/libvpl-*/examples/content/*.yuv
+
+# Test assets regenerated from cars_320x240.nv12 by scripts/regression_nvenc.sh
+# (JPEG/BMP single-frame, MJPEG AVI + raw concatenated streams).
 test_cars_320x240.jpg
+test_cars_320x240.bmp
+test_cars_mjpeg.avi
+test_cars_mjpeg.mjpeg

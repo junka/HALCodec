@@ -42,6 +42,11 @@ fail() { printf '\033[1;31mFAIL: %s\033[0m\n' "$*" >&2; exit 1; }
 # doesn't ship them in ldconfig, so libnvjpeg_layers.so won't load without.
 JPEG_ASSET="$REPO/test_cars_320x240.jpg"
 BMP_ASSET="$REPO/test_cars_320x240.bmp"
+# MJPEG test streams for the NVDEC JPEG-decode path: an AVI container (demuxer
+# mode, 30 frames) and a raw concatenated-MJPEG stream (feed mode, exercised
+# via hal_session). Both generated from the original NV12 via ffmpeg.
+MJPEG_AVI_ASSET="$REPO/test_cars_mjpeg.avi"
+MJPEG_RAW_ASSET="$REPO/test_cars_mjpeg.mjpeg"
 CUDART_LOCAL="$(ldd "$BUILD/app/libnvjpeg_layers.so" 2>/dev/null | grep -oE '/[^ ]*libcudart\.so\.[0-9]+' | head -1)"
 NVJPEG_LOCAL="$(ldd "$BUILD/app/libnvjpeg_layers.so" 2>/dev/null | grep -oE '/[^ ]*libnvjpeg\.so\.[0-9]+' | head -1)"
 
@@ -65,6 +70,14 @@ command -v ffmpeg >/dev/null || fail "ffmpeg required to generate JPEG/BMP asset
     -i "$ASSET_NV12" -vframes 1 "$BMP_ASSET" >/dev/null 2>&1
 [ -f "$JPEG_ASSET" ] && [ -f "$BMP_ASSET" ] || fail "failed to generate JPEG/BMP assets"
 
+# Generate MJPEG test streams (AVI container + raw concatenated) from the full
+# 30-frame NV12. NVDEC decodes these via its cudaVideoCodec_JPEG path.
+[ -f "$MJPEG_AVI_ASSET" ] || ffmpeg -y -f rawvideo -pix_fmt nv12 -s 320x240 \
+    -i "$ASSET_NV12" -c:v mjpeg -q:v 2 "$MJPEG_AVI_ASSET" >/dev/null 2>&1
+[ -f "$MJPEG_RAW_ASSET" ] || ffmpeg -y -f rawvideo -pix_fmt nv12 -s 320x240 \
+    -i "$ASSET_NV12" -c:v mjpeg -q:v 2 -f mjpeg "$MJPEG_RAW_ASSET" >/dev/null 2>&1
+[ -f "$MJPEG_AVI_ASSET" ] && [ -f "$MJPEG_RAW_ASSET" ] || fail "failed to generate MJPEG assets"
+
 # ---------------------------------------------------------------------------
 # 2. Stage binaries + core lib + boost + full transitive .so dependency tree
 #    (the remote has no ffmpeg/boost/vpl/nvjpeg runtime libs) + test assets.
@@ -86,7 +99,8 @@ cp /lib/x86_64-linux-gnu/libboost_program_options.so.1.83.0 "$STAGE/" 2>/dev/nul
 # driver doesn't ship these in ldconfig; copy the resolved real .so files.
 [ -n "$CUDART_LOCAL" ] && cp -L "$CUDART_LOCAL" "$STAGE/libcudart.so.12"
 [ -n "$NVJPEG_LOCAL" ] && cp -L "$NVJPEG_LOCAL" "$STAGE/libnvjpeg.so.12"
-cp "$ASSET_H264" "$ASSET_NV12" "$JPEG_ASSET" "$BMP_ASSET" "$STAGE/"
+cp "$ASSET_H264" "$ASSET_NV12" "$JPEG_ASSET" "$BMP_ASSET" \
+   "$MJPEG_AVI_ASSET" "$MJPEG_RAW_ASSET" "$STAGE/"
 
 # Recursively resolve every .so the binaries/layer-libs need; copy real paths.
 ldd "$BUILD/app/hal_dec" "$BUILD/app/hal_enc" "$BUILD/app/hal_session" \
@@ -198,5 +212,35 @@ run 'bash -c "[ -s nvjpeg_enc.jpg ]"' || fail "nvjpeg encode produced no output"
 # The encoded JPEG must start with the SOI marker (FF D8).
 run 'bash -c "od -A n -t x1 -N 2 nvjpeg_enc.jpg | grep -qi \"ff d8\""' \
     || fail "nvjpeg-encoded JPEG missing SOI marker"
+
+# ---------------------------------------------------------------------------
+# 8. Regression 5: NVDEC MJPEG decode.
+#    Exercises NVDEC's cudaVideoCodec_JPEG path two ways: demuxer mode (AVI
+#    container) and feed mode (raw concatenated MJPEG via hal_session). Both
+#    must produce 30 frames of correctly-sized NV12. Byte-identity between
+#    single-stream demuxer decode and multi-stream feed decode is asserted.
+#
+#    Quality vs the original NV12 is NOT asserted: NVIDIA hardware JPEG
+#    decoders (both NVDEC-JPEG and NVJPEG) diverge from ffmpeg/libjpeg by
+#    ~30 dB Y on flat fields — a full-range-vs-limited DC offset plus IDCT
+#    implementation difference within JPEG spec tolerance, not a bug. We
+#    assert only that the Y plane is sane and structurally complete.
+# ---------------------------------------------------------------------------
+log "regression 5: NVDEC MJPEG decode (AVI demuxer mode)"
+run ./hal_dec -b nvdec -i test_cars_mjpeg.avi -o mjpeg_dec.yuv -f nv12 2>&1 | tail -3
+MJPEG_DEC_BYTES=$(run 'stat -c %s mjpeg_dec.yuv')
+[ "$MJPEG_DEC_BYTES" = "3456000" ] || fail "mjpeg decode size $MJPEG_DEC_BYTES != 3456000 (30 * 320*240*1.5)"
+run 'python3 -c "d=open(\"mjpeg_dec.yuv\",\"rb\").read()[:320*240]; assert 10 < sum(d)/len(d) < 246, \"Y mean out of range\""'
+
+log "regression 5b: NVDEC MJPEG multi-stream (raw feed mode via hal_session)"
+run ./hal_session -b nvdec \
+    -i test_cars_mjpeg.mjpeg -i test_cars_mjpeg.mjpeg -i test_cars_mjpeg.mjpeg \
+    -o msess -f nv12 2>&1 | tail -3
+for s in 0 1 2; do
+    SZ=$(run "stat -c %s msess.$s.nv12")
+    [ "$SZ" = "3456000" ] || fail "mjpeg stream $s size $SZ != 3456000"
+    run "cmp -s mjpeg_dec.yuv msess.$s.nv12" \
+        || fail "mjpeg stream $s not byte-identical to single-stream demuxer decode"
+done
 
 log "ALL REGRESSIONS PASSED"

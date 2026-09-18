@@ -37,6 +37,8 @@ cudaVideoCodec codecFromName(const std::string& name) {
 #if NVENCAPI_MAJOR_VERSION > 12
     if (name == "av1")   return cudaVideoCodec_AV1;
 #endif
+    if (name == "jpeg" || name == "mjpeg") return cudaVideoCodec_JPEG;
+    if (name == "mpeg1") return cudaVideoCodec_MPEG1;
     if (name == "mpeg2") return cudaVideoCodec_MPEG2;
     if (name == "mpeg4") return cudaVideoCodec_MPEG4;
     if (name == "vp8")   return cudaVideoCodec_VP8;

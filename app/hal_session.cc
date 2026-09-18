@@ -83,6 +83,8 @@ int main(int argc, char* argv[]) {
         if (ext == "h264" || ext == "264") return "h264";
         if (ext == "hevc" || ext == "h265" || ext == "265") return "hevc";
         if (ext == "av1")  return "av1";
+        if (ext == "jpg" || ext == "jpeg" || ext == "mjpeg"
+            || ext == "mjpg" || ext == "avi") return "mjpeg";
         if (ext == "mpg2" || ext == "m2v") return "mpeg2";
         if (ext == "mp4")  return "mpeg4";
         if (ext == "vp8")  return "vp8";
