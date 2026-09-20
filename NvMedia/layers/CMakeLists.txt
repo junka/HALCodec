@@ -4,12 +4,14 @@ set(nv_src nvmediadecoder.cc nvmediaencoder.cc nvmedia_caps.cc)
 
 add_library(nvmedia_layers SHARED ${nv_src})
 
-# NvMedia SDK headers live under NvMedia/include (top level) and
-# NvMedia/include/nvmedia_6x. NVMEDIA_SDK_DIR is set by the top-level
-# CMakeLists when it locates the SDK on Linux aarch64.
+# NvMedia SDK headers. NVMEDIA_INCLUDE_DIR / NVMEDIA_INCLUDE_6X_DIR are resolved
+# by the top-level CMakeLists: a host DRIVE-OS SDK (thor) is preferred when
+# present so the struct layouts (e.g. the 640-byte NvMediaEncodePicParamsH264)
+# match the target libnvmedia; otherwise the bundled NvMedia/include (2023 SDK)
+# is used. NVMEDIA_SDK_DIR still points at the bundled tree for lib-target libs.
 target_include_directories(nvmedia_layers PUBLIC
-        ${NVMEDIA_SDK_DIR}/include
-        ${NVMEDIA_SDK_DIR}/include/nvmedia_6x)
+        ${NVMEDIA_INCLUDE_DIR}
+        ${NVMEDIA_INCLUDE_6X_DIR})
 
 # NvSci-backed API surface (see samples/nvmedia_6x/iep/Makefile) and the
 # non-safety IEP init entry points used by the encoder.
