@@ -39,7 +39,8 @@ public:
                 ("fps", po::value<int>(&fps_), "Frame rate (numerator; denominator=1)")
                 ("profile", po::value<std::string>(&profile_), "Codec profile (baseline/main/high)")
                 ("level", po::value<std::string>(&level_), "Codec level (auto/4.0/4.1...)")
-                ("lowdelay", po::bool_switch(&lowDelay_), "Low-delay mode (0 B-frames, short GOP)");
+                ("lowdelay", po::bool_switch(&lowDelay_), "Low-delay mode (0 B-frames, short GOP)")
+                ("zero-copy,z", po::bool_switch(&zeroCopy_), "Keep decoded frames in device memory (NvMedia NvSciBuf / NVDEC CUDA) instead of copying to host; the output writer downloads on demand. Backend support is opt-in.");
 
             // Parse the command line
             po::variables_map vm;
@@ -98,6 +99,7 @@ public:
     const std::string& getProfile() const { return profile_; }
     const std::string& getLevel() const { return level_; }
     bool getLowDelay() const { return lowDelay_; }
+    bool getZeroCopy() const { return zeroCopy_; }
 
 private:
     std::vector<std::string> inputFiles_;
@@ -123,6 +125,7 @@ private:
     std::string profile_;
     std::string level_;
     bool lowDelay_ = false;
+    bool zeroCopy_ = false;
 };
 
 #endif // PARSE_CLI_H

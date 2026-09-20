@@ -43,6 +43,7 @@ struct CodecParams {
     PixelFormat outputFormat = PixelFormat::Unknown;  // decode output
     std::vector<uint8_t> extradata;   // optional codec extradata (e.g. H264 SPS/PPS)
     EncodeConfig encode;              // encoder tuning (decoders ignore this)
+    bool zeroCopy = false;            // decoder: keep frames in device memory (opt-in per backend)
 };
 
 } // namespace halcodec

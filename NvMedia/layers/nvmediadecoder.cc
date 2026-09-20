@@ -37,6 +37,76 @@ NvMediaVideoCodec MapCodec(const std::string& codec) {
 }
 
 constexpr size_t kFeedChunkSize = 1 << 20;        // 1 MiB
+
+// Detile a decoded NvMedia IDE surface into a tightly-packed NV12 host buffer
+// (Y then interleaved UV, row stride = w). Returns nullptr on failure.
+// Shared by the host readout path (CopySurfaceToFrame) and the zero-copy
+// DownloadToHost hook (DownloadNvSciBuf) so the detile logic exists once.
+//
+// NvSciBufObjGetPixels reads the BlockLinear IDE surface and detiles it into
+// linear memory. The surface stores chroma semi-planar (NV12-style), but
+// GetPixels on this DRIVE build only accepts a *3-plane planar* destination
+// (Y, U, V as separate planes of half resolution) — a 2-plane semi-planar
+// request returns BadParameter. This mirrors the nvm_ide_sci sample, which
+// calls GetPixels with numSurfaces=3 and pitches/sizes
+// {320,160,160}/{76800,19200,19200} for a 320x240 frame (verified via
+// LD_PRELOAD interception of the sample's GetPixels call). GetPixels handles
+// the CPU-cache flush internally, so no manual FlushCpuCacheRange is needed.
+uint8_t* DetileNvSciBufToNV12(NvSciBufObj buf, uint32_t w, uint32_t h) {
+    if (!buf || w == 0 || h == 0) {
+        return nullptr;
+    }
+    const size_t outY = static_cast<size_t>(w) * h;
+    const size_t outUV = outY / 2;
+    const uint32_t halfW = w >> 1;
+    const uint32_t halfH = h >> 1;
+    void* planes[3] = {
+        std::malloc(outY),                                  // Y:  w*h
+        std::malloc(static_cast<size_t>(halfW) * halfH),    // U: halfW*halfH
+        std::malloc(static_cast<size_t>(halfW) * halfH),    // V: halfW*halfH
+    };
+    if (!planes[0] || !planes[1] || !planes[2]) {
+        std::free(planes[0]);
+        std::free(planes[1]);
+        std::free(planes[2]);
+        return nullptr;
+    }
+    uint32_t sizes[3] = {w * h, halfW * halfH, halfW * halfH};
+    uint32_t pitches[3] = {w, halfW, halfW};
+    NvSciError gpe = NvSciBufObjGetPixels(buf, nullptr, planes, sizes, pitches);
+    if (gpe != NvSciError_Success) {
+        std::free(planes[0]);
+        std::free(planes[1]);
+        std::free(planes[2]);
+        return nullptr;
+    }
+    // Repack planar (Y, U, V) into tightly-packed NV12 (Y, interleaved UV).
+    uint8_t* buffer = static_cast<uint8_t*>(std::malloc(outY + outUV));
+    if (!buffer) {
+        std::free(planes[0]);
+        std::free(planes[1]);
+        std::free(planes[2]);
+        return nullptr;
+    }
+    std::memcpy(buffer, planes[0], outY);
+    const uint8_t* u = static_cast<const uint8_t*>(planes[1]);
+    const uint8_t* v = static_cast<const uint8_t*>(planes[2]);
+    uint8_t* uv = buffer + outY;
+    for (uint32_t row = 0; row < halfH; ++row) {
+        uint8_t* out = uv + static_cast<size_t>(row) * w;
+        const uint8_t* ur = u + static_cast<size_t>(row) * halfW;
+        const uint8_t* vr = v + static_cast<size_t>(row) * halfW;
+        for (uint32_t x = 0; x < halfW; ++x) {
+            out[2 * x] = ur[x];
+            out[2 * x + 1] = vr[x];
+        }
+    }
+    std::free(planes[0]);
+    std::free(planes[1]);
+    std::free(planes[2]);
+    return buffer;
+}
+
 constexpr uint64_t kFenceWaitTimeoutUs = 1000 * 1000;  // 1 s
 constexpr uint32_t kSurfaceAlign = 256;
 
@@ -129,6 +199,7 @@ bool NvMediaDecoder::Initialize(const CodecParams& params) {
                   << std::endl;
         return false;
     }
+    zeroCopy_ = params.zeroCopy;
 
     inputFile_ = fopen(params.inputs[0].c_str(), "rb");
     if (!inputFile_) {
@@ -357,13 +428,20 @@ NvMediaStatus NvMediaDecoder::AllocPictureBufferCb(void* ctx,
                                                    NvMediaRefSurface** p) {
     NvMediaDecoder* self = static_cast<NvMediaDecoder*>(ctx);
     for (Surface& s : self->pool_) {
-        if (s.refCount == 0) {
+        // A slot is reusable only once the parser has released it (refCount
+        // == 0) AND no outstanding zero-copy frame still borrows its buf.
+        if (s.refCount == 0 && s.borrowed == 0) {
             s.refCount = 1;
             *p = reinterpret_cast<NvMediaRefSurface*>(&s);
             return NVMEDIA_STATUS_OK;
         }
     }
-    std::cerr << "NvMediaDecoder: picture pool exhausted" << std::endl;
+    // Should be unreachable: DisplayPictureCb falls back to a host copy once
+    // borrowed slots reach the pool slack, so the parser always has free DPB
+    // slots available. If we get here, the parser over-referenced beyond its
+    // declared decodeBuffers_ — treat it as a fatal decode error.
+    std::cerr << "NvMediaDecoder: picture pool exhausted (pool="
+              << self->pool_.size() << ")" << std::endl;
     return NVMEDIA_STATUS_ERROR;
 }
 
@@ -548,14 +626,65 @@ NvMediaStatus NvMediaDecoder::DisplayPictureCb(void* ctx, NvMediaRefSurface* s,
     }
     NvSciSyncFenceClear(&target->fence);
 
-    // CopySurfaceToFrame reads the decoded surface into a tightly-packed NV12
-    // buffer. It only uses the Surface, not the PictureData.
-    CodecFrame frame = self->CopySurfaceToFrame(target, nullptr);
-    if (frame.data) {
+    // In zero-copy mode, hand the GPU surface directly to the consumer (no
+    // detile/copy); otherwise read it out into a host NV12 buffer.
+    //
+    // A single NvMediaParserParse call can surface several frames at once
+    // (each borrowing a slot) while the parser also keeps DPB slots ref'd.
+    // Borrowing unboundedly would exhaust the picture pool and kill the
+    // stream. Cap outstanding borrows to the pool slack (minus a margin for
+    // the parser's transient references); when at the cap, fall back to a
+    // host copy for this frame instead of borrowing. The app drains outQueue_
+    // each round, so borrowed recovers and subsequent frames borrow again.
+    bool borrow = self->zeroCopy_;
+    if (borrow) {
+        int32_t outstanding = 0;
+        for (const Surface& s : self->pool_) { outstanding += s.borrowed; }
+        // Reserve decodeBuffers_ (DPB) + 1 margin out of the pool for the
+        // parser; borrow only what remains.
+        const int32_t slack = static_cast<int32_t>(self->pool_.size())
+                              - static_cast<int32_t>(self->decodeBuffers_) - 1;
+        if (slack <= 0 || outstanding >= slack) {
+            borrow = false;  // fall back to host copy this frame
+        }
+    }
+    CodecFrame frame = borrow ? self->BorrowSurfaceToFrame(target)
+                              : self->CopySurfaceToFrame(target, nullptr);
+    bool valid = borrow ? (frame.locality != FrameLocality::Host)
+                        : (frame.data != nullptr);
+    if (valid) {
         frame.pts = pts;
         self->outQueue_.push_back(std::move(frame));
     }
     return NVMEDIA_STATUS_OK;
+}
+
+CodecFrame NvMediaDecoder::BorrowSurfaceToFrame(Surface* s) {
+    // Hand the decoded NvSciBufObj to the consumer without detiling/copying.
+    // The surface is borrowed: borrowed++ keeps AllocPictureBufferCb from
+    // reusing this slot until the consumer drops the frame (release decrements
+    // it). The fence was already waited in DisplayPictureCb, so the surface
+    // contents are valid at handoff. The consumer detiles on demand via
+    // DownloadToHost -> RegisterNvSciBufDownload (see DownloadNvSciBuf below).
+    CodecFrame frame;
+    if (!s || !s->buf) {
+        return frame;
+    }
+    ++s->borrowed;
+    NvSciBufObj buf = s->buf;
+    Surface* slot = s;
+    frame.locality = FrameLocality::NvSciBufObj;
+    frame.device.nvSciBufObj = buf;
+    frame.width = static_cast<int>(displayWidth_ ? displayWidth_ : s->width);
+    frame.height = static_cast<int>(displayHeight_ ? displayHeight_ : s->height);
+    frame.format = PixelFormat::NV12;
+    frame.size = 0;  // device-resident; host size unknown until downloaded
+    frame.release = [slot]() {
+        if (slot->borrowed > 0) {
+            --slot->borrowed;
+        }
+    };
+    return frame;
 }
 
 CodecFrame NvMediaDecoder::CopySurfaceToFrame(Surface* s,
@@ -567,74 +696,15 @@ CodecFrame NvMediaDecoder::CopySurfaceToFrame(Surface* s,
 
     const uint32_t w = s->width;
     const uint32_t h = s->height;
-    // NV12 output: Y plane w*h, interleaved UV plane w*(h/2), tightly packed.
-    const size_t outY = static_cast<size_t>(w) * h;
-    const size_t outUV = outY / 2;
-
-    // NvSciBufObjGetPixels reads the BlockLinear IDE surface and detiles it
-    // into linear memory. The surface stores chroma semi-planar (NV12-style),
-    // but GetPixels on this DRIVE build only accepts a *3-plane planar*
-    // destination (Y, U, V as separate planes of half resolution) — a
-    // 2-plane semi-planar request returns BadParameter. This mirrors the
-    // nvm_ide_sci sample, which calls GetPixels with numSurfaces=3 and
-    // pitches/sizes {320,160,160}/{76800,19200,19200} for a 320x240 frame
-    // (verified via LD_PRELOAD interception of the sample's GetPixels call).
-    // GetPixels also handles the CPU-cache flush internally, so no manual
-    // FlushCpuCacheRange is needed before it.
-    const uint32_t halfW = w >> 1;
-    const uint32_t halfH = h >> 1;
-    void* planes[3] = {
-        std::malloc(outY),                  // Y:  w*h
-        std::malloc(static_cast<size_t>(halfW) * halfH),  // U: halfW*halfH
-        std::malloc(static_cast<size_t>(halfW) * halfH),  // V: halfW*halfH
-    };
-    if (!planes[0] || !planes[1] || !planes[2]) {
-        std::free(planes[0]);
-        std::free(planes[1]);
-        std::free(planes[2]);
-        return frame;
-    }
-    uint32_t sizes[3] = {w * h, halfW * halfH, halfW * halfH};
-    uint32_t pitches[3] = {w, halfW, halfW};
-    NvSciError gpe = NvSciBufObjGetPixels(s->buf, nullptr, planes, sizes,
-                                          pitches);
-    if (gpe != NvSciError_Success) {
-        std::cerr << "NvMediaDecoder: NvSciBufObjGetPixels failed (err="
-                  << gpe << ")" << std::endl;
-        std::free(planes[0]);
-        std::free(planes[1]);
-        std::free(planes[2]);
-        return frame;
-    }
-
-    // Repack the planar (Y, U, V) into tightly-packed NV12 (Y, interleaved UV).
-    // Y copies as-is; UV interleaves one U and one V byte per chroma column.
-    uint8_t* buffer = static_cast<uint8_t*>(std::malloc(outY + outUV));
+    uint8_t* buffer = DetileNvSciBufToNV12(s->buf, w, h);
     if (!buffer) {
-        std::free(planes[0]);
-        std::free(planes[1]);
-        std::free(planes[2]);
+        std::cerr << "NvMediaDecoder: NvSciBufObjGetPixels/detile failed"
+                  << std::endl;
         return frame;
     }
-    std::memcpy(buffer, planes[0], outY);
-    const uint8_t* u = static_cast<const uint8_t*>(planes[1]);
-    const uint8_t* v = static_cast<const uint8_t*>(planes[2]);
-    uint8_t* uv = buffer + outY;
-    for (uint32_t row = 0; row < halfH; ++row) {
-        uint8_t* out = uv + static_cast<size_t>(row) * w;
-        const uint8_t* ur = u + static_cast<size_t>(row) * halfW;
-        const uint8_t* vr = v + static_cast<size_t>(row) * halfW;
-        for (uint32_t x = 0; x < halfW; ++x) {
-            out[2 * x] = ur[x];
-            out[2 * x + 1] = vr[x];
-        }
-    }
-    std::free(planes[0]);
-    std::free(planes[1]);
-    std::free(planes[2]);
 
     frame.data = buffer;
-    frame.size = outY + outUV;
+    frame.size = static_cast<size_t>(w) * h * 3 / 2;
     frame.width = static_cast<int>(displayWidth_ ? displayWidth_ : w);
     frame.height = static_cast<int>(displayHeight_ ? displayHeight_ : h);
     frame.format = PixelFormat::NV12;
@@ -777,6 +847,46 @@ void NvMediaDecoder::Finalize() {
 std::string NvMediaDecoder::getName() const {
     return "nvmedia";
 }
+
+// DownloadToHost hook for zero-copy NvSciBufObj frames. Detiles the borrowed
+// GPU surface into a tightly-packed NV12 host buffer, installs it as the
+// frame's `data`, and flips locality to Host. The frame's `release` (which
+// returns the borrowed slot to the pool) is invoked first, because the
+// detile via NvSciBufObjGetPixels reads the surface one last time and the
+// surface can be recycled as soon as that read completes — we no longer need
+// to hold the slot. The new `release` frees the host buffer.
+namespace {
+bool DownloadNvSciBuf(CodecFrame& f) {
+    if (f.locality != FrameLocality::NvSciBufObj || !f.device.nvSciBufObj) {
+        return false;
+    }
+    const uint32_t w = static_cast<uint32_t>(f.width);
+    const uint32_t h = static_cast<uint32_t>(f.height);
+    uint8_t* buffer = DetileNvSciBufToNV12(
+        static_cast<NvSciBufObj>(f.device.nvSciBufObj), w, h);
+    // The borrowed surface is no longer needed after the detile read.
+    if (f.release) {
+        f.release();
+        f.release = nullptr;
+    }
+    if (!buffer) {
+        return false;
+    }
+    f.data = buffer;
+    f.size = static_cast<size_t>(w) * h * 3 / 2;
+    f.strides[0] = w;
+    f.strides[1] = w;
+    f.locality = FrameLocality::Host;
+    f.device = {};
+    f.release = [buffer]() { std::free(buffer); };
+    return true;
+}
+
+const bool g_nvsciDownloadRegistered = [] {
+    RegisterNvSciBufDownload(&DownloadNvSciBuf);
+    return true;
+}();
+}  // namespace
 
 HALCODEC_CONNECT(Decoder, nvmedia, NvMediaDecoder);
 
