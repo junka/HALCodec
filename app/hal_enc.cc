@@ -151,6 +151,9 @@ int main(int argc, char* argv[]) {
         halcodec::CodecFrame out;
         while (enc->GetFrame(out)) {
             total_frames++;
+            // Encoded packets are always host memory today, but download
+            // defensively in case a future encoder yields a device buffer.
+            halcodec::DownloadToHost(out);
             fpout.write(reinterpret_cast<const char *>(out.data), out.size);
             if (enc->getName() == "nvjpegenc" && fidx < files.size()) {
                 fpout.close();

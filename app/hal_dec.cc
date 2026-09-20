@@ -207,6 +207,12 @@ int main(int argc, char* argv[]) {
 
     int total_frames = 0;
     auto writeFrame = [&](halcodec::CodecFrame& frame) {
+        // Device-resident frames (e.g. NvMedia zero-copy) must be materialized
+        // to host memory before the file/BMP writers can touch the pixels.
+        if (!halcodec::DownloadToHost(frame)) {
+            std::cerr << "decoder produced a device frame this build cannot "
+                         "download to host" << std::endl;
+        }
         if (cli.getFormat() == "y" || cli.getFormat() == "bgr"
             || cli.getFormat() == "rgb" || cli.getFormat() == "rgbi"
             || cli.getFormat() == "bgri") {

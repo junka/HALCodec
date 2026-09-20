@@ -141,6 +141,10 @@ int main(int argc, char* argv[]) {
     halcodec::CodecFrame frame;
     size_t which = 0;
     while (session.getAnyDecodeFrame(frame, which)) {
+        if (!halcodec::DownloadToHost(frame)) {
+            std::cerr << "decoder produced a device frame this build cannot "
+                         "download to host" << std::endl;
+        }
         outs[which].write(reinterpret_cast<const char*>(frame.data), frame.size);
         perStream[which]++;
         total++;
