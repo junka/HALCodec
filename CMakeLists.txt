@@ -95,8 +95,33 @@ if(UNIX AND NOT APPLE)
     # NvMedia (DRIVE OS) — 仅 Linux + aarch64 且 SDK 头文件存在时启用。
     if(CMAKE_SYSTEM_PROCESSOR MATCHES "aarch64|arm64")
         set(NVMEDIA_SDK_DIR ${CMAKE_SOURCE_DIR}/NvMedia)
-        if(EXISTS ${NVMEDIA_SDK_DIR}/include/nvmedia_6x/nvmedia_ide.h)
-            message(STATUS "NvMedia SDK found; enabling nvmedia_layers")
+        # The bundled NvMedia/include headers are the 2023 SDK, whose
+        # NvMediaEncodePicParamsH264 is 384 bytes. Thor (tegra264) boards ship
+        # libnvmedia_iep_sci built from the 2024 SDK, where that struct is 640
+        # bytes — feeding a too-small picParams to NvMediaIEPFeedFrame reads
+        # 256 bytes of stack garbage and returns NVMEDIA_STATUS_ERROR. Prefer a
+        # host-installed DRIVE-OS SDK (thor/thoru) whose headers match the
+        # target lib when one is present.
+        foreach(_cand
+                $ENV{NVMEDIA_DRIVE_SDK}
+                /opt/gwm/nv_sdk/thor/thoru-aarch64/drive-linux
+                /opt/gwm/nv_sdk/thor/thor-aarch64/drive-linux
+                /opt/gwm/nv_sdk/thoru/thoru-aarch64/drive-linux)
+            if(_cand AND EXISTS ${_cand}/include/nvmedia_6x/nvmedia_iep.h)
+                set(NVMEDIA_DRIVE_SDK_DIR ${_cand})
+                message(STATUS "NvMedia DRIVE-OS SDK (matched): ${_cand}")
+                break()
+            endif()
+        endforeach()
+        if(NVMEDIA_DRIVE_SDK_DIR)
+            set(NVMEDIA_INCLUDE_DIR ${NVMEDIA_DRIVE_SDK_DIR}/include)
+            set(NVMEDIA_INCLUDE_6X_DIR ${NVMEDIA_DRIVE_SDK_DIR}/include/nvmedia_6x)
+        else()
+            set(NVMEDIA_INCLUDE_DIR ${NVMEDIA_SDK_DIR}/include)
+            set(NVMEDIA_INCLUDE_6X_DIR ${NVMEDIA_SDK_DIR}/include/nvmedia_6x)
+        endif()
+        if(EXISTS ${NVMEDIA_INCLUDE_6X_DIR}/nvmedia_ide.h)
+            message(STATUS "NvMedia SDK found (include: ${NVMEDIA_INCLUDE_DIR}); enabling nvmedia_layers")
             add_subdirectory(NvMedia/layers)
         endif()
     endif()

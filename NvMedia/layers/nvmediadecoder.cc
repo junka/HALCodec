@@ -5,6 +5,7 @@
 #include <iostream>
 
 #include "nvmedia_common_decode.h"
+#include "nvmedia_iep.h"
 #include "registry.h"
 
 namespace halcodec {
@@ -188,11 +189,6 @@ NvMediaDecoder::~NvMediaDecoder() {
 }
 
 bool NvMediaDecoder::Initialize(const CodecParams& params) {
-    if (params.inputs.empty()) {
-        std::cerr << "NvMediaDecoder: no input file given" << std::endl;
-        return false;
-    }
-
     codec_ = MapCodec(params.codec);
     if (codec_ == static_cast<NvMediaVideoCodec>(-1)) {
         std::cerr << "NvMediaDecoder: unsupported codec: " << params.codec
@@ -201,11 +197,18 @@ bool NvMediaDecoder::Initialize(const CodecParams& params) {
     }
     zeroCopy_ = params.zeroCopy;
 
-    inputFile_ = fopen(params.inputs[0].c_str(), "rb");
-    if (!inputFile_) {
-        std::cerr << "NvMediaDecoder: cannot open " << params.inputs[0]
-                  << std::endl;
-        return false;
+    // With no input path the caller supplies the compressed bytes itself via
+    // FillInput()/SignalInputComplete() (the same feed-mode contract NVDEC
+    // uses, so a decode->encode chain can hand the same buffer to both).
+    if (params.inputs.empty()) {
+        feedMode_ = true;
+    } else {
+        inputFile_ = fopen(params.inputs[0].c_str(), "rb");
+        if (!inputFile_) {
+            std::cerr << "NvMediaDecoder: cannot open " << params.inputs[0]
+                      << std::endl;
+            return false;
+        }
     }
 
     NvMediaParserParams parserParams = {};
@@ -361,29 +364,62 @@ bool NvMediaDecoder::SetupDecoder(const NvMediaParserSeqInfo* seq) {
 
     // Create the decoded surface pool (decode buffers + slack) and register
     // every NvSciBufObj with the decoder.
-    NvSciBufAttrList bufAttrs = nullptr;
+    //
+    // The decoded NvSciBufObj may be consumed zero-copy by a downstream IEP
+    // encoder (FeedDeviceFrame registers it with NvMediaIEPRegisterNvSciBufObj).
+    // IEPRegisterNvSciBufObj validates the buffer against the encoder's required
+    // engine-access constraints, which NvMediaIDEFillNvSciBufAttrList alone does
+    // not satisfy (the IDE fill grants decoder-engine access only, so the IEP
+    // rejects the surface with NVMEDIA_STATUS_ERROR). To make a surface usable
+    // by both engines, reconcile the IDE-filled and IEP-filled attribute lists
+    // together — the resulting reconciled list carries the union of both
+    // engines' access requirements (mirrors the producer+consumer combine in
+    // the e2e multicast sample's CPoolManager).
+    NvSciBufAttrList ideAttrs = nullptr;
+    NvSciBufAttrList iepAttrs = nullptr;
     NvSciBufAttrList bufReconciled = nullptr;
     NvSciBufAttrList bufConflict = nullptr;
-    if (NvSciBufAttrListCreate(bufModule_, &bufAttrs) != NvSciError_Success) {
+    if (NvSciBufAttrListCreate(bufModule_, &ideAttrs) != NvSciError_Success ||
+        NvSciBufAttrListCreate(bufModule_, &iepAttrs) != NvSciError_Success) {
         std::cerr << "NvMediaDecoder: NvSciBufAttrListCreate failed"
                   << std::endl;
+        if (ideAttrs) NvSciBufAttrListFree(ideAttrs);
+        if (iepAttrs) NvSciBufAttrListFree(iepAttrs);
         return false;
     }
-    if (NvMediaIDEFillNvSciBufAttrList(instanceId_, bufAttrs) !=
+    if (NvMediaIDEFillNvSciBufAttrList(instanceId_, ideAttrs) !=
             NVMEDIA_STATUS_OK ||
-        !FillNV12SurfaceAttrs(bufAttrs, w, h)) {
-        std::cerr << "NvMediaDecoder: fill surface attrs failed" << std::endl;
-        NvSciBufAttrListFree(bufAttrs);
+        !FillNV12SurfaceAttrs(ideAttrs, w, h)) {
+        std::cerr << "NvMediaDecoder: fill IDE surface attrs failed"
+                  << std::endl;
+        NvSciBufAttrListFree(ideAttrs);
+        NvSciBufAttrListFree(iepAttrs);
         return false;
     }
-    if (NvSciBufAttrListReconcile(&bufAttrs, 1, &bufReconciled, &bufConflict) !=
-        NvSciError_Success) {
+    // IEP fill adds encoder-engine access constraints; the image attributes are
+    // identical to the IDE side (same NV12 BL geometry) so the reconcile is a
+    // pure union of engine permissions. IEPFill requires an encoder instance id;
+    // instance 0 is always valid and only affects engine routing, not geometry.
+    if (NvMediaIEPFillNvSciBufAttrList(NVMEDIA_ENCODER_INSTANCE_0, iepAttrs) !=
+            NVMEDIA_STATUS_OK ||
+        !FillNV12SurfaceAttrs(iepAttrs, w, h)) {
+        std::cerr << "NvMediaDecoder: fill IEP surface attrs failed"
+                  << std::endl;
+        NvSciBufAttrListFree(ideAttrs);
+        NvSciBufAttrListFree(iepAttrs);
+        return false;
+    }
+    NvSciBufAttrList bufUnreconciled[2] = {ideAttrs, iepAttrs};
+    if (NvSciBufAttrListReconcile(bufUnreconciled, 2, &bufReconciled,
+                                  &bufConflict) != NvSciError_Success) {
         std::cerr << "NvMediaDecoder: NvSciBufAttrListReconcile failed"
                   << std::endl;
-        NvSciBufAttrListFree(bufAttrs);
+        NvSciBufAttrListFree(ideAttrs);
+        NvSciBufAttrListFree(iepAttrs);
         return false;
     }
-    NvSciBufAttrListFree(bufAttrs);
+    NvSciBufAttrListFree(ideAttrs);
+    NvSciBufAttrListFree(iepAttrs);
 
     uint32_t nBuffers = decodeBuffers_ + 4;  // decoded pool plus display slack
     if (nBuffers < 8) {
@@ -718,6 +754,11 @@ int NvMediaDecoder::FillInput(const uint8_t* data, size_t size) {
     if (error_ || finalized_) {
         return -1;
     }
+    if (!feedMode_) {
+        // Not opened for explicit feeding: the internal file source drives
+        // parsing instead (see PullFrames).
+        return -1;
+    }
     NvMediaBitStreamPkt packet = {};
     packet.pByteStream = data;
     packet.uDataLength = static_cast<uint32_t>(size);
@@ -748,6 +789,12 @@ int NvMediaDecoder::PumpNext() {
     // the stream is fully drained (input exhausted + parser flush sent).
     while (outQueue_.empty() && !streamDone_) {
         if (!inputEof_) {
+            if (feedMode_) {
+                // The caller owns the byte stream in feed mode: bytes arrive
+                // through FillInput(), so there is nothing to read here. Wait
+                // for SignalInputComplete() before flushing.
+                break;
+            }
             size_t got = std::fread(chunk_.data(), 1, chunk_.size(),
                                     inputFile_);
             if (got == 0) {
@@ -780,6 +827,22 @@ int NvMediaDecoder::PumpNext() {
 }
 
 bool NvMediaDecoder::GetFrame(CodecFrame& out) {
+    // In feed mode there is no file pump behind PullFrames, and NvMediaParserParse
+    // only surfaces a frame once its data is complete. Drain whatever the last
+    // parse produced, and once the caller has signaled EOF, flush the parser to
+    // release the frames still held in the DPB.
+    if (feedMode_) {
+        if (outQueue_.empty() && inputEof_ && !streamDone_ && !flushSent_) {
+            NvMediaBitStreamPkt eos = {};
+            eos.bEOS = 1;
+            NvMediaParserParse(parser_, &eos);
+            NvMediaParserFlush(parser_);
+            flushSent_ = true;
+        }
+        if (outQueue_.empty() && flushSent_) {
+            streamDone_ = true;
+        }
+    }
     if (outQueue_.empty()) {
         return false;
     }

@@ -122,7 +122,11 @@ private:
     // Input demux state.
     FILE* inputFile_ = nullptr;
     std::vector<uint8_t> chunk_;
-    bool inputEof_ = false;    // fread consumed the whole file
+    // True when Initialize() was called without an input path: the caller owns
+    // the byte stream and pushes it through FillInput() (the NVDEC feed-mode
+    // contract). No file is read and GetFrame() flushes the parser itself.
+    bool feedMode_ = false;
+    bool inputEof_ = false;    // fread consumed the whole file (or caller EOF)
     bool flushSent_ = false;   // EOS packet + NvMediaParserFlush sent
     bool streamDone_ = false;  // input exhausted AND parser flushed AND queue empty
     bool finalized_ = false;
