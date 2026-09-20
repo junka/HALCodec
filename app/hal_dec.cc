@@ -144,6 +144,10 @@ int main(int argc, char* argv[]) {
     // demuxer and derive the NvMedia/cuvid codec id from the name (e.g.
     // nvmedia). Backends with their own demuxer (nvdec file mode) ignore it.
     params.codec = cli.getCodec();
+    // -z/--zero-copy: ask the decoder to keep frames in device memory. Backends
+    // that don't support it ignore the flag (still produce host frames); the
+    // output writer calls DownloadToHost on every frame regardless.
+    params.zeroCopy = cli.getZeroCopy();
     if (cli.getFormat() == "rgb" || cli.getFormat() == "rgbi") {
         params.outputFormat = halcodec::PixelFormat::RGB;
     } else if (cli.getFormat() == "bgr" || cli.getFormat() == "bgri") {

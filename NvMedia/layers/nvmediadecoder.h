@@ -51,6 +51,7 @@ private:
         NvSciBufObj buf = nullptr;  // NvSciBufObj registered with the decoder
         NvSciSyncFence fence{};     // EOF pre-fence for this surface
         int32_t refCount = 0;       // parser-managed reference count
+        int32_t borrowed = 0;       // frames outstanding that still hold this buf
         uint32_t width = 0;         // coded (aligned) width
         uint32_t height = 0;        // coded (aligned) height
     };
@@ -66,6 +67,13 @@ private:
     // Copy a decoded surface into a freshly allocated CodecFrame via
     // NvSciBufObjGetPixels (block-linear -> linear is handled internally).
     CodecFrame CopySurfaceToFrame(Surface* s, NvMediaParserPictureData* pd);
+
+    // Borrow the surface's NvSciBufObj into a device-memory CodecFrame (no
+    // detile/copy): the frame carries the GPU surface handle and returns it
+    // via `release` (decrementing Surface::borrowed). AllocPictureBufferCb
+    // skips slots with borrowed > 0 so the decoder cannot overwrite a frame
+    // still held by a consumer. Used when params.zeroCopy is set.
+    CodecFrame BorrowSurfaceToFrame(Surface* s);
 
     // Pump the input file until at least one frame is queued or the stream is
     // fully exhausted (EOF read + NvMediaParserFlush). Returns frames queued.
@@ -109,6 +117,7 @@ private:
     uint32_t codedHeight_ = 0;     // aligned coded height
     uint32_t displayWidth_ = 0;    // display (crop) size
     uint32_t displayHeight_ = 0;
+    bool zeroCopy_ = false;        // emit NvSciBufObj device frames instead of GetPixels
 
     // Input demux state.
     FILE* inputFile_ = nullptr;
