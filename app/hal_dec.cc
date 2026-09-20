@@ -140,6 +140,10 @@ int main(int argc, char* argv[]) {
     halcodec::CodecParams params;
     params.inputs.push_back(cli.getInputFile());
     params.deviceIndex = cli.getGpuIndex();
+    // Forward the explicit codec (-c) for backends that have no internal
+    // demuxer and derive the NvMedia/cuvid codec id from the name (e.g.
+    // nvmedia). Backends with their own demuxer (nvdec file mode) ignore it.
+    params.codec = cli.getCodec();
     if (cli.getFormat() == "rgb" || cli.getFormat() == "rgbi") {
         params.outputFormat = halcodec::PixelFormat::RGB;
     } else if (cli.getFormat() == "bgr" || cli.getFormat() == "bgri") {

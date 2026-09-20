@@ -387,17 +387,6 @@ void NvMediaDecoder::AddRefCb(void* ctx, NvMediaRefSurface* s) {
     }
 }
 
-NvMediaStatus NvMediaDecoder::DisplayPictureCb(void* ctx, NvMediaRefSurface* s,
-                                               int64_t pts) {
-    (void)ctx;
-    (void)s;
-    (void)pts;
-    // Frames are copied out in DecodePictureCb (sync path), so display-order
-    // callbacks are no-ops here. A B-frame stream may reorder display vs.
-    // decode order; documenting this as a DRIVE tuning item.
-    return NVMEDIA_STATUS_OK;
-}
-
 void NvMediaDecoder::UnhandledNALUCb(void* ctx, const uint8_t* buf,
                                      int32_t size) {
     (void)ctx;
@@ -528,19 +517,45 @@ void NvMediaDecoder::OnDecodePicture(NvMediaParserPictureData* pd) {
         return;
     }
 
-    // Wait for the decode to complete, then copy the surface out so the slot
-    // can be reused once the parser releases it.
+    // Wait for the decode to complete so the surface is valid before the
+    // display callback reads it. The pixel copy itself (CopySurfaceToFrame,
+    // via NvSciBufObjGetPixels) runs in cbDisplayPicture — display order —
+    // once the parser has released the surface, matching the nvm_ide_sci
+    // sample's WriteOutput placement.
     if (NvSciSyncFenceWait(&target->fence, cpuWaitContext_,
                            kFenceWaitTimeoutUs) != NvSciError_Success) {
         std::cerr << "NvMediaDecoder: NvSciSyncFenceWait failed" << std::endl;
         return;
     }
+}
+
+NvMediaStatus NvMediaDecoder::DisplayPictureCb(void* ctx, NvMediaRefSurface* s,
+                                               int64_t pts) {
+    NvMediaDecoder* self = static_cast<NvMediaDecoder*>(ctx);
+    if (!self || !s) {
+        return NVMEDIA_STATUS_OK;
+    }
+    Surface* target = reinterpret_cast<Surface*>(s);
+    if (!target || !target->buf) {
+        return NVMEDIA_STATUS_OK;
+    }
+    // The EOF fence was captured in cbDecodePicture and waited there; wait
+    // again here is cheap (already signalled) before reading the surface.
+    if (NvSciSyncFenceWait(&target->fence, self->cpuWaitContext_,
+                           kFenceWaitTimeoutUs) != NvSciError_Success) {
+        std::cerr << "NvMediaDecoder: display fence wait failed" << std::endl;
+        return NVMEDIA_STATUS_OK;
+    }
     NvSciSyncFenceClear(&target->fence);
 
-    CodecFrame frame = CopySurfaceToFrame(target, pd);
+    // CopySurfaceToFrame reads the decoded surface into a tightly-packed NV12
+    // buffer. It only uses the Surface, not the PictureData.
+    CodecFrame frame = self->CopySurfaceToFrame(target, nullptr);
     if (frame.data) {
-        outQueue_.push_back(std::move(frame));
+        frame.pts = pts;
+        self->outQueue_.push_back(std::move(frame));
     }
+    return NVMEDIA_STATUS_OK;
 }
 
 CodecFrame NvMediaDecoder::CopySurfaceToFrame(Surface* s,
@@ -552,29 +567,74 @@ CodecFrame NvMediaDecoder::CopySurfaceToFrame(Surface* s,
 
     const uint32_t w = s->width;
     const uint32_t h = s->height;
-    const size_t yBytes = static_cast<size_t>(w) * h;
-    const size_t uvBytes = yBytes / 2;  // NV12: one interleaved chroma plane
+    // NV12 output: Y plane w*h, interleaved UV plane w*(h/2), tightly packed.
+    const size_t outY = static_cast<size_t>(w) * h;
+    const size_t outUV = outY / 2;
 
-    uint8_t* buffer = static_cast<uint8_t*>(std::malloc(yBytes + uvBytes));
-    if (!buffer) {
+    // NvSciBufObjGetPixels reads the BlockLinear IDE surface and detiles it
+    // into linear memory. The surface stores chroma semi-planar (NV12-style),
+    // but GetPixels on this DRIVE build only accepts a *3-plane planar*
+    // destination (Y, U, V as separate planes of half resolution) — a
+    // 2-plane semi-planar request returns BadParameter. This mirrors the
+    // nvm_ide_sci sample, which calls GetPixels with numSurfaces=3 and
+    // pitches/sizes {320,160,160}/{76800,19200,19200} for a 320x240 frame
+    // (verified via LD_PRELOAD interception of the sample's GetPixels call).
+    // GetPixels also handles the CPU-cache flush internally, so no manual
+    // FlushCpuCacheRange is needed before it.
+    const uint32_t halfW = w >> 1;
+    const uint32_t halfH = h >> 1;
+    void* planes[3] = {
+        std::malloc(outY),                  // Y:  w*h
+        std::malloc(static_cast<size_t>(halfW) * halfH),  // U: halfW*halfH
+        std::malloc(static_cast<size_t>(halfW) * halfH),  // V: halfW*halfH
+    };
+    if (!planes[0] || !planes[1] || !planes[2]) {
+        std::free(planes[0]);
+        std::free(planes[1]);
+        std::free(planes[2]);
         return frame;
     }
-
-    void* planes[2] = {buffer, buffer + yBytes};
-    uint32_t sizes[2] = {static_cast<uint32_t>(yBytes),
-                         static_cast<uint32_t>(uvBytes)};
-    uint32_t pitches[2] = {w, w};
-
-    NvSciError err = NvSciBufObjGetPixels(s->buf, nullptr, planes, sizes,
+    uint32_t sizes[3] = {w * h, halfW * halfH, halfW * halfH};
+    uint32_t pitches[3] = {w, halfW, halfW};
+    NvSciError gpe = NvSciBufObjGetPixels(s->buf, nullptr, planes, sizes,
                                           pitches);
-    if (err != NvSciError_Success) {
-        std::cerr << "NvMediaDecoder: NvSciBufObjGetPixels failed" << std::endl;
-        std::free(buffer);
+    if (gpe != NvSciError_Success) {
+        std::cerr << "NvMediaDecoder: NvSciBufObjGetPixels failed (err="
+                  << gpe << ")" << std::endl;
+        std::free(planes[0]);
+        std::free(planes[1]);
+        std::free(planes[2]);
         return frame;
     }
+
+    // Repack the planar (Y, U, V) into tightly-packed NV12 (Y, interleaved UV).
+    // Y copies as-is; UV interleaves one U and one V byte per chroma column.
+    uint8_t* buffer = static_cast<uint8_t*>(std::malloc(outY + outUV));
+    if (!buffer) {
+        std::free(planes[0]);
+        std::free(planes[1]);
+        std::free(planes[2]);
+        return frame;
+    }
+    std::memcpy(buffer, planes[0], outY);
+    const uint8_t* u = static_cast<const uint8_t*>(planes[1]);
+    const uint8_t* v = static_cast<const uint8_t*>(planes[2]);
+    uint8_t* uv = buffer + outY;
+    for (uint32_t row = 0; row < halfH; ++row) {
+        uint8_t* out = uv + static_cast<size_t>(row) * w;
+        const uint8_t* ur = u + static_cast<size_t>(row) * halfW;
+        const uint8_t* vr = v + static_cast<size_t>(row) * halfW;
+        for (uint32_t x = 0; x < halfW; ++x) {
+            out[2 * x] = ur[x];
+            out[2 * x + 1] = vr[x];
+        }
+    }
+    std::free(planes[0]);
+    std::free(planes[1]);
+    std::free(planes[2]);
 
     frame.data = buffer;
-    frame.size = yBytes + uvBytes;
+    frame.size = outY + outUV;
     frame.width = static_cast<int>(displayWidth_ ? displayWidth_ : w);
     frame.height = static_cast<int>(displayHeight_ ? displayHeight_ : h);
     frame.format = PixelFormat::NV12;
