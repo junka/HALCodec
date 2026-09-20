@@ -20,14 +20,19 @@ target_compile_definitions(nvmedia_layers PRIVATE
 # Full data-path library set, mirroring the sample link lines:
 #   ide:  -lnvscibuf -lnvscisync -lnvmedia_ide_parser -lnvmedia_ide_sci -lz -lm
 #   iep:  -lnvscibuf -lnvscisync -lnvmedia_iep_sci
-link_directories(${NVMEDIA_SDK_DIR}/lib-target)
+# Link by absolute path rather than -l + link_directories(): the latter is
+# directory-scoped and silently emits no -L when the path is not under a
+# CMAKE_FIND_ROOT_PATH (it breaks cross-compile). Absolute paths always work.
+# libnvscibuf.so / libnvscisync.so are not shipped in the SDK lib-target
+# (only libnvscibuf.so.1 is); pull them from the target device into lib-target.
 target_link_libraries(nvmedia_layers PUBLIC
         halcodec_core
         ${CMAKE_DL_LIBS}
-        -lnvscibuf
-        -lnvscisync
-        -lnvmedia_ide_parser
-        -lnvmedia_ide_sci
-        -lnvmedia_iep_sci
+        ${NVMEDIA_SDK_DIR}/lib-target/libnvscibuf.so
+        ${NVMEDIA_SDK_DIR}/lib-target/libnvscisync.so
+        ${NVMEDIA_SDK_DIR}/lib-target/libnvmedia_ide_parser.so
+        ${NVMEDIA_SDK_DIR}/lib-target/libnvmedia_ide_sci.so
+        ${NVMEDIA_SDK_DIR}/lib-target/libnvmedia_iep_sci.so
+        ${CMAKE_DL_LIBS}
         -lz
         -lm)
