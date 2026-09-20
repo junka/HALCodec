@@ -249,6 +249,8 @@ std::string inputFormatsToString(const std::vector<NV_ENC_BUFFER_FORMAT>& format
 // 8-bit 4:2:0. Exposed so backends can refuse Initialize() before attempting
 // NvDecoder construction. Creates a transient CUDA context (cuvidGetDecoderCaps
 // requires one to be current on the calling thread).
+const char* nvdecCodecName(cudaVideoCodec codec); // defined below
+
 bool nvdecSupportsCodec(int deviceIndex, cudaVideoCodec codec) {
     if (codec < 0 || codec >= cudaVideoCodec_NumCodecs) {
         return false;
@@ -261,7 +263,23 @@ bool nvdecSupportsCodec(int deviceIndex, cudaVideoCodec codec) {
     decodeCaps.eCodecType = codec;
     decodeCaps.eChromaFormat = cudaVideoChromaFormat_420;
     decodeCaps.nBitDepthMinus8 = 0;
-    cuvidGetDecoderCaps(&decodeCaps);
+    // A failing call leaves decodeCaps zeroed, which is indistinguishable from
+    // a genuine "unsupported" and sends callers off hunting for a missing codec
+    // on a GPU that has it. Report the CUDA error so a library-version or
+    // context problem names itself instead.
+    CUresult rc = cuvidGetDecoderCaps(&decodeCaps);
+    if (rc != CUDA_SUCCESS) {
+        const char* errName = nullptr;
+        cuGetErrorName(rc, &errName);
+        std::cerr << "nvdecSupportsCodec: cuvidGetDecoderCaps failed on device "
+                  << deviceIndex << " for " << nvdecCodecName(codec) << ": "
+                  << (errName ? errName : "?") << " (" << static_cast<int>(rc)
+                  << ")" << std::endl;
+    } else if (!decodeCaps.bIsSupported) {
+        std::cerr << "nvdecSupportsCodec: " << nvdecCodecName(codec)
+                  << " not advertised as supported on device " << deviceIndex
+                  << " (cuvidGetDecoderCaps rc=SUCCESS)" << std::endl;
+    }
     return decodeCaps.bIsSupported != 0;
 }
 
@@ -388,7 +406,18 @@ public:
             "OUTPUT_RECON_SURFACE",
             "OUTPUT_BLOCK_STATS",
             "OUTPUT_ROW_STATS",
+            // These five were added to NV_ENC_CAPS after this table was written.
+            // The query loop runs to NV_ENC_CAPS_EXPOSED_COUNT, so a short table
+            // made it print caps_str[55..59] — five pointers past the end of the
+            // array — and segfault. Keep this in sync with the enum.
+            "TEMPORAL_FILTER",
+            "LOOKAHEAD_LEVEL",
+            "UNIDIRECTIONAL_B",
+            "MVHEVC_ENCODE",
+            "YUV422_ENCODE",
         };
+        static_assert(sizeof(caps_str) / sizeof(caps_str[0]) == NV_ENC_CAPS_EXPOSED_COUNT,
+                      "caps_str must name every NV_ENC_CAPS value up to EXPOSED_COUNT");
 
         uint32_t nvenc_max_ver;
         int ret = NvEncodeAPIGetMaxSupportedVersion(&nvenc_max_ver);
