@@ -29,6 +29,14 @@ namespace {
 // reused or freed before the worker consumes it). A zero-size frame is the
 // EOS marker, passed through as-is (data stays null).
 CodecFrame DeepCopyInput(const CodecFrame& in) {
+    if (in.locality != FrameLocality::Host) {
+        // Device frames carry no host bytes to copy: pass the descriptor
+        // through by value so the reference the producer minted travels with
+        // it (release() from either copy returns the buffer exactly once).
+        // The worker must finish before the caller's copy is destroyed, which
+        // FillFrame guarantees by waiting out the async pipeline at EOS.
+        return in;
+    }
     CodecFrame c;
     c.width = in.width;
     c.height = in.height;
@@ -178,8 +186,8 @@ private:
                 return;
             }
 
-            // EOS marker frame (size == 0) takes the drain path too.
-            if (input.size == 0) {
+            // EOS marker frame (zero-size host frame) takes the drain path too.
+            if (input.size == 0 && input.locality == FrameLocality::Host) {
                 if (input.release) input.release();
                 vPacket.clear();
                 encoder_->EndEncode(vPacket);
@@ -195,16 +203,38 @@ private:
             }
 
             const NvEncInputFrame* encoderInputFrame = encoder_->GetNextInputFrame();
-            NvEncoderCuda::CopyToDeviceFrame(cudaCtx_,
-                input.data, 0,
-                (CUdeviceptr)encoderInputFrame->inputPtr,
-                (int)encoderInputFrame->pitch,
-                encoder_->GetEncodeWidth(),
-                encoder_->GetEncodeHeight(),
-                CU_MEMORYTYPE_HOST,
-                encoderInputFrame->bufferFormat,
-                encoderInputFrame->chromaOffsets,
-                encoderInputFrame->numChromaPlanes);
+            const bool deviceSrc = input.locality == FrameLocality::CudaDevice;
+            if (deviceSrc) {
+                // Zero-copy: the frame is already a pitched CUDA buffer (NVDEC
+                // device frame). Copy device-to-device with the producer's own
+                // pitch; the SDK derives the chroma plane offsets from it. Use
+                // the source geometry, which is the real frame size — the
+                // encoder's own width/height may be padded/aligned above it.
+                void* src = reinterpret_cast<void*>(input.device.cudaPtr);
+                uint32_t srcPitch = static_cast<uint32_t>(
+                    input.device.cudaPitch ? input.device.cudaPitch : input.width);
+                int w = input.width > 0 ? input.width : encoder_->GetEncodeWidth();
+                int h = input.height > 0 ? input.height : encoder_->GetEncodeHeight();
+                NvEncoderCuda::CopyToDeviceFrame(cudaCtx_, src, srcPitch,
+                    (CUdeviceptr)encoderInputFrame->inputPtr,
+                    (int)encoderInputFrame->pitch, w, h,
+                    CU_MEMORYTYPE_DEVICE,
+                    encoderInputFrame->bufferFormat,
+                    encoderInputFrame->chromaOffsets,
+                    encoderInputFrame->numChromaPlanes,
+                    true /* bUnAlignedDeviceCopy */);
+            } else {
+                NvEncoderCuda::CopyToDeviceFrame(cudaCtx_,
+                    input.data, 0,
+                    (CUdeviceptr)encoderInputFrame->inputPtr,
+                    (int)encoderInputFrame->pitch,
+                    encoder_->GetEncodeWidth(),
+                    encoder_->GetEncodeHeight(),
+                    CU_MEMORYTYPE_HOST,
+                    encoderInputFrame->bufferFormat,
+                    encoderInputFrame->chromaOffsets,
+                    encoderInputFrame->numChromaPlanes);
+            }
             vPacket.clear();
             encoder_->EncodeFrame(vPacket);
 

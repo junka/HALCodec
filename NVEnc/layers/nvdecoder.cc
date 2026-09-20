@@ -1,6 +1,7 @@
 #include "nvdecoder.h"
 
 #include <cuda.h>
+#include <map>
 #include <cstdlib>
 #include <cstring>
 #include <iostream>
@@ -56,8 +57,8 @@ cudaVideoCodec codecFromName(const std::string& name) {
 // rotates on the next Decode) into a malloc'd CodecFrame, queued for GetFrame.
 class NVDecoder::AsyncFeed {
 public:
-    AsyncFeed(NvDecoder* dec, CUcontext ctx)
-        : decoder_(dec), cudaCtx_(ctx) {}
+    AsyncFeed(NVDecoder* owner, NvDecoder* dec, CUcontext ctx)
+        : owner_(owner), decoder_(dec), cudaCtx_(ctx) {}
 
     ~AsyncFeed() {
         {
@@ -110,6 +111,7 @@ public:
     }
 
 private:
+    NVDecoder* owner_ = nullptr;
     NvDecoder* decoder_;
     CUcontext cudaCtx_ = nullptr;
 
@@ -123,15 +125,28 @@ private:
     bool workerError_ = false;
     std::thread worker_;
 
-    // Copies one decoded frame out of NvDecoder's host-memory locked pool into
-    // a tightly-packed malloc'd CodecFrame (pitch-aware). Returns false if no
-    // frame was available. The CUDA context must be current on this thread.
+    // Fills `out` from one newly decoded NvDecoder frame (pitch-aware): a
+    // device-resident CodecFrame in zero-copy mode, otherwise a tightly-packed
+    // malloc'd host frame. Returns false if no frame was available. The CUDA
+    // context must be current on this thread.
     bool takeOneFrame(CodecFrame& out) {
         int64_t pts = 0;
         uint8_t* locked = decoder_->GetLockedFrame(&pts);
         if (!locked) {
             return false;
         }
+        if (owner_->zeroCopy_) {
+            // Hand the pitched device buffer out as-is; no CPU round-trip.
+            owner_->EmitDeviceFrame(out, locked, pts);
+            return true;
+        }
+        // Host mode: copy the locked frame out as before.
+        return copyOutHostFrame(out, locked, pts);
+    }
+
+    // Copies one newly decoded host-mode locked frame into a tightly-packed
+    // malloc'd CodecFrame (pitch-aware), for the host (non-zero-copy) path.
+    bool copyOutHostFrame(CodecFrame& out, const uint8_t* locked, int64_t pts) {
         int w = decoder_->GetWidth();
         int h = decoder_->GetHeight();
         int pitch = decoder_->GetDeviceFramePitch();
@@ -254,6 +269,200 @@ private:
     }
 };
 
+// Device-frame pool for zero-copy mode. NvDecoder::GetLockedFrame() erases a
+// frame buffer from the SDK's internal pool and ~NvDecoder only cuMemFree()s
+// the buffers still in m_vpFrame, so a checked-out device frame would be owned
+// by nobody. This pool owns exactly the checked-out set: it hands each buffer
+// back to NvDecoder via UnlockFrame() once the last reference (the emitted
+// CodecFrame's release()) goes away, and force-frees whatever is still
+// outstanding at teardown.
+//
+// Destruction order matters: ~NvDecoder pushes m_cuContext, so buffers must be
+// freed and returned before the decoder (and the CUDA context) go away. That is
+// why NVDecoder::Finalize() releases framePool_ explicitly rather than leaving
+// it to member destruction order.
+class NVDecoder::DeviceFramePool {
+public:
+    DeviceFramePool(NvDecoder* dec, CUcontext ctx) : decoder_(dec), cudaCtx_(ctx) {}
+    ~DeviceFramePool() { releaseAll(); }
+
+    DeviceFramePool(const DeviceFramePool&) = delete;
+    DeviceFramePool& operator=(const DeviceFramePool&) = delete;
+
+    // Takes one reference to a checked-out frame buffer.
+    void adopt(uint8_t* p) {
+        std::lock_guard<std::mutex> lk(mu_);
+        ++owned_[p];
+    }
+
+    // Drops one reference; returns the buffer to NvDecoder on the last one.
+    void put(uint8_t* p) {
+        NvDecoder* dec = nullptr;
+        {
+            std::lock_guard<std::mutex> lk(mu_);
+            auto it = owned_.find(p);
+            if (it == owned_.end()) {
+                return;  // already returned or force-freed at teardown
+            }
+            if (--it->second == 0) {
+                owned_.erase(it);
+                dec = decoder_;
+            }
+        }
+        if (!dec) {
+            return;
+        }
+        CUcontext prev = nullptr;
+        bool pushed = cudaCtx_ && cuCtxPushCurrent(cudaCtx_) == CUDA_SUCCESS;
+        uint8_t* frames[1] = {p};
+        uint8_t** fp = frames;
+        dec->UnlockFrame(fp);
+        if (pushed) {
+            cuCtxPopCurrent(&prev);
+        }
+    }
+
+private:
+    // Frees every buffer still checked out (the decoder is gone or going away,
+    // so UnlockFrame is not an option) and detaches from the decoder.
+    void releaseAll() {
+        std::vector<uint8_t*> doomed;
+        {
+            std::lock_guard<std::mutex> lk(mu_);
+            for (const auto& kv : owned_) {
+                doomed.push_back(kv.first);
+            }
+            owned_.clear();
+            decoder_ = nullptr;
+        }
+        if (doomed.empty()) {
+            return;
+        }
+        CUcontext prev = nullptr;
+        bool pushed = cudaCtx_ && cuCtxPushCurrent(cudaCtx_) == CUDA_SUCCESS;
+        for (uint8_t* p : doomed) {
+            cuMemFree(reinterpret_cast<CUdeviceptr>(p));
+        }
+        if (pushed) {
+            cuCtxPopCurrent(&prev);
+        }
+    }
+
+    std::mutex mu_;
+    NvDecoder* decoder_ = nullptr;
+    CUcontext cudaCtx_ = nullptr;
+    std::map<uint8_t*, int> owned_;
+};
+
+// DownloadToHost hook for CudaDevice frames. Copies the pitched NVDEC device
+// frame plane-by-plane into a tightly-packed host buffer and flips the frame to
+// Host. The context owning the pointer is discovered via
+// cuPointerGetAttribute (the app thread may have no context current at all),
+// which keeps the hook self-contained. The frame's device frame is returned to
+// the decoder pool once the copy has completed.
+namespace {
+bool DownloadCudaFrame(CodecFrame& f) {
+    if (f.locality != FrameLocality::CudaDevice || !f.device.cudaPtr) {
+        return false;
+    }
+    const int w = f.width;
+    const int h = f.height;
+    const size_t pitch = f.device.cudaPitch ? f.device.cudaPitch : static_cast<size_t>(w);
+    const int bpp = (f.format == PixelFormat::P016 || f.format == PixelFormat::P010
+                     || f.format == PixelFormat::P210
+                     || f.format == PixelFormat::YUV444P10LE) ? 2 : 1;
+    const size_t rowBytes = static_cast<size_t>(w) * bpp;
+
+    // NVDEC stores each plane at a whole luma-height offset (NvDecoder.cpp
+    // copies plane i to pDecodedFrame + pitch * lumaHeight * i), so a plane's
+    // offset is derived from the luma height, not from accumulated heights.
+    struct Plane { size_t srcRow; int lines; };
+    std::vector<Plane> planes;
+    switch (f.format) {
+        case PixelFormat::NV12:
+        case PixelFormat::P016:
+        case PixelFormat::NV16:
+        case PixelFormat::P210:
+            planes.push_back({0, h});
+            planes.push_back({static_cast<size_t>(h), h / 2});
+            if (f.format == PixelFormat::NV16 || f.format == PixelFormat::P210) {
+                planes.back().lines = h;
+            }
+            break;
+        case PixelFormat::YUV444P:
+        case PixelFormat::YUV444P10LE:
+            planes.push_back({0, h});
+            planes.push_back({static_cast<size_t>(h), h});
+            planes.push_back({static_cast<size_t>(h) * 2, h});
+            break;
+        default:
+            return false;  // layout unknown: leave the frame device-resident
+    }
+
+    size_t total = 0;
+    for (const Plane& p : planes) {
+        total += static_cast<size_t>(p.lines) * rowBytes;
+    }
+    uint8_t* buffer = static_cast<uint8_t*>(std::malloc(total ? total : 1));
+    if (!buffer) {
+        return false;
+    }
+
+    CUcontext ctx = nullptr;
+    CUdeviceptr src = static_cast<CUdeviceptr>(f.device.cudaPtr);
+    if (cuPointerGetAttribute(&ctx, CU_POINTER_ATTRIBUTE_CONTEXT, src) != CUDA_SUCCESS
+        || !ctx) {
+        std::free(buffer);
+        return false;
+    }
+    CUcontext prev = nullptr;
+    bool pushed = cuCtxPushCurrent(ctx) == CUDA_SUCCESS;
+    size_t dstOff = 0;
+    bool ok = true;
+    for (const Plane& p : planes) {
+        CUDA_MEMCPY2D m = {};
+        m.srcMemoryType = CU_MEMORYTYPE_DEVICE;
+        m.srcDevice = src + pitch * p.srcRow;
+        m.srcPitch = pitch;
+        m.dstMemoryType = CU_MEMORYTYPE_HOST;
+        m.dstHost = buffer + dstOff;
+        m.dstPitch = rowBytes;
+        m.WidthInBytes = rowBytes;
+        m.Height = static_cast<unsigned>(p.lines);
+        if (cuMemcpy2D(&m) != CUDA_SUCCESS) {
+            ok = false;
+            break;
+        }
+        dstOff += static_cast<size_t>(p.lines) * rowBytes;
+    }
+    if (pushed) {
+        cuCtxPopCurrent(&prev);
+    }
+    // The device frame is no longer needed once the copy completed.
+    if (f.release) {
+        f.release();
+        f.release = nullptr;
+    }
+    if (!ok) {
+        std::free(buffer);
+        return false;
+    }
+    f.data = buffer;
+    f.size = total;
+    f.strides[0] = rowBytes;
+    f.strides[1] = rowBytes;
+    f.locality = FrameLocality::Host;
+    f.device = {};
+    f.release = [buffer]() { std::free(buffer); };
+    return true;
+}
+
+const bool g_cudaDownloadRegistered = [] {
+    RegisterCudaFrameDownload(&DownloadCudaFrame);
+    return true;
+}();
+}  // namespace
+
 bool NVDecoder::Initialize(const CodecParams& params) {
     Rect cropRect = {};
     Dim resizeDim = {};
@@ -286,17 +495,24 @@ bool NVDecoder::Initialize(const CodecParams& params) {
                       << std::endl;
             return false;
         }
+        // -z/--zero-copy: NvDecoder allocates pitched device buffers and copies
+        // the decoded surface device-to-device instead of into host memory, so
+        // GetFrame() hands out FrameLocality::CudaDevice frames with no CPU
+        // round-trip.
+        zeroCopy_ = params.zeroCopy;
 #if NVENCAPI_MAJOR_VERSION > 12
-        decoder_ = std::make_unique<NvDecoder>(cudaCtx, false,
-            codec, false, false, &cropRect, &resizeDim, false, 0, 0, 1000, false, 0, nullptr);
+        decoder_ = std::make_unique<NvDecoder>(cudaCtx, zeroCopy_,
+            codec, false, zeroCopy_, &cropRect, &resizeDim, false, 0, 0, 1000, false, 0, nullptr);
 #else
-        decoder_ = std::make_unique<NvDecoder>(cudaCtx, false,
-            codec, false, false, &cropRect, &resizeDim, false, 0, 0, 1000, false);
+        decoder_ = std::make_unique<NvDecoder>(cudaCtx, zeroCopy_,
+            codec, false, zeroCopy_, &cropRect, &resizeDim, false, 0, 0, 1000, false);
 #endif
         decoder_->SetOperatingPoint(0, false);
-        feed_ = std::make_unique<AsyncFeed>(decoder_.get(), cudaCtx);
+        framePool_ = std::make_shared<DeviceFramePool>(decoder_.get(), cudaCtx);
+        feed_ = std::make_unique<AsyncFeed>(this, decoder_.get(), cudaCtx);
         feed_->start();
         std::cout << "NVDecoder: async feed session up, codec=" << params.codec
+                  << (zeroCopy_ ? ", zero-copy device frames" : "")
                   << std::endl;
         return true;
     }
@@ -322,16 +538,18 @@ bool NVDecoder::Initialize(const CodecParams& params) {
                   << std::endl;
         return false;
     }
+    zeroCopy_ = params.zeroCopy;
 #if NVENCAPI_MAJOR_VERSION > 12
-    decoder_ = std::make_unique<NvDecoder>(cudaCtx, false,
+    decoder_ = std::make_unique<NvDecoder>(cudaCtx, zeroCopy_,
         codec,
-        false, false, &cropRect, &resizeDim, false, 0, 0, 1000, false, 0, nullptr);
+        false, zeroCopy_, &cropRect, &resizeDim, false, 0, 0, 1000, false, 0, nullptr);
 #else
-    decoder_ = std::make_unique<NvDecoder>(cudaCtx, false,
+    decoder_ = std::make_unique<NvDecoder>(cudaCtx, zeroCopy_,
         codec,
-        false, false, &cropRect, &resizeDim, false, 0, 0, 1000, false);
+        false, zeroCopy_, &cropRect, &resizeDim, false, 0, 0, 1000, false);
 #endif
     decoder_->SetOperatingPoint(0, false);
+    framePool_ = std::make_shared<DeviceFramePool>(decoder_.get(), cudaCtx);
     return true;
 }
 
@@ -370,6 +588,11 @@ int NVDecoder::PullFrames() {
 
 void NVDecoder::Finalize() {
     feed_.reset();  // joins the worker thread first
+    // Return or free every device frame still checked out before the decoder
+    // (and with it the frame pool inside it) goes away. Anything the
+    // application still holds after this point is freed by the pool, not
+    // UnlockFrame'd, since the decoder is about to disappear.
+    framePool_ = nullptr;
     if (decoder_) {
         std::cout << decoder_->GetVideoInfo();
     }
@@ -390,16 +613,42 @@ bool NVDecoder::isAsync() const {
     return feedMode_;
 }
 
+void NVDecoder::EmitDeviceFrame(CodecFrame& out, uint8_t* locked, int64_t pts) const {
+    // Describe a checked-out NVDEC device buffer as a pitched CudaDevice frame.
+    // The pool takes a reference so the buffer is not leaked while the
+    // application holds the frame; release() gives it back to NvDecoder.
+    framePool_->adopt(locked);
+    out.data = nullptr;
+    out.size = 0;
+    out.width = decoder_->GetWidth();
+    out.height = decoder_->GetHeight();
+    out.format = toHalFormat(decoder_->GetOutputFormat());
+    out.pts = pts;
+    out.strides[0] = static_cast<size_t>(decoder_->GetDeviceFramePitch());
+    out.strides[1] = out.strides[0];
+    out.locality = FrameLocality::CudaDevice;
+    out.device = {};
+    out.device.cudaPtr = reinterpret_cast<uintptr_t>(locked);
+    out.device.cudaPitch = out.strides[0];
+    std::shared_ptr<DeviceFramePool> pool = framePool_;
+    out.release = [pool, locked]() { pool->put(locked); };
+}
+
 bool NVDecoder::GetFrame(CodecFrame& out) {
     if (feedMode_ && feed_) {
         return feed_->getFrame(out);
     }
     // Sync (demuxer) mode: non-blocking pull of one locked frame.
     int64_t pts = 0;
-    out.data = decoder_->GetLockedFrame(&pts);
-    if (!out.data) {
+    uint8_t* locked = decoder_->GetLockedFrame(&pts);
+    if (!locked) {
         return false;
     }
+    if (zeroCopy_) {
+        EmitDeviceFrame(out, locked, pts);
+        return true;
+    }
+    out.data = locked;
     out.size = decoder_->GetFrameSize();
     out.width = decoder_->GetWidth();
     out.height = decoder_->GetHeight();
