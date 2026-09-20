@@ -16,6 +16,8 @@ add_executable(hal_dec hal_dec.cc parse_cli.h)
 
 add_executable(hal_session hal_session.cc parse_cli.h)
 
+add_executable(hal_transcode hal_transcode.cc parse_cli.h)
+
 # Backends are loaded at runtime via dlopen (see src/plugin_loader.h) instead of
 # link-time binding. Link-time binding forces the dynamic loader to resolve every
 # backend's NEEDED entries (libnvidia-encode.so.1, libnvjpeg.so.12, ...) at
@@ -29,6 +31,7 @@ target_link_libraries(hal_enc PUBLIC halcodec_core Boost::program_options ${CMAK
 target_link_libraries(codecinfo PUBLIC halcodec_core Boost::program_options ${CMAKE_DL_LIBS})
 target_link_libraries(hal_dec PUBLIC halcodec_core Boost::program_options ${CMAKE_DL_LIBS})
 target_link_libraries(hal_session PUBLIC halcodec_core Boost::program_options ${CMAKE_DL_LIBS})
+target_link_libraries(hal_transcode PUBLIC halcodec_core Boost::program_options ${CMAKE_DL_LIBS})
 
 # Stage backend shared libraries (*_layers.so / *_layers.dylib) next to the
 # executables so plugin_loader's ExeDir() search finds them in the build tree.
@@ -53,7 +56,7 @@ endif()
 if(TARGET nvmedia_layers)
     list(APPEND _halcodec_backends nvmedia_layers)
 endif()
-foreach(_tgt hal_enc codecinfo hal_dec hal_session)
+foreach(_tgt hal_enc codecinfo hal_dec hal_session hal_transcode)
     foreach(_layer ${_halcodec_backends})
         add_dependencies(${_tgt} ${_layer})
         add_custom_command(TARGET ${_tgt} POST_BUILD

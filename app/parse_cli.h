@@ -22,6 +22,7 @@ public:
                  "Input file (may be repeated for multi-stream apps)")
                 ("output,o", po::value<std::string>(&outputFile_), "Output file (optional, defaults to input file name with format extension)")
                 ("backend,b", po::value<std::string>(&backend_), "Backend name (vtbox/nvdec/nvjpeg/nvenc/amfdec/qsvdec/nvmedia); defaults per application")
+                ("encoder,B", po::value<std::string>(&encoderBackend_), "Encoder backend for apps that chain two backends (e.g. hal_transcode -b nvdec -B nvenc); defaults per application")
                 ("gpu", po::value<int>(&gpuIndex_)->default_value(0), "GPU index")
                 ("format,f", po::value<std::string>(&format_)->default_value("yuv"),
                  "Format: yuv(i420)/nv12/yuv444/y(rgb gray)/bgr/bgri/rgbi/bgra/rgba/bmp")
@@ -77,6 +78,7 @@ public:
     const std::vector<std::string>& getInputFiles() const { return inputFiles_; }
     const std::string& getOutputFile() const { return outputFile_; }
     const std::string& getBackend() const { return backend_; }
+    const std::string& getEncoderBackend() const { return encoderBackend_; }
     int getGpuIndex() const { return gpuIndex_; }
     const std::string& getFormat() const { return format_; }
     const std::string& getInputFormat() const { return input_format_; }
@@ -105,6 +107,7 @@ private:
     std::vector<std::string> inputFiles_;
     std::string outputFile_;
     std::string backend_;
+    std::string encoderBackend_;
     int gpuIndex_;
     std::string format_;
     std::string input_format_;
