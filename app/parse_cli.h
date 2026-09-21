@@ -41,7 +41,9 @@ public:
                 ("profile", po::value<std::string>(&profile_), "Codec profile (baseline/main/high)")
                 ("level", po::value<std::string>(&level_), "Codec level (auto/4.0/4.1...)")
                 ("lowdelay", po::bool_switch(&lowDelay_), "Low-delay mode (0 B-frames, short GOP)")
-                ("zero-copy,z", po::bool_switch(&zeroCopy_), "Keep decoded frames in device memory (NvMedia NvSciBuf / NVDEC CUDA) instead of copying to host; the output writer downloads on demand. Backend support is opt-in.");
+                ("zero-copy,z", po::bool_switch(&zeroCopy_), "Keep decoded frames in device memory (NvMedia NvSciBuf / NVDEC CUDA) instead of copying to host; the output writer downloads on demand. Backend support is opt-in.")
+                ("metrics-interval", po::value<int>(&metricsInterval_)->default_value(1000),
+                 "Periodic metrics print interval in ms (0 = disable periodic; final summary always prints). Reports per-stream fps/bitrate/locality and whole-machine GPU utilization.");
 
             // Parse the command line
             po::variables_map vm;
@@ -102,6 +104,9 @@ public:
     const std::string& getLevel() const { return level_; }
     bool getLowDelay() const { return lowDelay_; }
     bool getZeroCopy() const { return zeroCopy_; }
+    // Metrics print interval in ms (0 = no periodic printing; the final
+    // summary always prints). Used by hal_transcode / hal_session.
+    int getMetricsInterval() const { return metricsInterval_; }
 
 private:
     std::vector<std::string> inputFiles_;
@@ -129,6 +134,7 @@ private:
     std::string level_;
     bool lowDelay_ = false;
     bool zeroCopy_ = false;
+    int metricsInterval_ = 1000;  // ms; 0 disables periodic metrics
 };
 
 #endif // PARSE_CLI_H

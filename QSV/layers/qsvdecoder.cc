@@ -1,6 +1,7 @@
 #include "qsvdecoder.h"
 
 #include <condition_variable>
+#include <chrono>
 #include <cstdlib>
 #include <cstring>
 #include <memory>
@@ -10,6 +11,7 @@
 #include <thread>
 
 #include "qsv_common.h"
+#include "metrics.h"
 #include "registry.h"
 
 // ONEVPL_EXPERIMENTAL (defined via CMake) gates mfxFrameSurfaceInterface::Export
@@ -157,6 +159,12 @@ public:
     // ImportFrameSurface returns -4 on a VAAPI display mismatch).
     void* vaDisplay = nullptr;
 
+    // Runtime observation counters (Layer 1). Registered into the process-wide
+    // metrics registry at Initialize so snapshotStreams() can copy it out;
+    // unregistered in ~Impl. The worker mutates counters under mu. The decoder
+    // has no Layer-2 stat API in oneVPL, so only Layer-1 counters are filled.
+    StreamStats stats_{};
+
     // Working bitstream. FillInput appends into the tail; the worker compacts
     // and consumes from DataOffset.
     mfxBitstream bs{};
@@ -206,6 +214,8 @@ public:
         }
         std::memcpy(bs.Data + bs.DataLength, data, size);
         bs.DataLength += static_cast<mfxU32>(size);
+        // Layer-1 input counter: compressed bytes fed into the decoder.
+        stats_.bytesIn += size;
     }
 
     // Worker: lazily parses the header (once enough data has arrived), then
@@ -257,6 +267,11 @@ public:
                     }
                     inited = true;
                     headerParsed = true;
+                    // Layer-1 identity: geometry is only known after the header
+                    // is parsed. Fill it now so snapshotStreams() reports the
+                    // real resolution instead of 0x0.
+                    stats_.width = par.mfx.FrameInfo.CropW;
+                    stats_.height = par.mfx.FrameInfo.CropH;
                     // Cache the decode session's VADisplay for the zero-copy
                     // path: the exported surface's vaDisplay is this handle,
                     // and the encode session must SetHandle the same value
@@ -302,6 +317,8 @@ public:
                     // Track the surface for batched synchronization.
                     std::lock_guard<std::mutex> lk(mu);
                     pending.push_back({surfOut, syncp});
+                    stats_.framesIn++;  // one frame submitted to hardware
+                    stats_.pendingAsync = static_cast<int>(pending.size());
                     // Synchronize a batch when several are in flight.
                     if (pending.size() >= 4) {
                         drainPendingLocked();
@@ -354,6 +371,10 @@ public:
             if (zeroCopy) {
                 if (!pushZeroCopyFrameLocked(p.surf, fi)) {
                     fi->Release(p.surf);
+                } else {
+                    // Layer-1 output counter: one device-memory frame emitted.
+                    stats_.framesOut++;
+                    stats_.localityDevice++;
                 }
                 // pushZeroCopyFrameLocked AddRef+Export'd the surface; the
                 // Export produced an independent refcounted header, so we still
@@ -384,10 +405,16 @@ public:
             fi->Unmap(p.surf);
             fi->Release(p.surf);
             if (frame.data) {
+                // Layer-1 output counter: one host-memory frame emitted, with
+                // its raw NV12 byte size.
+                stats_.framesOut++;
+                stats_.localityHost++;
+                stats_.bytesOut += frame.size;
                 frames.push(std::move(frame));
             }
         }
         pending.clear();
+        stats_.pendingAsync = 0;
         cvFrames.notify_all();
     }
 
@@ -452,6 +479,8 @@ public:
     }
 
     ~Impl() {
+        // Unregister from the metrics registry before tearing down the session.
+        unregisterStreamStats(&stats_);
         {
             std::lock_guard<std::mutex> lk(mu);
             eof = true;
@@ -524,6 +553,19 @@ bool QSVDecoder::Initialize(const CodecParams& params) {
     }
     // The worker lazily parses the header (DecodeHeader) once FillInput has
     // delivered enough data, then calls decodeInit and begins decoding.
+    // Populate the stats identity we know at Initialize time (geometry is
+    // filled by the worker after decodeHeader) and register so a snapshot
+    // taken mid-stream sees this decoder.
+    impl_->stats_.backend = "qsvdec";
+    impl_->stats_.codec = params.codec;
+    impl_->stats_.zeroCopy = impl_->zeroCopy;
+    {
+        auto tp = std::chrono::steady_clock::now();
+        impl_->stats_.wallStartSecs =
+            std::chrono::duration_cast<std::chrono::duration<double>>(
+                tp.time_since_epoch()).count();
+    }
+    registerStreamStats(&impl_->stats_);
     impl_->startWorker();
     std::cout << "QSVDecoder: async session up, codec=" << params.codec
               << (impl_->zeroCopy ? " (zero-copy)" : "") << std::endl;

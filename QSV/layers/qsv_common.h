@@ -73,6 +73,13 @@ public:
             dlsym(handle_, "MFXMemory_GetSurfaceForEncode"));
         encodeTerminate_ =
             reinterpret_cast<MFXVideoENCODETerminateFn>(dlsym(handle_, "MFXVideoENCODE_Close"));
+        // Layer-2 metrics: read back the encoder's actually-effective params
+        // (TargetKbps / FrameRate) and cumulative session stats (AvgQP, encoded
+        // frame count). Best-effort — older dispatchers may lack them.
+        encodeGetVideoParam_ = reinterpret_cast<MFXVideoENCODEGetVideoParamFn>(
+            dlsym(handle_, "MFXVideoENCODE_GetVideoParam"));
+        encodeGetStat_ = reinterpret_cast<MFXVideoENCODEGetStatFn>(
+            dlsym(handle_, "MFXVideoENCODE_GetEncodeStat"));
         if (!createSession_ || !close_ || !decodeInit_ || !encodeInit_
                 || !decodeFrameAsync_ || !syncOperation_ || !decodeTerminate_
                 || !encodeTerminate_ || !encodeFrameAsync_ || !getSurfaceForEncode_) {
@@ -182,6 +189,16 @@ public:
         return getSurfaceForEncode_(session, surf);
     }
     mfxStatus encodeTerminate(mfxSession session) const { return encodeTerminate_(session); }
+    // Layer-2 metrics wrappers. Return MFX_ERR_UNSUPPORTED if the dispatcher
+    // lacks the symbol (older libvpl); callers treat as best-effort.
+    mfxStatus encodeGetVideoParam(mfxSession session, mfxVideoParam* par) const {
+        if (!encodeGetVideoParam_) return MFX_ERR_UNSUPPORTED;
+        return encodeGetVideoParam_(session, par);
+    }
+    mfxStatus encodeGetStat(mfxSession session, mfxEncodeStat* stat) const {
+        if (!encodeGetStat_) return MFX_ERR_UNSUPPORTED;
+        return encodeGetStat_(session, stat);
+    }
 
 private:
     using MFXLoadFn = mfxLoader(MFX_CDECL*)();
@@ -210,6 +227,8 @@ private:
     using MFXMemoryGetSurfaceForEncodeFn = mfxStatus(MFX_CDECL*)(mfxSession,
         mfxFrameSurface1**);
     using MFXVideoENCODETerminateFn = mfxStatus(MFX_CDECL*)(mfxSession);
+    using MFXVideoENCODEGetVideoParamFn = mfxStatus(MFX_CDECL*)(mfxSession, mfxVideoParam*);
+    using MFXVideoENCODEGetStatFn = mfxStatus(MFX_CDECL*)(mfxSession, mfxEncodeStat*);
 
     void* handle_ = nullptr;
     MFXLoadFn load_ = nullptr;
@@ -232,6 +251,8 @@ private:
     MFXVideoENCODEEncodeFrameAsyncFn encodeFrameAsync_ = nullptr;
     MFXMemoryGetSurfaceForEncodeFn getSurfaceForEncode_ = nullptr;
     MFXVideoENCODETerminateFn encodeTerminate_ = nullptr;
+    MFXVideoENCODEGetVideoParamFn encodeGetVideoParam_ = nullptr;
+    MFXVideoENCODEGetStatFn encodeGetStat_ = nullptr;
 };
 
 // Maps the unified codec string to an libvpl codec id.
