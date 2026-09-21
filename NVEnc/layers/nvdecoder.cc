@@ -362,7 +362,11 @@ private:
 // the decoder pool once the copy has completed.
 namespace {
 bool DownloadCudaFrame(CodecFrame& f) {
-    if (f.locality != FrameLocality::CudaDevice || !f.device.cudaPtr) {
+    // NVDEC emits single-block pitched device frames (cudaNumPlanes == 0).
+    // nvjpeg emits multi-plane frames (cudaNumPlanes > 0) with its own download
+    // hook; leave those for it so the two CudaDevice backends don't fight.
+    if (f.locality != FrameLocality::CudaDevice || !f.device.cudaPtr
+        || f.device.cudaNumPlanes > 0) {
         return false;
     }
     const int w = f.width;

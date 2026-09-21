@@ -39,10 +39,20 @@ enum class FrameLocality {
 // Opaque device-memory descriptor. Only the field matching `locality` is
 // meaningful. Kept free of vendor headers (handles stored as void*/uintptr_t)
 // so frame.h stays includable from anywhere.
+//
+// Single-block device frames (NVDEC's pitched NV12 surface) use `cudaPtr` +
+// `cudaPitch` and leave `cudaNumPlanes` 0: the chroma planes sit at fixed
+// offsets inside that one allocation. Multi-plane device frames (nvjpeg's
+// `nvjpegImage_t`, where Y/U/V are separate cudaMalloc allocations that are
+// not contiguous) fill `cudaPlanes`/`cudaPitches` and set `cudaNumPlanes`;
+// `cudaPtr`/`cudaPitch` mirror plane 0 so single-plane consumers still work.
 struct DeviceMem {
     uintptr_t cudaPtr = 0;       // FrameLocality::CudaDevice  (CUdeviceptr)
     void* nvSciBufObj = nullptr; // FrameLocality::NvSciBufObj (NvSciBufObj)
     size_t cudaPitch = 0;        // row pitch for CudaDevice (non-tight)
+    uintptr_t cudaPlanes[4] = {0};  // per-plane device ptrs (multi-plane only)
+    size_t cudaPitches[4] = {0};    // per-plane row pitches (multi-plane only)
+    int cudaNumPlanes = 0;          // >0 => use cudaPlanes/cudaPitches
 };
 
 // Unified frame container exchanged between the HAL interface and the

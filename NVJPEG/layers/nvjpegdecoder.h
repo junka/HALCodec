@@ -75,6 +75,13 @@ private:
     uint8_t* combined_host_ = nullptr;
     size_t combined_cap_ = 0;
 
+    // -z/--zero-copy: GetFrame() hands out the nvjpegImage_t device planes
+    // directly as a FrameLocality::CudaDevice frame (multi-plane, since nvjpeg
+    // decodes Y/U/V into separate cudaMalloc allocations) instead of copying
+    // them into combined_host_. Consumers either feed them straight to a
+    // device-frame encoder (nvjpegenc) or call DownloadToHost() on demand.
+    bool zeroCopy_ = false;
+
     CUcontext cuContext_ = nullptr;
 };
 

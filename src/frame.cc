@@ -4,20 +4,24 @@
 #include <cstdlib>
 #include <cstring>
 #include <functional>
+#include <vector>
 
 namespace halcodec {
 
 namespace {
 // Device-frame download hooks, registered by backends that emit device frames
 // (so frame.cc stays free of NvSci/CUDA headers and of link-time coupling to
-// the backend .so files). A null hook means "no backend produced this variant
-// in this build" and DownloadToHost returns false.
+// the backend .so files). Each backend registers a hook that first checks
+// whether the frame is one it produced (and returns false otherwise), so
+// multiple CudaDevice-producing backends (NVDEC single-block, nvjpeg
+// multi-plane) can coexist: DownloadToHost tries each in turn until one
+// claims the frame.
 std::function<bool(CodecFrame&)>& nvsciHook() {
     static std::function<bool(CodecFrame&)> h;
     return h;
 }
-std::function<bool(CodecFrame&)>& cudaHook() {
-    static std::function<bool(CodecFrame&)> h;
+std::vector<std::function<bool(CodecFrame&)>>& cudaHooks() {
+    static std::vector<std::function<bool(CodecFrame&)>> h;
     return h;
 }
 }  // namespace
@@ -31,7 +35,7 @@ void RegisterNvSciBufDownload(std::function<bool(CodecFrame&)> h) {
 }
 __attribute__((visibility("default")))
 void RegisterCudaFrameDownload(std::function<bool(CodecFrame&)> h) {
-    cudaHook() = std::move(h);
+    cudaHooks().push_back(std::move(h));
 }
 
 __attribute__((visibility("default")))
@@ -40,8 +44,12 @@ bool DownloadToHost(CodecFrame& frame) {
         case FrameLocality::Host:
             return true;
         case FrameLocality::CudaDevice:
-            // Implemented once NVDEC/NVJPEG emit device frames (Stage 3).
-            if (cudaHook()) return cudaHook()(frame);
+            // Try each registered hook until one claims the frame. A hook
+            // returns false for frames it did not produce (different layout /
+            // format), letting the next backend's hook try.
+            for (auto& h : cudaHooks()) {
+                if (h(frame)) return true;
+            }
             return false;
         case FrameLocality::NvSciBufObj:
             if (nvsciHook()) return nvsciHook()(frame);

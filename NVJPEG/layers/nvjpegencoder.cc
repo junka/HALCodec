@@ -127,7 +127,10 @@ void NVJPEGEncoder::Finalize() {
 }
 
 bool NVJPEGEncoder::FillFrame(const CodecFrame& in) {
-    if (in.size == 0) {
+    // EOS marker is a zero-size HOST frame; device frames legitimately have
+    // size==0 (host size unknown until downloaded), so the locality check keeps
+    // them from being swallowed as end-of-stream.
+    if (in.size == 0 && in.locality == FrameLocality::Host) {
         // End-of-stream marker: nvjpeg encodes per image, nothing to flush.
         return false;
     }
@@ -141,26 +144,75 @@ bool NVJPEGEncoder::FillFrame(const CodecFrame& in) {
         return false;
     }
 
-    // Upload the whole image as-is (yuv/rgb/bgr/rgbi/bgri raw data).
-    cudaError_t err = cudaMalloc((void**)&dev_data_, in.size);
-    if (err != cudaSuccess) {
-        std::cout << "error for cuda malloc" << std::endl;
-        return false;
-    }
-    err = cudaMemcpy(dev_data_, in.data, in.size, cudaMemcpyHostToDevice);
-    if (err != cudaSuccess) {
-        cudaFree(dev_data_);
-        dev_data_ = nullptr;
-        std::cout << "error for cuda copy" << std::endl;
-        return false;
-    }
     img_width_ = in.width;
     img_height_ = in.height;
 
-    // Infer chroma subsampling from the payload size when the data is planar
-    // YUV of the decoded resolution.
+    const bool deviceSrc = in.locality == FrameLocality::CudaDevice;
+    nvjpegImage_t imgdesc;
+    if (deviceSrc) {
+        // Zero-copy: the frame is already in device memory. nvjpeg's encoder
+        // wants a per-plane nvjpegImage_t; a multi-plane CudaDevice frame
+        // (nvjpeg decoder output, Y/U/V as separate allocations) maps directly
+        // onto it with no copy. A single-block CudaDevice frame (NVDEC's
+        // contiguous NV12) cannot be fed to nvjpegEncodeYUV without first
+        // splitting it into planes, which is not supported here.
+        if (in.device.cudaNumPlanes <= 0) {
+            std::cerr << "NVJPEGEncoder: single-block device frame not supported "
+                         "(nvjpeg needs per-plane layout)" << std::endl;
+            return false;
+        }
+        for (int c = 0; c < in.device.cudaNumPlanes; c++) {
+            imgdesc.channel[c] = reinterpret_cast<unsigned char*>(
+                in.device.cudaPlanes[c]);
+            imgdesc.pitch[c] = in.device.cudaPitches[c];
+        }
+        for (int c = in.device.cudaNumPlanes; c < NVJPEG_MAX_COMPONENT; c++) {
+            imgdesc.channel[c] = nullptr;
+            imgdesc.pitch[c] = 0;
+        }
+        dev_data_ = nullptr;  // borrowing the decoder's buffers, not allocating
+    } else {
+        // Host path: upload the whole image as-is (yuv/rgb/bgr/rgbi/bgri).
+        cudaError_t err = cudaMalloc((void**)&dev_data_, in.size);
+        if (err != cudaSuccess) {
+            std::cout << "error for cuda malloc" << std::endl;
+            return false;
+        }
+        err = cudaMemcpy(dev_data_, in.data, in.size, cudaMemcpyHostToDevice);
+        if (err != cudaSuccess) {
+            cudaFree(dev_data_);
+            dev_data_ = nullptr;
+            std::cout << "error for cuda copy" << std::endl;
+            return false;
+        }
+        imgdesc = {
+            {
+                dev_data_,
+                dev_data_ + (size_t)img_width_ * img_height_,
+                dev_data_ + (size_t)img_width_ * img_height_ * 3 / 2,
+                dev_data_ + (size_t)img_width_ * img_height_ * 3
+            },
+            {
+                (unsigned int)((inputfmt_ == NVJPEG_INPUT_RGBI || inputfmt_ == NVJPEG_INPUT_BGRI) ? img_width_ * 3 : img_width_),
+                (unsigned int)img_width_,
+                (unsigned int)img_width_,
+                (unsigned int)img_width_
+            }
+        };
+    }
+
+    // Infer chroma subsampling. For host frames the payload size disambiguates
+    // 420/422/444/...; for device frames size is 0, so derive from the pixel
+    // format instead.
     subsampling_ = NVJPEG_CSS_420;
-    if (in.size == (size_t)img_height_ * img_width_ * 3) {
+    if (deviceSrc) {
+        switch (in.format) {
+            case PixelFormat::YUV444P: subsampling_ = NVJPEG_CSS_444; break;
+            case PixelFormat::I420:    subsampling_ = NVJPEG_CSS_420; break;
+            case PixelFormat::GRAY:    subsampling_ = NVJPEG_CSS_GRAY; break;
+            default: break;
+        }
+    } else if (in.size == (size_t)img_height_ * img_width_ * 3) {
         subsampling_ = NVJPEG_CSS_444;
     } else if (in.size == (size_t)img_height_ * img_width_ * 2) {
         subsampling_ = NVJPEG_CSS_440;
@@ -194,20 +246,6 @@ bool NVJPEGEncoder::FillFrame(const CodecFrame& in) {
         std::cout << "fail to nvjpegEncoderParamsSetSamplingFactors " << ret << std::endl;
         return false;
     }
-    nvjpegImage_t imgdesc = {
-        {
-            dev_data_,
-            dev_data_ + (size_t)img_width_ * img_height_,
-            dev_data_ + (size_t)img_width_ * img_height_ * 3 / 2,
-            dev_data_ + (size_t)img_width_ * img_height_ * 3
-        },
-        {
-            (unsigned int)((inputfmt_ == NVJPEG_INPUT_RGBI || inputfmt_ == NVJPEG_INPUT_BGRI) ? img_width_ * 3 : img_width_),
-            (unsigned int)img_width_,
-            (unsigned int)img_width_,
-            (unsigned int)img_width_
-        }
-    };
     if (format_ == "yuv") {
         ret = nvjpegEncodeYUV(nvjpegHandle_, encoderState_, encode_params_, &imgdesc,
                               subsampling_, img_width_, img_height_, stream_);
