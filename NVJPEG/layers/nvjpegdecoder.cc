@@ -10,6 +10,7 @@
 #include <unistd.h>
 #include <sys/stat.h>
 #include <sys/types.h>
+#include <cstdlib>
 #include <vector>
 
 #include "frame.h"
@@ -31,6 +32,7 @@ bool NVJPEGDecoder::Initialize(const CodecParams& params) {
         return false;
     }
     const std::string input = params.inputs[0];
+    zeroCopy_ = params.zeroCopy;
 
     // Map the unified output format to an nvjpeg output format.
     outputfmt_ = NVJPEG_OUTPUT_YUV;
@@ -292,6 +294,53 @@ int NVJPEGDecoder::PullFrames() {
 
 bool NVJPEGDecoder::GetFrame(CodecFrame& out) {
     int idx = batch_size_ - num_decoded;
+
+    // Zero-copy: hand the nvjpegImage_t device planes straight out as a
+    // CudaDevice frame. nvjpeg decodes Y/U/V into separate cudaMalloc
+    // allocations (not contiguous), so this is a multi-plane device frame:
+    // cudaPlanes[]/cudaPitches[] with cudaNumPlanes set. Plane 0 also mirrors
+    // into cudaPtr/cudaPitch for any single-plane consumer. The device buffers
+    // are decoder members reused across frames; release() only decrements the
+    // outstanding count (the synchronous PullFrames->GetFrame drain in hal_dec
+    // consumes each frame before the next PullFrames can realloc/overwrite
+    // out_[]).
+    if (zeroCopy_) {
+        int nPlanes = 0;
+        for (int c = 0; c < NVJPEG_MAX_COMPONENT; c++) {
+            if (out_[idx].channel[c] != nullptr) {
+                out.device.cudaPlanes[c] =
+                    reinterpret_cast<uintptr_t>(out_[idx].channel[c]);
+                out.device.cudaPitches[c] = out_[idx].pitch[c];
+                nPlanes++;
+            } else {
+                break;
+            }
+        }
+        out.device.cudaNumPlanes = nPlanes;
+        out.device.cudaPtr = out.device.cudaPlanes[0];
+        out.device.cudaPitch = out.device.cudaPitches[0];
+        out.data = nullptr;
+        out.size = 0;  // device-resident; host size unknown until downloaded
+        out.width = img_widths_[idx];
+        out.height = img_heights_[idx];
+        out.strides[0] = out_[idx].pitch[0];
+        out.locality = FrameLocality::CudaDevice;
+        switch (outputfmt_) {
+            case NVJPEG_OUTPUT_YUV:
+                out.format = (subsamplings_[idx] == NVJPEG_CSS_420)
+                                 ? PixelFormat::I420 : PixelFormat::YUV444P;
+                break;
+            case NVJPEG_OUTPUT_RGB: out.format = PixelFormat::RGB; break;
+            case NVJPEG_OUTPUT_BGR: out.format = PixelFormat::BGR; break;
+            case NVJPEG_OUTPUT_Y: out.format = PixelFormat::GRAY; break;
+            case NVJPEG_OUTPUT_RGBI: out.format = PixelFormat::RGB; break;
+            case NVJPEG_OUTPUT_BGRI: out.format = PixelFormat::BGR; break;
+            default: out.format = PixelFormat::Unknown; break;
+        }
+        out.release = [this]() { num_decoded--; };
+        return true;
+    }
+
     int total_size = 0;
     int chanels = 0;
 
@@ -420,6 +469,122 @@ bool NVJPEGDecoder::GetFrame(CodecFrame& out) {
 
     return true;
 }
+
+// DownloadToHost hook for nvjpeg's multi-plane CudaDevice frames. nvjpeg
+// decodes Y/U/V into separate cudaMalloc allocations (not one contiguous
+// block), so the NVDEC single-block download hook does not apply. This hook
+// claims only multi-plane frames (cudaNumPlanes > 0) and copies each plane
+// row-by-row into a tightly-packed host buffer, mirroring the host-path
+// layout GetFrame() produces in non-zero-copy mode (so the downstream file/BMP
+// writers see identical bytes either way). Returns false for single-block
+// device frames so the NVDEC hook handles them.
+namespace {
+bool DownloadNVJPEGCudaFrame(CodecFrame& f) {
+    if (f.locality != FrameLocality::CudaDevice
+        || f.device.cudaNumPlanes <= 0) {
+        return false;
+    }
+    const int w = f.width;
+    const int h = f.height;
+    const int nPlanes = f.device.cudaNumPlanes;
+
+    // Per-plane row bytes and line counts. nvjpeg pitches planes to the full
+    // image width (x bpp for interleaved), so the tight row bytes is just the
+    // pitch's data width, not the pitch itself.
+    struct Plane { int rowBytes; int lines; };
+    Plane planes[4] = {};
+    int bpp = 1;
+    switch (f.format) {
+        case PixelFormat::I420:
+            planes[0] = {w, h};
+            planes[1] = {w / 2, h / 2};
+            planes[2] = {w / 2, h / 2};
+            break;
+        case PixelFormat::YUV444P:
+            planes[0] = {w, h};
+            planes[1] = {w, h};
+            planes[2] = {w, h};
+            break;
+        case PixelFormat::GRAY:
+            planes[0] = {w, h};
+            break;
+        case PixelFormat::RGB:
+        case PixelFormat::BGR:
+            // nvjpeg RGB/BGR output is planar: 3 full-size planes.
+            planes[0] = {w, h};
+            planes[1] = {w, h};
+            planes[2] = {w, h};
+            break;
+        default:
+            return false;  // layout unknown: leave the frame device-resident
+    }
+
+    size_t total = 0;
+    for (int c = 0; c < nPlanes; c++) {
+        total += static_cast<size_t>(planes[c].rowBytes) * planes[c].lines;
+    }
+    uint8_t* buffer = static_cast<uint8_t*>(std::malloc(total ? total : 1));
+    if (!buffer) {
+        return false;
+    }
+
+    // Each plane is its own device allocation; copy with its own pitch into a
+    // tightly-packed destination region. cudaMemcpy2D handles the row-by-row
+    // detile. The context owning the pointers is discovered via
+    // cuPointerGetAttribute so this works on a thread with no current context.
+    CUcontext ctx = nullptr;
+    CUdeviceptr src0 = static_cast<CUdeviceptr>(f.device.cudaPlanes[0]);
+    if (cuPointerGetAttribute(&ctx, CU_POINTER_ATTRIBUTE_CONTEXT, src0)
+            != CUDA_SUCCESS || !ctx) {
+        std::free(buffer);
+        return false;
+    }
+    CUcontext prev = nullptr;
+    bool pushed = cuCtxPushCurrent(ctx) == CUDA_SUCCESS;
+    size_t dstOff = 0;
+    bool ok = true;
+    for (int c = 0; c < nPlanes; c++) {
+        CUDA_MEMCPY2D m = {};
+        m.srcMemoryType = CU_MEMORYTYPE_DEVICE;
+        m.srcDevice = static_cast<CUdeviceptr>(f.device.cudaPlanes[c]);
+        m.srcPitch = f.device.cudaPitches[c];
+        m.dstMemoryType = CU_MEMORYTYPE_HOST;
+        m.dstHost = buffer + dstOff;
+        m.dstPitch = static_cast<size_t>(planes[c].rowBytes);
+        m.WidthInBytes = static_cast<size_t>(planes[c].rowBytes);
+        m.Height = static_cast<unsigned>(planes[c].lines);
+        if (cuMemcpy2D(&m) != CUDA_SUCCESS) {
+            ok = false;
+            break;
+        }
+        dstOff += static_cast<size_t>(planes[c].rowBytes) * planes[c].lines;
+    }
+    if (pushed) {
+        cuCtxPopCurrent(&prev);
+    }
+    // The device frame is no longer needed once the copy completed.
+    if (f.release) {
+        f.release();
+        f.release = nullptr;
+    }
+    if (!ok) {
+        std::free(buffer);
+        return false;
+    }
+    f.data = buffer;
+    f.size = total;
+    f.strides[0] = static_cast<size_t>(planes[0].rowBytes);
+    f.locality = FrameLocality::Host;
+    f.device = {};
+    f.release = [buffer]() { std::free(buffer); };
+    return true;
+}
+
+const bool g_nvjpegDownloadRegistered = [] {
+    RegisterCudaFrameDownload(&DownloadNVJPEGCudaFrame);
+    return true;
+}();
+}  // namespace
 
 HALCODEC_CONNECT(Decoder, nvjpeg, NVJPEGDecoder);
 
