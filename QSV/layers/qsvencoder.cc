@@ -2,6 +2,7 @@
 
 #include <cstring>
 #include <cstdlib>
+#include <chrono>
 #include <condition_variable>
 #include <memory>
 #include <mutex>
@@ -10,6 +11,7 @@
 #include <vector>
 
 #include "qsv_common.h"
+#include "metrics.h"
 #include "registry.h"
 
 // ONEVPL_EXPERIMENTAL (defined via CMake) gates the mfxSurfaceInterface /
@@ -117,6 +119,12 @@ public:
     // once after encodeInit via MFXVideoCORE_GetHandle(MFX_HANDLE_MEMORY_INTERFACE).
     mfxMemoryInterface* memIface = nullptr;
 
+    // Runtime observation counters (Layer 1) + Layer-2 vendor stat cache.
+    // Registered into the process-wide metrics registry at Initialize so
+    // snapshotStreams() can copy it out; unregistered in ~Impl. The worker
+    // mutates the counters under mu (same lock the pipeline already holds).
+    StreamStats stats_{};
+
     mfxVideoParam par{};
     // Rotating pool of output bitstreams so deferred (batched) synchronization
     // never lets two in-flight outputs share a buffer.
@@ -164,12 +172,17 @@ public:
             }
             if (p.bs->DataLength > 0) {
                 packets.push(TakeBitstream(*p.bs));
+                // Layer-1 counters: one encoded access unit emitted, with its
+                // byte size. Updated under mu (caller holds it).
+                stats_.framesOut++;
+                stats_.bytesOut += packets.back().size;
             } else {
                 p.bs->DataOffset = 0;
                 p.bs->DataLength = 0;
             }
         }
         pending.clear();
+        stats_.pendingAsync = 0;
         cvPackets.notify_all();
     }
 
@@ -255,6 +268,16 @@ public:
         mfxBitstream* bs = nullptr;
         mfxSyncPoint syncp{};
         mfxStatus sts;
+
+        // Layer-1 input counter: one frame submitted. For the host path the
+        // byte count is the raw NV12 size; for the zero-copy device path it is
+        // 0 (no host bytes). Updated here (before the lock) since framesIn is
+        // only read under mu by snapshotStreams; an occasional torn read of a
+        // uint64 is acceptable for observation.
+        stats_.framesIn++;
+        if (input.locality == FrameLocality::Host) {
+            stats_.bytesIn += input.size;
+        }
 
         mfxFrameSurface1* surf = nullptr;
         bool importedSurface = false;
@@ -364,6 +387,7 @@ public:
         if (sts == MFX_ERR_NONE) {
             std::lock_guard<std::mutex> lk(mu);
             pending.push_back({syncp, bs});
+            stats_.pendingAsync = static_cast<int>(pending.size());
         } else if (sts == MFX_ERR_MORE_DATA) {
             // Encoder buffered the frame; output comes with a later submission.
             // The bitstream slot was untouched; release it back implicitly by
@@ -396,6 +420,7 @@ public:
             if (sts == MFX_ERR_NONE) {
                 std::lock_guard<std::mutex> lk(mu);
                 pending.push_back({syncp, bs});
+                stats_.pendingAsync = static_cast<int>(pending.size());
             } else if (sts == MFX_ERR_MORE_DATA || sts == MFX_ERR_NOT_ENOUGH_BUFFER) {
                 // Encoder fully flushed.
                 break;
@@ -408,6 +433,10 @@ public:
     }
 
     ~Impl() {
+        // Unregister from the metrics registry before tearing down the session,
+        // so snapshotStreams() never sees a stale pointer. The stats_ struct
+        // itself stays valid until the Impl is destroyed (after this dtor).
+        unregisterStreamStats(&stats_);
         {
             std::lock_guard<std::mutex> lk(mu);
             eof = true;
@@ -612,6 +641,28 @@ bool QSVEncoder::Initialize(const CodecParams& params) {
         }
     }
     impl_->inited = true;
+    // Populate the stream stats identity + Layer-2-lite (session-configured)
+    // fields, then register so snapshotStreams() sees this stream. The worker
+    // starts after this and begins mutating framesIn/framesOut/bytesOut.
+    impl_->stats_.backend = "qsvenc";
+    impl_->stats_.codec = params.codec;
+    impl_->stats_.width = params.width;
+    impl_->stats_.height = params.height;
+    impl_->stats_.zeroCopy = impl_->zeroCopy;
+    impl_->stats_.targetBitrateKbps = ec.bitrateKbps;
+    impl_->stats_.frameRateNum = ec.frameRateNum;
+    impl_->stats_.frameRateDen = ec.frameRateDen;
+    // wallStartSecs = steady-clock seconds at register time. StreamStats::
+    // wallSeconds() (in metrics.cc) computes nowSecs() - wallStartSecs using
+    // the same steady_clock, so the two agree on an epoch. We set it directly
+    // here rather than via a setter to keep StreamStats a plain data struct.
+    {
+        auto tp = std::chrono::steady_clock::now();
+        impl_->stats_.wallStartSecs =
+            std::chrono::duration_cast<std::chrono::duration<double>>(
+                tp.time_since_epoch()).count();
+    }
+    registerStreamStats(&impl_->stats_);
     impl_->startWorker();
     std::cout << "QSVEncoder: async session up, codec=" << params.codec << " "
               << params.width << "x" << params.height

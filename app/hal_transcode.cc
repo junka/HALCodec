@@ -19,6 +19,7 @@
 // pixel format when the decoder's is not the default NV12.
 
 #include <algorithm>
+#include <chrono>
 #include <cstdint>
 #include <fstream>
 #include <iostream>
@@ -32,6 +33,7 @@
 #include "encode_config.h"
 #include "encoder.h"
 #include "frame.h"
+#include "metrics.h"
 #include "plugin_loader.h"
 
 namespace {
@@ -199,6 +201,11 @@ int main(int argc, char* argv[]) {
 
     halcodec::CodecFrame frame;
     bool failed = false;
+    // Periodic metrics: print a snapshot every metricsInterval ms (0 disables).
+    // The snapshot is read-only across the registry; safe to call mid-stream.
+    const int metricsMs = cli.getMetricsInterval();
+    auto nextMetrics = std::chrono::steady_clock::now()
+        + std::chrono::milliseconds(metricsMs > 0 ? metricsMs : 60000);
     while (!failed && dec->GetFrame(frame)) {
         inFrames++;
         if (frame.locality == halcodec::FrameLocality::Host) {
@@ -222,6 +229,13 @@ int main(int argc, char* argv[]) {
         if (!enc->isAsync()) {
             drain();
         }
+        // Periodic metrics snapshot.
+        if (metricsMs > 0 &&
+            std::chrono::steady_clock::now() >= nextMetrics) {
+            halcodec::printStats(std::cout);
+            nextMetrics = std::chrono::steady_clock::now()
+                + std::chrono::milliseconds(metricsMs);
+        }
     }
     if (failed) {
         return -1;
@@ -238,6 +252,11 @@ int main(int argc, char* argv[]) {
     drain();
 
     fpout.close();
+    // Final metrics summary: per-stream fps/bitrate/locality + GPU util. The
+    // streams are still registered here (Finalize is below), so this captures
+    // the final cumulative counters before teardown.
+    std::cout << "--- metrics summary ---\n";
+    halcodec::printStats(std::cout);
     // Teardown order matters for zero-copy: the encoder shares the decoder's
     // VADisplay (SetHandle'd before encodeInit). The encoder must be finalized
     // first so its VA buffers/surfaces are freed while the VADisplay is still

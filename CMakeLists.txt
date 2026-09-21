@@ -16,7 +16,8 @@ include_directories(${CMAKE_SOURCE_DIR}/src)
 add_library(halcodec_core SHARED
     ${CMAKE_SOURCE_DIR}/src/registry.cc
     ${CMAKE_SOURCE_DIR}/src/session.cc
-    ${CMAKE_SOURCE_DIR}/src/frame.cc)
+    ${CMAKE_SOURCE_DIR}/src/frame.cc
+    ${CMAKE_SOURCE_DIR}/src/metrics.cc)
 set_target_properties(halcodec_core PROPERTIES
     CXX_VISIBILITY_PRESET hidden
     VISIBILITY_INLINES_HIDDEN ON)
