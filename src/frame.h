@@ -31,9 +31,13 @@ enum class PixelFormat {
 // leave `data` null; callers that only understand host memory must call
 // DownloadToHost() before touching the pixels.
 enum class FrameLocality {
-    Host,         // data is a CPU pointer
-    CudaDevice,   // device.cudaPtr is a CUdeviceptr (NVDEC/NVJPEG)
-    NvSciBufObj,  // device.nvSciBufObj is an NvSciBufObj (NvMedia)
+    Host,           // data is a CPU pointer
+    CudaDevice,     // device.cudaPtr is a CUdeviceptr (NVDEC/NVJPEG)
+    NvSciBufObj,    // device.nvSciBufObj is an NvSciBufObj (NvMedia)
+    OneVPLSurface,  // device.vplExportedHeader is an mfxSurfaceHeader* from
+                    // mfxFrameSurfaceInterface::Export (QSV zero-copy). The
+                    // handle is opaque (runtime-owned, refcounted); the app
+                    // never touches libva — Export/Import are runtime-mediated.
 };
 
 // Opaque device-memory descriptor. Only the field matching `locality` is
@@ -53,6 +57,20 @@ struct DeviceMem {
     uintptr_t cudaPlanes[4] = {0};  // per-plane device ptrs (multi-plane only)
     size_t cudaPitches[4] = {0};    // per-plane row pitches (multi-plane only)
     int cudaNumPlanes = 0;          // >0 => use cudaPlanes/cudaPitches
+    void* vplExportedHeader = nullptr;  // FrameLocality::OneVPLSurface:
+                                        //   mfxSurfaceHeader* from
+                                        //   mfxFrameSurfaceInterface::Export.
+                                        //   Refcounted runtime object; release
+                                        //   via its mfxSurfaceInterface::Release.
+    void* vplVaDisplay = nullptr;       // FrameLocality::OneVPLSurface:
+                                        //   the decode session's VADisplay
+                                        //   (MFX_HANDLE_VA_DISPLAY), an opaque
+                                        //   void* — the app never touches libva.
+                                        //   The encode session must SetHandle
+                                        //   this before Init so the imported
+                                        //   surface's vaDisplay matches the
+                                        //   encode session's own VADisplay
+                                        //   (otherwise ImportFrameSurface -4).
 };
 
 // Unified frame container exchanged between the HAL interface and the
@@ -98,6 +116,7 @@ bool DownloadToHost(CodecFrame& frame);
 // false for device frames) — wired up by the producing backends in Stage 1/3.
 void RegisterNvSciBufDownload(std::function<bool(CodecFrame&)> hook);
 void RegisterCudaFrameDownload(std::function<bool(CodecFrame&)> hook);
+void RegisterVPLSurfaceDownload(std::function<bool(CodecFrame&)> hook);
 
 } // namespace halcodec
 

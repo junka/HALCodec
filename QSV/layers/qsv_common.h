@@ -13,6 +13,10 @@
 #include <string>
 
 #include <vpl/mfx.h>
+// mfxmemory.h defines mfxMemoryInterface / ImportFrameSurface / the
+// MFX_HANDLE_MEMORY_INTERFACE-based MFXGetMemoryInterface macro used by the QSV
+// zero-copy Export/Import path. Not pulled in by <vpl/mfx.h>.
+#include <vpl/mfxmemory.h>
 
 namespace halcodec {
 namespace qsv {
@@ -52,6 +56,13 @@ public:
             dlsym(handle_, "MFXMemory_GetSurfaceForDecode"));
         syncOperation_ = reinterpret_cast<MFXVideoCORESyncOperationFn>(
             dlsym(handle_, "MFXVideoCORE_SyncOperation"));
+        // CORE handle getter/setter — used to obtain the mfxMemoryInterface for
+        // the pure-oneVPL Export/Import surface-sharing path (QSV zero-copy)
+        // and to share a VADisplay across decode/encode sessions.
+        getHandle_ = reinterpret_cast<MFXVideoCOREGetHandleFn>(
+            dlsym(handle_, "MFXVideoCORE_GetHandle"));
+        setHandle_ = reinterpret_cast<MFXVideoCORESetHandleFn>(
+            dlsym(handle_, "MFXVideoCORE_SetHandle"));
         decodeGetVideoParam_ = reinterpret_cast<MFXVideoDECODEGetVideoParamFn>(
             dlsym(handle_, "MFXVideoDECODE_GetVideoParam"));
         encodeInit_ = reinterpret_cast<MFXVideoENCODEInitFn>(dlsym(handle_, "MFXVideoENCODE_Init"));
@@ -139,6 +150,21 @@ public:
     mfxStatus syncOperation(mfxSession session, mfxSyncPoint sync, mfxU32 timeout) const {
         return syncOperation_(session, sync, timeout);
     }
+    // Retrieves a runtime handle (e.g. MFX_HANDLE_MEMORY_INTERFACE -> an
+    // mfxMemoryInterface* for ImportFrameSurface). Returns MFX_ERR_UNSUPPORTED
+    // if the dispatcher lacks GetHandle (older libvpl); callers must check.
+    mfxStatus getHandle(mfxSession session, mfxU32 type, mfxHDL* hdl) const {
+        if (!getHandle_) return MFX_ERR_UNSUPPORTED;
+        return getHandle_(session, type, hdl);
+    }
+    // Sets a runtime handle (e.g. MFX_HANDLE_VA_DISPLAY to share a VADisplay
+    // across sessions for cross-session surface sharing). Same dlsym as
+    // getHandle (MFXVideoCORE_GetHandle reads, MFXVideoCORE_SetHandle writes —
+    // both are exported by the dispatcher; setHandle_ is dlsym'd lazily).
+    mfxStatus setHandle(mfxSession session, mfxU32 type, mfxHDL hdl) const {
+        if (!setHandle_) return MFX_ERR_UNSUPPORTED;
+        return setHandle_(session, type, hdl);
+    }
     mfxStatus decodeGetVideoParam(mfxSession session, mfxVideoParam* par) const {
         return decodeGetVideoParam_(session, par);
     }
@@ -173,6 +199,8 @@ private:
     using MFXMemoryGetSurfaceForDecodeFn = mfxStatus(MFX_CDECL*)(mfxSession,
         mfxFrameSurface1**);
     using MFXVideoCORESyncOperationFn = mfxStatus(MFX_CDECL*)(mfxSession, mfxSyncPoint, mfxU32);
+    using MFXVideoCOREGetHandleFn = mfxStatus(MFX_CDECL*)(mfxSession, mfxU32, mfxHDL*);
+    using MFXVideoCORESetHandleFn = mfxStatus(MFX_CDECL*)(mfxSession, mfxU32, mfxHDL);
     using MFXVideoDECODEGetVideoParamFn = mfxStatus(MFX_CDECL*)(mfxSession, mfxVideoParam*);
     using MFXVideoENCODEInitFn = mfxStatus(MFX_CDECL*)(mfxSession, mfxVideoParam*);
     using MFXVideoENCODEQueryFn = mfxStatus(MFX_CDECL*)(mfxSession,
@@ -196,6 +224,8 @@ private:
     MFXVideoDECODEDecodeFrameAsyncFn decodeFrameAsync_ = nullptr;
     MFXMemoryGetSurfaceForDecodeFn getSurfaceForDecode_ = nullptr;
     MFXVideoCORESyncOperationFn syncOperation_ = nullptr;
+    MFXVideoCOREGetHandleFn getHandle_ = nullptr;
+    MFXVideoCORESetHandleFn setHandle_ = nullptr;
     MFXVideoDECODEGetVideoParamFn decodeGetVideoParam_ = nullptr;
     MFXVideoENCODEInitFn encodeInit_ = nullptr;
     MFXVideoENCODEQueryFn encodeQuery_ = nullptr;

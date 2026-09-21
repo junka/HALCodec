@@ -24,6 +24,14 @@ std::vector<std::function<bool(CodecFrame&)>>& cudaHooks() {
     static std::vector<std::function<bool(CodecFrame&)>> h;
     return h;
 }
+// oneVPL surface download hooks. Same coexistence model as cudaHooks(): each
+// registered hook checks whether the frame is one it produced (returns false
+// otherwise) so multiple OneVPLSurface-producing backends could coexist. In
+// practice only QSV registers one today.
+std::vector<std::function<bool(CodecFrame&)>>& vplHooks() {
+    static std::vector<std::function<bool(CodecFrame&)>> h;
+    return h;
+}
 }  // namespace
 
 // Exported (default visibility) so backend .so's loaded at runtime can install
@@ -36,6 +44,10 @@ void RegisterNvSciBufDownload(std::function<bool(CodecFrame&)> h) {
 __attribute__((visibility("default")))
 void RegisterCudaFrameDownload(std::function<bool(CodecFrame&)> h) {
     cudaHooks().push_back(std::move(h));
+}
+__attribute__((visibility("default")))
+void RegisterVPLSurfaceDownload(std::function<bool(CodecFrame&)> h) {
+    vplHooks().push_back(std::move(h));
 }
 
 __attribute__((visibility("default")))
@@ -53,6 +65,13 @@ bool DownloadToHost(CodecFrame& frame) {
             return false;
         case FrameLocality::NvSciBufObj:
             if (nvsciHook()) return nvsciHook()(frame);
+            return false;
+        case FrameLocality::OneVPLSurface:
+            // Same try-each-hook model as CudaDevice: a hook returns false for
+            // frames it did not produce.
+            for (auto& h : vplHooks()) {
+                if (h(frame)) return true;
+            }
             return false;
     }
     return false;
