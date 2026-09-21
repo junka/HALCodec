@@ -12,6 +12,9 @@
 #include "qsv_common.h"
 #include "registry.h"
 
+// ONEVPL_EXPERIMENTAL (defined via CMake) gates the mfxSurfaceInterface /
+// mfxMemoryInterface layouts used by the zero-copy ImportFrameSurface path.
+
 namespace halcodec {
 namespace qsv {
 
@@ -101,6 +104,18 @@ public:
     QSVRuntime runtime;
     mfxSession session = nullptr;
     bool inited = false;
+    // -z/--zero-copy: input frames arrive as FrameLocality::OneVPLSurface
+    // (an exported mfxSurfaceHeader* from a decoder session). The encoder is
+    // initialized with IN_VIDEO_MEMORY and ImportFrameSurface's each input
+    // into this session (no host memcpy). Off => IN_SYSTEM_MEMORY host path.
+    bool zeroCopy = false;
+    // Decode session's VADisplay (opaque void*), SetHandle'd before encodeInit
+    // so the encode session shares the decoder's VA display. Required for
+    // ImportFrameSurface to succeed (vaDisplay match). Null in host mode.
+    void* vaDisplay = nullptr;
+    // Cached encode-session memory interface for ImportFrameSurface. Fetched
+    // once after encodeInit via MFXVideoCORE_GetHandle(MFX_HANDLE_MEMORY_INTERFACE).
+    mfxMemoryInterface* memIface = nullptr;
 
     mfxVideoParam par{};
     // Rotating pool of output bitstreams so deferred (batched) synchronization
@@ -201,11 +216,13 @@ public:
             }
 
             if (gotFrame) {
-                // A zero-size frame is the implicit end-of-stream marker (the
-                // same contract sync backends use). Treat it as EOF rather than
-                // submitting an empty surface; the remaining queued frames
+                // A zero-size HOST frame is the implicit end-of-stream marker
+                // (the sync-backend contract). Device-resident frames
+                // (OneVPLSurface) legitimately have size==0 because their host
+                // size is unknown until downloaded, so the locality check keeps
+                // them from being swallowed as EOF. The remaining queued frames
                 // (if any) are still submitted first on subsequent iterations.
-                if (input.size == 0) {
+                if (input.size == 0 && input.locality == FrameLocality::Host) {
                     std::lock_guard<std::mutex> lk(mu);
                     eof = true;
                 } else if (!submitFrame(input)) {
@@ -227,37 +244,106 @@ public:
         }
     }
 
-    // Submits one raw frame: get surface, copy NV12 in, EncodeFrameAsync. Does
-    // NOT synchronize per-frame; batches synchronization when kMaxInFlight
+    // Submits one raw frame. Host path: get surface, copy NV12 in,
+    // EncodeFrameAsync. Zero-copy path: ImportFrameSurface the exported
+    // mfxSurfaceHeader* into this session and feed the imported surface
+    // straight to EncodeFrameAsync (no Map, no memcpy). Neither path
+    // synchronizes per-frame; both batch synchronization when kMaxInFlight
     // submissions are outstanding. Returns false on a fatal submit error.
     bool submitFrame(const CodecFrame& input) {
         mfxSession s = session;
+        mfxBitstream* bs = nullptr;
+        mfxSyncPoint syncp{};
+        mfxStatus sts;
+
         mfxFrameSurface1* surf = nullptr;
-        mfxStatus sts = runtime.getSurfaceForEncode(s, &surf);
-        if (sts != MFX_ERR_NONE) {
-            std::cerr << "QSVEncoder: GetSurfaceForEncode failed: " << sts << "\n";
-            return false;
-        }
-        sts = surf->FrameInterface->Map(surf, MFX_MAP_WRITE);
-        if (sts != MFX_ERR_NONE) {
-            std::cerr << "QSVEncoder: surface Map failed: " << sts << "\n";
-            surf->FrameInterface->Release(surf);
-            return false;
-        }
-        mfxStatus fillSts = FillSurfaceFromFrame(surf, input);
-        mfxStatus unmapSts = surf->FrameInterface->Unmap(surf);
-        if (fillSts != MFX_ERR_NONE) {
-            std::cerr << "QSVEncoder: input frame incompatible: " << fillSts << "\n";
-            surf->FrameInterface->Release(surf);
-            return false;
-        }
-        if (unmapSts != MFX_ERR_NONE) {
-            std::cerr << "QSVEncoder: surface Unmap failed: " << unmapSts << "\n";
-            surf->FrameInterface->Release(surf);
-            return false;
+        bool importedSurface = false;
+        if (input.locality == FrameLocality::OneVPLSurface) {
+            // Zero-copy device input. Import the decoder's exported header
+            // into this encode session — ImportFrameSurface returns a new
+            // mfxFrameSurface1* backed by the same video memory (shared mode)
+            // or a runtime-staged copy (copy mode, if sharing unsupported).
+            // Either way we hand the imported surface to EncodeFrameAsync with
+            // no host memcpy.
+            if (!memIface) {
+                std::cerr << "QSVEncoder: zero-copy input but no memory "
+                             "interface (encodeInit path skipped it?)\n";
+                return false;
+            }
+            if (!input.device.vplExportedHeader) {
+                std::cerr << "QSVEncoder: OneVPLSurface frame has no header\n";
+                return false;
+            }
+            mfxSurfaceHeader* header = static_cast<mfxSurfaceHeader*>(
+                input.device.vplExportedHeader);
+            // The decoder's Export set SurfaceFlags = EXPORT_SHARED (0x100),
+            // which the import-side check_import_flags() rejects (it only
+            // accepts IMPORT_SHARED / IMPORT_COPY / DEFAULT). Rewrite to
+            // IMPORT_SHARED before importing: the runtime then maps the shared
+            // native handle directly (true zero-copy) and backfills the
+            // resulted flag — IMPORT_SHARED if it shared, IMPORT_COPY if it
+            // had to fall back. Without this rewrite ImportFrameSurface -4's.
+            //
+            // Copy the header to a stack-local struct first: the exported
+            // header is the decoder's refcounted mfxSurfaceVAAPI object, and
+            // mutating its flags in place would corrupt the decoder's view
+            // (and break a later re-import of the same header). The runtime's
+            // import path only reads the header fields — it does not AddRef or
+            // Release the import header itself — so a plain copy is safe.
+            mfxSurfaceVAAPI importCopy{};
+            importCopy.SurfaceInterface.Header = *header;
+            importCopy.SurfaceInterface.Header.SurfaceFlags =
+                MFX_SURFACE_FLAG_IMPORT_SHARED;
+            // Copy the VA handles (vaDisplay / vaSurfaceID) from the exported
+            // mfxSurfaceVAAPI. The header pointer above is the first member of
+            // an mfxSurfaceVAAPI, so reinterpret to reach the VA fields.
+            {
+                auto src = reinterpret_cast<mfxSurfaceVAAPI*>(
+                    input.device.vplExportedHeader);
+                importCopy.vaDisplay = src->vaDisplay;
+                importCopy.vaSurfaceID = src->vaSurfaceID;
+            }
+            mfxSurfaceHeader* importHeader =
+                reinterpret_cast<mfxSurfaceHeader*>(&importCopy);
+            sts = memIface->ImportFrameSurface(memIface,
+                MFX_SURFACE_COMPONENT_ENCODE, importHeader, &surf);
+            if (sts != MFX_ERR_NONE || !surf) {
+                std::cerr << "QSVEncoder: ImportFrameSurface failed: "
+                          << sts << "\n";
+                return false;
+            }
+            importedSurface = true;
+        } else {
+            // Host path: stage the NV12 pixels into a runtime-allocated encode
+            // surface.
+            sts = runtime.getSurfaceForEncode(s, &surf);
+            if (sts != MFX_ERR_NONE) {
+                std::cerr << "QSVEncoder: GetSurfaceForEncode failed: "
+                          << sts << "\n";
+                return false;
+            }
+            sts = surf->FrameInterface->Map(surf, MFX_MAP_WRITE);
+            if (sts != MFX_ERR_NONE) {
+                std::cerr << "QSVEncoder: surface Map failed: " << sts << "\n";
+                surf->FrameInterface->Release(surf);
+                return false;
+            }
+            mfxStatus fillSts = FillSurfaceFromFrame(surf, input);
+            mfxStatus unmapSts = surf->FrameInterface->Unmap(surf);
+            if (fillSts != MFX_ERR_NONE) {
+                std::cerr << "QSVEncoder: input frame incompatible: "
+                          << fillSts << "\n";
+                surf->FrameInterface->Release(surf);
+                return false;
+            }
+            if (unmapSts != MFX_ERR_NONE) {
+                std::cerr << "QSVEncoder: surface Unmap failed: "
+                          << unmapSts << "\n";
+                surf->FrameInterface->Release(surf);
+                return false;
+            }
         }
 
-        mfxBitstream* bs = nullptr;
         {
             std::lock_guard<std::mutex> lk(mu);
             // Keep the pipeline bounded: if too many submissions are in flight,
@@ -267,10 +353,13 @@ public:
             }
             bs = nextBitstreamLocked();
         }
-        mfxSyncPoint syncp{};
         sts = runtime.encodeFrameAsync(s, surf, bs, &syncp);
         // The encoder holds its own reference once submitted; release ours.
+        // For the imported (zero-copy) surface this drops the import-side ref;
+        // the underlying shared memory stays alive via the decoder's exported
+        // header until the caller Releases the CodecFrame.
         surf->FrameInterface->Release(surf);
+        (void)importedSurface;
 
         if (sts == MFX_ERR_NONE) {
             std::lock_guard<std::mutex> lk(mu);
@@ -364,6 +453,14 @@ bool QSVEncoder::Initialize(const CodecParams& params) {
         return false;
     }
     impl_ = new Impl;
+    impl_->zeroCopy = params.zeroCopy;
+    // QSV zero-copy requires the encode session to share the decode session's
+    // VADisplay: the exported surface carries the decoder's vaDisplay, and
+    // ImportFrameSurface rejects (-4) any surface whose vaDisplay != the encode
+    // session's own VADisplay. The decoder propagates its VADisplay via
+    // CodecParams::sharedDeviceHandle (an opaque void*); SetHandle it before
+    // Init so CheckOrInitDisplay() reuses it instead of opening its own.
+    impl_->vaDisplay = params.sharedDeviceHandle;
     if (!impl_->runtime.init()) {
         delete impl_;
         impl_ = nullptr;
@@ -373,6 +470,38 @@ bool QSVEncoder::Initialize(const CodecParams& params) {
         delete impl_;
         impl_ = nullptr;
         return false;
+    }
+    // Share the decode session's VADisplay immediately after session creation
+    // (zero-copy only) — before encodeQuery/encodeInit. Those touch the core,
+    // whose GetHWType() lazily inits the session's own VADisplay via
+    // CheckOrInitDisplay(); once that runs, SetHandle refuses with -16
+    // (MFX_ERR_UNDEFINED_BEHAVIOR). Sharing the decoder's VADisplay is required
+    // for ImportFrameSurface: the imported surface's vaDisplay must equal the
+    // encode session's own, else -4.
+    if (impl_->zeroCopy) {
+        if (!impl_->vaDisplay) {
+            std::cerr << "QSVEncoder: zero-copy requested but no shared "
+                         "VADisplay in CodecParams (decoder did not propagate "
+                         "MFX_HANDLE_VA_DISPLAY)\n";
+            delete impl_;
+            impl_ = nullptr;
+            return false;
+        }
+        // The decode session's VADisplay must be set on this fresh encode
+        // session before any core call (encodeQuery/encodeInit) — those touch
+        // the core, whose GetHWType() lazily inits the session's own VADisplay
+        // via CheckOrInitDisplay(); once that runs, SetHandle refuses (-16).
+        // Sharing the decoder's VADisplay is required for ImportFrameSurface:
+        // the imported surface's vaDisplay must equal the encode session's own.
+        mfxStatus sh = impl_->runtime.setHandle(impl_->session,
+            MFX_HANDLE_VA_DISPLAY, impl_->vaDisplay);
+        if (sh != MFX_ERR_NONE) {
+            std::cerr << "QSVEncoder: SetHandle(VA_DISPLAY) failed: "
+                      << sh << std::endl;
+            delete impl_;
+            impl_ = nullptr;
+            return false;
+        }
     }
 
     mfxVideoParam& par = impl_->par;
@@ -424,7 +553,12 @@ bool QSVEncoder::Initialize(const CodecParams& params) {
     par.mfx.FrameInfo.FrameRateExtD = ec.frameRateDen > 0
         ? static_cast<mfxU16>(ec.frameRateDen) : 1;
     par.mfx.FrameInfo.PicStruct = MFX_PICSTRUCT_PROGRESSIVE;
-    par.IOPattern = MFX_IOPATTERN_IN_SYSTEM_MEMORY;
+    // IN_VIDEO_MEMORY for the zero-copy path (frames arrive as device
+    // surfaces); IN_SYSTEM_MEMORY for the host path (frames arrive as CPU
+    // buffers and are memcpy'd into a runtime-allocated surface).
+    par.IOPattern = impl_->zeroCopy
+        ? MFX_IOPATTERN_IN_VIDEO_MEMORY
+        : MFX_IOPATTERN_IN_SYSTEM_MEMORY;
 
     // Validate / clamp parameters against what the implementation supports.
     // MFX_WRN_INCOMPATIBLE_VIDEO_PARAM is benign: the encoder adjusts the
@@ -447,6 +581,24 @@ bool QSVEncoder::Initialize(const CodecParams& params) {
         impl_ = nullptr;
         return false;
     }
+    // Fetch the memory interface once for the zero-copy ImportFrameSurface
+    // path. Only meaningful in zero-copy mode, but fetching unconditionally
+    // would also be harmless; gate it to surface a clear error if the runtime
+    // lacks GetHandle while zero-copy was requested.
+    if (impl_->zeroCopy) {
+        mfxHDL hdl = nullptr;
+        sts = impl_->runtime.getHandle(impl_->session,
+                                       MFX_HANDLE_MEMORY_INTERFACE, &hdl);
+        if (sts != MFX_ERR_NONE || !hdl) {
+            std::cerr << "QSVEncoder: GetHandle(MEMORY_INTERFACE) failed: "
+                      << sts << " (zero-copy requires libvpl >= 2.10)"
+                      << std::endl;
+            delete impl_;
+            impl_ = nullptr;
+            return false;
+        }
+        impl_->memIface = static_cast<mfxMemoryInterface*>(hdl);
+    }
 
     impl_->bsPool.resize(kBitstreamPool);
     for (auto& bs : impl_->bsPool) {
@@ -462,7 +614,8 @@ bool QSVEncoder::Initialize(const CodecParams& params) {
     impl_->inited = true;
     impl_->startWorker();
     std::cout << "QSVEncoder: async session up, codec=" << params.codec << " "
-              << params.width << "x" << params.height << std::endl;
+              << params.width << "x" << params.height
+              << (impl_->zeroCopy ? " (zero-copy)" : "") << std::endl;
     return true;
 }
 

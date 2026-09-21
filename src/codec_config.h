@@ -44,6 +44,12 @@ struct CodecParams {
     std::vector<uint8_t> extradata;   // optional codec extradata (e.g. H264 SPS/PPS)
     EncodeConfig encode;              // encoder tuning (decoders ignore this)
     bool zeroCopy = false;            // decoder: keep frames in device memory (opt-in per backend)
+    // Opaque device-shared handle propagated from a producing decoder to a
+    // consuming encoder when zeroCopy is on. For QSV this is the decode
+    // session's VADisplay (MFX_HANDLE_VA_DISPLAY); the encoder SetHandle's it
+    // before Init so ImportFrameSurface matches the imported surface's
+    // vaDisplay. Stored as void* so codec_config.h stays vendor-header-free.
+    void* sharedDeviceHandle = nullptr;
 };
 
 } // namespace halcodec

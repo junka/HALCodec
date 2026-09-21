@@ -3,6 +3,7 @@
 #include <condition_variable>
 #include <cstdlib>
 #include <cstring>
+#include <memory>
 #include <iostream>
 #include <mutex>
 #include <queue>
@@ -10,6 +11,12 @@
 
 #include "qsv_common.h"
 #include "registry.h"
+
+// ONEVPL_EXPERIMENTAL (defined via CMake) gates mfxFrameSurfaceInterface::Export
+// and the mfxSurfaceVAAPI concrete struct. It must be defined before <vpl/mfx.h>
+// is included (via qsv_common.h) so the Export vtable slot exists in the layout.
+// The flag is a compile-time header gate only — the runtime exports the
+// function regardless on libvpl >= 2.10.
 
 namespace halcodec {
 namespace qsv {
@@ -46,6 +53,78 @@ uint8_t* CopyNV12(const mfxFrameSurface1* surf) {
     return dst;
 }
 
+// Downloads a FrameLocality::OneVPLSurface frame to host memory by importing
+// the exported mfxSurfaceHeader* back into a session (as a DECODE-component
+// surface — any component that supports read works) and Map'ing it. Used by
+// DownloadToHost when a consumer needs CPU pixels (hal_dec writing .yuv). The
+// device-frame encoder path does NOT call this — it ImportFrameSurface's into
+// its own encode session instead.
+//
+// On success: f.data is a malloc'd tight NV12 buffer (release wired), f.size
+// and f.strides set, locality flipped to Host, and the exported header is
+// Released (the host buffer is now the sole owner of the pixels). Returns false
+// on any failure (f left untouched).
+bool DownloadVPLSurfaceToHost(const QSVRuntime& rt, mfxSession sess,
+                              CodecFrame& f) {
+    mfxHDL hdl = nullptr;
+    mfxStatus sts = rt.getHandle(sess, MFX_HANDLE_MEMORY_INTERFACE, &hdl);
+    if (sts != MFX_ERR_NONE || !hdl) {
+        std::cerr << "QSVDecoder: GetHandle(MEMORY_INTERFACE) failed: "
+                  << sts << "\n";
+        return false;
+    }
+    mfxMemoryInterface* memIface = static_cast<mfxMemoryInterface*>(hdl);
+    mfxSurfaceHeader* header =
+        static_cast<mfxSurfaceHeader*>(f.device.vplExportedHeader);
+    mfxFrameSurface1* imported = nullptr;
+    // DECODE component gives read access; ENCODE/VPP_INPUT are the other
+    // import-capable components. For a pure download, DECODE suffices.
+    sts = memIface->ImportFrameSurface(memIface, MFX_SURFACE_COMPONENT_DECODE,
+                                       header, &imported);
+    if (sts != MFX_ERR_NONE || !imported) {
+        std::cerr << "QSVDecoder: ImportFrameSurface failed: " << sts << "\n";
+        return false;
+    }
+    mfxFrameSurfaceInterface* fi = imported->FrameInterface;
+    sts = fi->Synchronize(imported, kSyncTimeoutMs);
+    if (sts == MFX_WRN_IN_EXECUTION) {
+        // retry once with a longer wait
+        sts = fi->Synchronize(imported, 5000);
+    }
+    if (sts != MFX_ERR_NONE) {
+        std::cerr << "QSVDecoder: imported Synchronize failed: " << sts << "\n";
+        fi->Release(imported);
+        return false;
+    }
+    sts = fi->Map(imported, MFX_MAP_READ);
+    if (sts != MFX_ERR_NONE) {
+        std::cerr << "QSVDecoder: imported Map failed: " << sts << "\n";
+        fi->Release(imported);
+        return false;
+    }
+    uint8_t* host = CopyNV12(imported);
+    fi->Unmap(imported);
+    fi->Release(imported);
+    if (!host) {
+        return false;
+    }
+    // Flip to host. Release the exported header now that we have a private
+    // host copy; the import above did not take ownership of the header's
+    // refcount (ImportFrameSurface AddRef's internally and the imported
+    // surface's Release balances that).
+    mfxSurfaceInterface* siface =
+        reinterpret_cast<mfxSurfaceInterface*>(header);
+    siface->Release(siface);
+    f.data = host;
+    f.size = static_cast<size_t>(f.width) * f.height * 3 / 2;
+    f.strides[0] = static_cast<size_t>(f.width);
+    f.locality = FrameLocality::Host;
+    f.device.vplExportedHeader = nullptr;
+    uint8_t* owned = host;
+    f.release = [owned]() { std::free(owned); };
+    return true;
+}
+
 } // namespace
 
 // PIMPL keeps the libvpl session handle, the worker thread, and the
@@ -64,6 +143,19 @@ public:
     bool inited = false;     // decodeInit succeeded
     bool headerParsed = false;
     mfxU32 codecId = 0;
+    // -z/--zero-copy: GetFrame() hands out the decoded surface's Exported
+    // mfxSurfaceHeader* as a FrameLocality::OneVPLSurface frame (no Map/Copy
+    // to host). The exported header is a runtime-owned, refcounted object; the
+    // frame's release callback decrements it. Consumers either feed it to a
+    // device-frame encoder (qsvenc) via ImportFrameSurface or call
+    // DownloadToHost() on demand.
+    bool zeroCopy = false;
+    // The decode session's VADisplay (MFX_HANDLE_VA_DISPLAY), fetched once after
+    // decodeInit. In zero-copy mode each OneVPLSurface frame carries this so the
+    // encode session can SetHandle it before Init — required for the imported
+    // surface's vaDisplay to match the encode session's own VADisplay (otherwise
+    // ImportFrameSurface returns -4 on a VAAPI display mismatch).
+    void* vaDisplay = nullptr;
 
     // Working bitstream. FillInput appends into the tail; the worker compacts
     // and consumes from DataOffset.
@@ -133,7 +225,13 @@ public:
                 compactLocked();
                 mfxVideoParam par{};
                 par.mfx.CodecId = codecId;
-                par.IOPattern = MFX_IOPATTERN_OUT_SYSTEM_MEMORY;
+                // VIDEO_MEMORY keeps decoded frames in device memory (the QSV
+                // zero-copy path); SYSTEM_MEMORY lets the runtime stage them
+                // for CPU Map (the host path). The header is re-parsed into
+                // the same par the worker later Init's with.
+                par.IOPattern = zeroCopy
+                    ? MFX_IOPATTERN_OUT_VIDEO_MEMORY
+                    : MFX_IOPATTERN_OUT_SYSTEM_MEMORY;
                 mfxStatus sts = runtime.decodeHeader(session, &bs, &par);
                 if (sts == MFX_ERR_MORE_DATA) {
                     if (eof) {
@@ -159,6 +257,17 @@ public:
                     }
                     inited = true;
                     headerParsed = true;
+                    // Cache the decode session's VADisplay for the zero-copy
+                    // path: the exported surface's vaDisplay is this handle,
+                    // and the encode session must SetHandle the same value
+                    // before its Init so import succeeds.
+                    if (zeroCopy) {
+                        mfxHDL vhdl = nullptr;
+                        if (runtime.getHandle(session,
+                                MFX_HANDLE_VA_DISPLAY, &vhdl) == MFX_ERR_NONE) {
+                            vaDisplay = vhdl;
+                        }
+                    }
                     cvFrames.notify_all();
                 }
             }
@@ -242,6 +351,15 @@ public:
                 fi->Release(p.surf);
                 continue;
             }
+            if (zeroCopy) {
+                if (!pushZeroCopyFrameLocked(p.surf, fi)) {
+                    fi->Release(p.surf);
+                }
+                // pushZeroCopyFrameLocked AddRef+Export'd the surface; the
+                // Export produced an independent refcounted header, so we still
+                // drop our reference on the original mfxFrameSurface1 here.
+                continue;
+            }
             sts = fi->Map(p.surf, MFX_MAP_READ);
             if (sts != MFX_ERR_NONE) {
                 fi->Release(p.surf);
@@ -254,8 +372,15 @@ public:
             frame.size = static_cast<size_t>(frame.width) * frame.height * 3 / 2;
             frame.strides[0] = static_cast<size_t>(frame.width);
             frame.data = CopyNV12(p.surf);
-            uint8_t* owned = frame.data;
-            frame.release = [owned]() { std::free(owned); };
+            // Wrap the malloc'd buffer in a shared_ptr so that copies of the
+            // CodecFrame (e.g. the encoder's async input queue holding a copy
+            // while the caller also holds one) don't double-free: each copy's
+            // release decrements the shared count, and the last one frees.
+            // Without this, hal_transcode's "release as soon as queued" path
+            // raced the encoder worker and double-freed the buffer.
+            auto owned = std::shared_ptr<uint8_t>(
+                static_cast<uint8_t*>(frame.data), std::free);
+            frame.release = [owned]() { /* freed when `owned` drops last ref */ };
             fi->Unmap(p.surf);
             fi->Release(p.surf);
             if (frame.data) {
@@ -264,6 +389,66 @@ public:
         }
         pending.clear();
         cvFrames.notify_all();
+    }
+
+    // Zero-copy drain: AddRef the decoded surface (keep it alive past the
+    // runtime's internal reuse), Export it to an opaque refcounted
+    // mfxSurfaceHeader*, then drop our AddRef — the exported header carries its
+    // own reference. The frame's release callback Releases the exported header.
+    // Returns true if a frame was pushed. Caller holds mu.
+    bool pushZeroCopyFrameLocked(mfxFrameSurface1* surf,
+                                 mfxFrameSurfaceInterface* fi) {
+        // AddRef so Export (and any in-flight runtime reuse) can't free the
+        // surface out from under the exported handle. Export itself does not
+        // AddRef the source; it produces an independent refcounted object that
+        // keeps the underlying resource alive.
+        if (fi->AddRef(surf) != MFX_ERR_NONE) {
+            return false;
+        }
+        // Export descriptor: ask for a shared (zero-copy) VA-API export. The
+        // runtime fills SurfaceFlags with the actual mode on success — if it
+        // could not share, it may have copied (EXPORT_COPY). Either way the
+        // returned header is what the encode side imports.
+        mfxSurfaceHeader req{};
+        req.SurfaceType = MFX_SURFACE_TYPE_VAAPI;
+        req.SurfaceFlags = MFX_SURFACE_FLAG_EXPORT_SHARED;
+        mfxSurfaceHeader* exported = nullptr;
+        mfxStatus sts = fi->Export(surf, req, &exported);
+        // We AddRef'd solely to protect the Export; now that Export has
+        // returned (success or failure), the exported header (if any) holds
+        // its own ref, so drop ours on the source surface.
+        fi->Release(surf);
+        if (sts != MFX_ERR_NONE || !exported) {
+            std::cerr << "QSVDecoder: surface Export failed: " << sts << "\n";
+            return false;
+        }
+        CodecFrame frame;
+        frame.width = surf->Info.CropW;
+        frame.height = surf->Info.CropH;
+        frame.format = PixelFormat::NV12;
+        frame.size = 0;  // device-resident; host size unknown until downloaded
+        frame.locality = FrameLocality::OneVPLSurface;
+        frame.device.vplExportedHeader = exported;
+        frame.device.vplVaDisplay = vaDisplay;
+        // The exported mfxSurfaceHeader is actually the first member of an
+        // mfxSurfaceInterface (Header), so its Release is reached via the
+        // mfxSurfaceInterface vtable starting at the same pointer.
+        //
+        // The CodecFrame is copied across the decode->encode async boundary
+        // (queued into the encoder's inFrames, then released by both the
+        // encoder worker AND the transcode loop after FillFrame returns). To
+        // survive that double release without a use-after-free on the
+        // refcounted runtime object, wrap the Release in a shared_ptr: the
+        // underlying mfxSurfaceInterface->Release fires exactly once, when the
+        // last copy drops. Mirrors the host-path shared_ptr fix.
+        mfxSurfaceInterface* siface =
+            reinterpret_cast<mfxSurfaceInterface*>(exported);
+        auto guard = std::shared_ptr<void>(nullptr, [siface](void*) {
+            siface->Release(siface);
+        });
+        frame.release = [guard]() { /* Release on last drop */ };
+        frames.push(std::move(frame));
+        return true;
     }
 
     ~Impl() {
@@ -300,6 +485,7 @@ bool QSVDecoder::Initialize(const CodecParams& params) {
         return false; // already initialized
     }
     impl_ = new Impl;
+    impl_->zeroCopy = params.zeroCopy;
     if (!impl_->runtime.init()) {
         delete impl_;
         impl_ = nullptr;
@@ -320,10 +506,27 @@ bool QSVDecoder::Initialize(const CodecParams& params) {
         return false;
     }
     impl_->bs.CodecId = impl_->codecId;
+    // In zero-copy mode, register a download hook so consumers that only
+    // understand host memory (e.g. hal_dec writing a .yuv) can materialize the
+    // pixels by ImportFrameSurface-ing the exported header back into this
+    // decode session and Map'ing it. The hook checks FrameLocality::OneVPLSurface
+    // and returns false otherwise, so it coexists with other backends' hooks.
+    if (impl_->zeroCopy) {
+        QSVRuntime* rt = &impl_->runtime;
+        mfxSession sess = impl_->session;
+        RegisterVPLSurfaceDownload([rt, sess](CodecFrame& f) -> bool {
+            if (f.locality != FrameLocality::OneVPLSurface ||
+                !f.device.vplExportedHeader) {
+                return false;
+            }
+            return DownloadVPLSurfaceToHost(*rt, sess, f);
+        });
+    }
     // The worker lazily parses the header (DecodeHeader) once FillInput has
     // delivered enough data, then calls decodeInit and begins decoding.
     impl_->startWorker();
-    std::cout << "QSVDecoder: async session up, codec=" << params.codec << std::endl;
+    std::cout << "QSVDecoder: async session up, codec=" << params.codec
+              << (impl_->zeroCopy ? " (zero-copy)" : "") << std::endl;
     return true;
 }
 

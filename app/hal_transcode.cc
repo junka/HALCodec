@@ -107,6 +107,11 @@ int main(int argc, char* argv[]) {
     halcodec::CodecParams eparams;
     eparams.codec = cli.getCodec();
     eparams.deviceIndex = cli.getGpuIndex();
+    // Mirror the decoder's zero-copy selection onto the encoder: a OneVPLSurface
+    // decoded frame can only be fed directly (no host memcpy) to an encoder
+    // initialized for video-memory input. When -z is off the encoder takes the
+    // host path (IN_SYSTEM_MEMORY).
+    eparams.zeroCopy = cli.getZeroCopy();
     if (cli.getFormat() == "yuv444") {
         eparams.inputFormat = halcodec::PixelFormat::YUV444P;
     } else if (cli.getFormat() == "p010" || cli.getFormat() == "p016") {
@@ -162,6 +167,14 @@ int main(int argc, char* argv[]) {
             eparams.height = f.height;
             if (eparams.inputFormat == halcodec::PixelFormat::Unknown) {
                 eparams.inputFormat = f.format;
+            }
+            // Propagate the decoder's shared device handle (QSV: VADisplay) so
+            // the encoder can SetHandle it before Init — required for the
+            // zero-copy ImportFrameSurface to match the imported surface's
+            // vaDisplay.
+            if (eparams.zeroCopy &&
+                f.locality == halcodec::FrameLocality::OneVPLSurface) {
+                eparams.sharedDeviceHandle = f.device.vplVaDisplay;
             }
             if (!enc->Initialize(eparams)) {
                 std::cerr << "Fail to initialize encoder backend" << std::endl;
@@ -225,8 +238,13 @@ int main(int argc, char* argv[]) {
     drain();
 
     fpout.close();
-    dec->Finalize();
+    // Teardown order matters for zero-copy: the encoder shares the decoder's
+    // VADisplay (SetHandle'd before encodeInit). The encoder must be finalized
+    // first so its VA buffers/surfaces are freed while the VADisplay is still
+    // live; finalizing the decoder first would vaTerminate the shared display
+    // out from under the encoder's teardown and crash in vaDestroyBuffer.
     enc->Finalize();
+    dec->Finalize();
 
     // Report the locality split: a zero-copy run that silently fell back to
     // host frames would produce byte-identical output and look like a pass.
