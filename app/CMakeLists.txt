@@ -18,6 +18,13 @@ add_executable(hal_session hal_session.cc parse_cli.h)
 
 add_executable(hal_transcode hal_transcode.cc parse_cli.h)
 
+# hal_camera_v4l2: USB/UVC V4L2 camera → QSV encode on x86. Linux-only (uses
+# <linux/videodev2.h>); links like hal_enc (no SIPL/NvMedia deps), so it builds
+# on any Linux target regardless of GPU vendor — the QSV backend is dlopen'd.
+if(CMAKE_SYSTEM_NAME STREQUAL "Linux")
+    add_executable(hal_camera_v4l2 hal_camera_v4l2.cc parse_cli.h)
+endif()
+
 # hal_camera: DRIVE-OS (aarch64) SIPL camera -> nvmediaenc zero-copy encode.
 # Only built when the NvMedia DRIVE-OS SDK is present (same condition as
 # nvmedia_layers in the top-level CMakeLists) and we are cross-compiling for
@@ -59,6 +66,9 @@ target_link_libraries(codecinfo PUBLIC halcodec_core Boost::program_options ${CM
 target_link_libraries(hal_dec PUBLIC halcodec_core Boost::program_options ${CMAKE_DL_LIBS})
 target_link_libraries(hal_session PUBLIC halcodec_core Boost::program_options ${CMAKE_DL_LIBS})
 target_link_libraries(hal_transcode PUBLIC halcodec_core Boost::program_options ${CMAKE_DL_LIBS})
+if(TARGET hal_camera_v4l2)
+    target_link_libraries(hal_camera_v4l2 PUBLIC halcodec_core Boost::program_options ${CMAKE_DL_LIBS})
+endif()
 
 # Stage backend shared libraries (*_layers.so / *_layers.dylib) next to the
 # executables so plugin_loader's ExeDir() search finds them in the build tree.
@@ -83,7 +93,7 @@ endif()
 if(TARGET nvmedia_layers)
     list(APPEND _halcodec_backends nvmedia_layers)
 endif()
-foreach(_tgt hal_enc codecinfo hal_dec hal_session hal_transcode hal_camera)
+foreach(_tgt hal_enc codecinfo hal_dec hal_session hal_transcode hal_camera hal_camera_v4l2)
     if(NOT TARGET ${_tgt})
         continue()
     endif()

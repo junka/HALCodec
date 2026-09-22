@@ -55,7 +55,18 @@ public:
                 ("sipl-platform", po::value<std::string>(&siplPlatform_),
                  "hal_camera: SIPL platform config name (empty = first from the built-in DB).")
                 ("sipl-db", po::value<std::string>(&siplDb_),
-                 "hal_camera: path to a SIPL platform JSON DB (empty = built-in ParseDatabase).");
+                 "hal_camera: path to a SIPL platform JSON DB (empty = built-in ParseDatabase).")
+                // hal_camera_v4l2-only flags. V4L2 USB/UVC camera -> QSV encode on x86.
+                ("device", po::value<std::string>(&v4l2Device_)->default_value("/dev/video0"),
+                 "hal_camera_v4l2: V4L2 capture device node.")
+                ("input-format", po::value<std::string>(&v4l2InputFormat_)->default_value("yuyv"),
+                 "hal_camera_v4l2: V4L2 pixel format to negotiate (yuyv|mjpg).")
+                ("capture-width", po::value<int>(&v4l2Width_)->default_value(640),
+                 "hal_camera_v4l2: capture width (must be supported by the device).")
+                ("capture-height", po::value<int>(&v4l2Height_)->default_value(480),
+                 "hal_camera_v4l2: capture height (must be supported by the device).")
+                ("capture-fps", po::value<int>(&v4l2Fps_)->default_value(30),
+                 "hal_camera_v4l2: requested capture frame rate.");
 
             // Parse the command line
             po::variables_map vm;
@@ -127,6 +138,13 @@ public:
     const std::string& getSiplPlatform() const { return siplPlatform_; }
     const std::string& getSiplDb() const { return siplDb_; }
 
+    // hal_camera_v4l2-only options.
+    const std::string& getV4l2Device() const { return v4l2Device_; }
+    const std::string& getV4l2InputFormat() const { return v4l2InputFormat_; }
+    int getV4l2Width() const { return v4l2Width_; }
+    int getV4l2Height() const { return v4l2Height_; }
+    int getV4l2Fps() const { return v4l2Fps_; }
+
 private:
     std::vector<std::string> inputFiles_;
     std::string outputFile_;
@@ -161,6 +179,13 @@ private:
     int durationFrames_ = 0;
     std::string siplPlatform_;
     std::string siplDb_;
+
+    // hal_camera_v4l2-only.
+    std::string v4l2Device_ = "/dev/video0";
+    std::string v4l2InputFormat_ = "yuyv";
+    int v4l2Width_ = 640;
+    int v4l2Height_ = 480;
+    int v4l2Fps_ = 30;
 };
 
 #endif // PARSE_CLI_H
