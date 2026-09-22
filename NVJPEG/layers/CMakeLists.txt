@@ -10,7 +10,7 @@ if ( CMAKE_COMPILER_IS_GNUCC )
     endif()
 endif()
 
-set(NVJPEG_SRC nvjpegdecoder.cc nvjpegencoder.cc)
+set(NVJPEG_SRC nvjpegdecoder.cc nvjpegencoder.cc nvjpeg_caps.cc)
 
 add_library(nvjpeg_layers SHARED ${NVJPEG_SRC})
 target_link_libraries(nvjpeg_layers PUBLIC halcodec_core nvjpeg cudart)
