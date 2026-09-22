@@ -88,7 +88,10 @@ std::string AMFEncoder::getName() const {
     return "amfenc";
 }
 
-HALCODEC_CONNECT(Encoder, amfenc, AMFEncoder);
+// 数据通路未实现(FillFrame/GetFrame 均为 TODO),先不注册,否则 hal_*
+// 默认 encoder backend 会静默选中空壳编码器输出 0 帧。caps 仍注册。
+// 数据通路落地后再放开。
+// HALCODEC_CONNECT(Encoder, amfenc, AMFEncoder);
 
 } // namespace amd
 } // namespace halcodec
