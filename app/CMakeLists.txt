@@ -8,6 +8,10 @@ endif()
 find_package(Boost REQUIRED COMPONENTS program_options)
 include_directories(${Boost_INCLUDE_DIRS})
 
+# camera_source_av.mm 是 Objective-C++(AVFoundation 仅 macOS)。
+set(CMAKE_OBJCXX_STANDARD 17)
+set(CMAKE_OBJCXX_STANDARD_REQUIRED ON)
+
 add_executable(hal_enc hal_enc.cc)
 
 add_executable(codecinfo codecinfo.cc)
@@ -18,38 +22,54 @@ add_executable(hal_session hal_session.cc parse_cli.h)
 
 add_executable(hal_transcode hal_transcode.cc parse_cli.h)
 
-# hal_camera_v4l2: USB/UVC V4L2 camera → QSV encode on x86. Linux-only (uses
-# <linux/videodev2.h>); links like hal_enc (no SIPL/NvMedia deps), so it builds
-# on any Linux target regardless of GPU vendor — the QSV backend is dlopen'd.
-if(CMAKE_SYSTEM_NAME STREQUAL "Linux")
-    add_executable(hal_camera_v4l2 hal_camera_v4l2.cc parse_cli.h)
-endif()
+# hal_cam:统一相机→编码应用(归并 hal_camera/hal_camera_v4l2)。源实现按平台
+# 编译,逐源打 HAL_CAM_HAVE_* 宏,hal_cam.cc 据此路由 --source:
+#   camera_source_sipl.cc  aarch64 + NVMEDIA_DRIVE_SDK_DIR(SIPL 直接链接)
+#   camera_source_v4l2.cc  Linux(需 <linux/videodev2.h>)
+#   camera_source_av.mm    APPLE(AVFoundation,ObjC++),链系统框架
+add_executable(hal_cam hal_cam.cc camera_source_factory.h)
 
-# hal_camera: DRIVE-OS (aarch64) SIPL camera -> nvmediaenc zero-copy encode.
-# Only built when the NvMedia DRIVE-OS SDK is present (same condition as
-# nvmedia_layers in the top-level CMakeLists) and we are cross-compiling for
-# aarch64. It links SIPL directly (NvSIPLCamera is a C++ API, not dlopen'd),
-# so this target is absent on x86/macOS builds.
+if(CMAKE_SYSTEM_NAME STREQUAL "Linux")
+    target_sources(hal_cam PRIVATE camera_source_v4l2.cc)
+    target_compile_definitions(hal_cam PRIVATE HAL_CAM_HAVE_V4L2=1)
+elseif(APPLE)
+    enable_language(OBJCXX)
+    find_library(FOUNDATION_FRAMEWORK Foundation REQUIRED)
+    find_library(AV_FRAMEWORK AVFoundation REQUIRED)
+    find_library(CORE_FOUNDATION_FRAMEWORK CoreFoundation REQUIRED)
+    find_library(CORE_MEDIA_FRAMEWORK CoreMedia REQUIRED)
+    find_library(CORE_VIDEO_FRAMEWORK CoreVideo REQUIRED)
+    target_sources(hal_cam PRIVATE camera_source_av.mm)
+    # ObjC++ + ARC:delegate 与 session 对象由 ARC 管理,CF 类型仍手动。
+    set_source_files_properties(camera_source_av.mm PROPERTIES
+        LANGUAGE OBJCXX COMPILE_OPTIONS "-fobjc-arc")
+    target_compile_definitions(hal_cam PRIVATE HAL_CAM_HAVE_AV=1)
+    target_link_libraries(hal_cam PUBLIC
+        ${FOUNDATION_FRAMEWORK}
+        ${AV_FRAMEWORK}
+        ${CORE_FOUNDATION_FRAMEWORK}
+        ${CORE_MEDIA_FRAMEWORK}
+        ${CORE_VIDEO_FRAMEWORK})
+endif()
+# SIPL 源:aarch64 + DRIVE-OS SDK 存在时启用(条件与顶层 NvMedia 相同)。
 if(NVMEDIA_DRIVE_SDK_DIR AND CMAKE_SYSTEM_PROCESSOR MATCHES "aarch64|arm64")
-    add_executable(hal_camera hal_camera.cc parse_cli.h)
-    target_include_directories(hal_camera PRIVATE
-            ${NVMEDIA_INCLUDE_DIR}
-            ${NVMEDIA_INCLUDE_6X_DIR})
-    target_compile_definitions(hal_camera PRIVATE
-            NVMEDIA_NVSCI_ENABLE
-            NV_IS_SAFETY=0)
+    target_sources(hal_cam PRIVATE camera_source_sipl.cc)
+    target_include_directories(hal_cam PRIVATE
+        ${NVMEDIA_INCLUDE_DIR}
+        ${NVMEDIA_INCLUDE_6X_DIR})
+    target_compile_definitions(hal_cam PRIVATE
+        HAL_CAM_HAVE_SIPL=1
+        NVMEDIA_NVSCI_ENABLE
+        NV_IS_SAFETY=0)
     # SIPL runtime libs live in the SDK lib-target alongside the NvMedia libs.
     # Link by absolute path (see NvMedia/layers/CMakeLists.txt for why: -l +
     # link_directories() silently drops -L under cross-compile root paths).
-    target_link_libraries(hal_camera PUBLIC
-            halcodec_core
-            Boost::program_options
-            ${CMAKE_DL_LIBS}
-            ${NVMEDIA_DRIVE_SDK_DIR}/lib-target/libnvsipl.so
-            ${NVMEDIA_DRIVE_SDK_DIR}/lib-target/libnvsipl_query.so
-            ${NVMEDIA_DRIVE_SDK_DIR}/lib-target/libnvscibuf.so
-            ${NVMEDIA_DRIVE_SDK_DIR}/lib-target/libnvscisync.so
-            ${NVMEDIA_DRIVE_SDK_DIR}/lib-target/libnvmedia_iep_sci.so)
+    target_link_libraries(hal_cam PUBLIC
+        ${NVMEDIA_DRIVE_SDK_DIR}/lib-target/libnvsipl.so
+        ${NVMEDIA_DRIVE_SDK_DIR}/lib-target/libnvsipl_query.so
+        ${NVMEDIA_DRIVE_SDK_DIR}/lib-target/libnvscibuf.so
+        ${NVMEDIA_DRIVE_SDK_DIR}/lib-target/libnvscisync.so
+        ${NVMEDIA_DRIVE_SDK_DIR}/lib-target/libnvmedia_iep_sci.so)
 endif()
 
 # Backends are loaded at runtime via dlopen (see src/plugin_loader.h) instead of
@@ -66,9 +86,7 @@ target_link_libraries(codecinfo PUBLIC halcodec_core Boost::program_options ${CM
 target_link_libraries(hal_dec PUBLIC halcodec_core Boost::program_options ${CMAKE_DL_LIBS})
 target_link_libraries(hal_session PUBLIC halcodec_core Boost::program_options ${CMAKE_DL_LIBS})
 target_link_libraries(hal_transcode PUBLIC halcodec_core Boost::program_options ${CMAKE_DL_LIBS})
-if(TARGET hal_camera_v4l2)
-    target_link_libraries(hal_camera_v4l2 PUBLIC halcodec_core Boost::program_options ${CMAKE_DL_LIBS})
-endif()
+target_link_libraries(hal_cam PUBLIC halcodec_core Boost::program_options ${CMAKE_DL_LIBS})
 
 # Stage backend shared libraries (*_layers.so / *_layers.dylib) next to the
 # executables so plugin_loader's ExeDir() search finds them in the build tree.
@@ -93,7 +111,7 @@ endif()
 if(TARGET nvmedia_layers)
     list(APPEND _halcodec_backends nvmedia_layers)
 endif()
-foreach(_tgt hal_enc codecinfo hal_dec hal_session hal_transcode hal_camera hal_camera_v4l2)
+foreach(_tgt hal_enc codecinfo hal_dec hal_session hal_transcode hal_cam)
     if(NOT TARGET ${_tgt})
         continue()
     endif()
