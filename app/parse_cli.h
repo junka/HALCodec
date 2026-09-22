@@ -58,7 +58,7 @@ public:
                  "hal_camera: path to a SIPL platform JSON DB (empty = built-in ParseDatabase).")
                 // hal_camera_v4l2-only flags. V4L2 USB/UVC camera -> QSV encode on x86.
                 ("device", po::value<std::string>(&v4l2Device_)->default_value("/dev/video0"),
-                 "hal_camera_v4l2: V4L2 capture device node.")
+                 "Camera device (v4l2: device node e.g. /dev/video0; av: camera name substring filter).")
                 ("input-format", po::value<std::string>(&v4l2InputFormat_)->default_value("yuyv"),
                  "hal_camera_v4l2: V4L2 pixel format to negotiate (yuyv|mjpg).")
                 ("capture-width", po::value<int>(&v4l2Width_)->default_value(640),
@@ -66,7 +66,12 @@ public:
                 ("capture-height", po::value<int>(&v4l2Height_)->default_value(480),
                  "hal_camera_v4l2: capture height (must be supported by the device).")
                 ("capture-fps", po::value<int>(&v4l2Fps_)->default_value(30),
-                 "hal_camera_v4l2: requested capture frame rate.");
+                 "hal_camera_v4l2: requested capture frame rate.")
+                // hal_cam-only flag. Unified camera app; selects which capture
+                // source to drive (sipl|v4l2|av). Empty = platform-native
+                // default (aarch64+DRIVE: sipl, Linux: v4l2, macOS: av).
+                ("source", po::value<std::string>(&source_),
+                 "hal_cam: camera source (sipl|v4l2|av); defaults to the platform-native source.");
 
             // Parse the command line
             po::variables_map vm;
@@ -145,6 +150,9 @@ public:
     int getV4l2Height() const { return v4l2Height_; }
     int getV4l2Fps() const { return v4l2Fps_; }
 
+    // hal_cam-only.
+    const std::string& getSource() const { return source_; }
+
 private:
     std::vector<std::string> inputFiles_;
     std::string outputFile_;
@@ -186,6 +194,9 @@ private:
     int v4l2Width_ = 640;
     int v4l2Height_ = 480;
     int v4l2Fps_ = 30;
+
+    // hal_cam-only.
+    std::string source_;
 };
 
 #endif // PARSE_CLI_H
