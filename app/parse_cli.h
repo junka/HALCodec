@@ -43,7 +43,19 @@ public:
                 ("lowdelay", po::bool_switch(&lowDelay_), "Low-delay mode (0 B-frames, short GOP)")
                 ("zero-copy,z", po::bool_switch(&zeroCopy_), "Keep decoded frames in device memory (NvMedia NvSciBuf / NVDEC CUDA) instead of copying to host; the output writer downloads on demand. Backend support is opt-in.")
                 ("metrics-interval", po::value<int>(&metricsInterval_)->default_value(1000),
-                 "Periodic metrics print interval in ms (0 = disable periodic; final summary always prints). Reports per-stream fps/bitrate/locality and whole-machine GPU utilization.");
+                 "Periodic metrics print interval in ms (0 = disable periodic; final summary always prints). Reports per-stream fps/bitrate/locality and whole-machine GPU utilization.")
+                // hal_camera-only flags. Additive with sentinel defaults so the
+                // other apps (which never read these getters) are unaffected.
+                ("num-cameras", po::value<int>(&numCameras_)->default_value(1),
+                 "hal_camera: number of SIPL sensor pipelines to start (multi-camera fan-in).")
+                ("sensor-index", po::value<int>(&sensorIndex_)->default_value(0),
+                 "hal_camera: starting sensor index for the first camera; subsequent cameras use index+1, +2, ...")
+                ("duration-frames", po::value<int>(&durationFrames_)->default_value(0),
+                 "hal_camera: stop after N frames per camera (0 = run until Ctrl-C).")
+                ("sipl-platform", po::value<std::string>(&siplPlatform_),
+                 "hal_camera: SIPL platform config name (empty = first from the built-in DB).")
+                ("sipl-db", po::value<std::string>(&siplDb_),
+                 "hal_camera: path to a SIPL platform JSON DB (empty = built-in ParseDatabase).");
 
             // Parse the command line
             po::variables_map vm;
@@ -108,6 +120,13 @@ public:
     // summary always prints). Used by hal_transcode / hal_session.
     int getMetricsInterval() const { return metricsInterval_; }
 
+    // hal_camera-only options. Other apps ignore these.
+    int getNumCameras() const { return numCameras_; }
+    int getSensorIndex() const { return sensorIndex_; }
+    int getDurationFrames() const { return durationFrames_; }
+    const std::string& getSiplPlatform() const { return siplPlatform_; }
+    const std::string& getSiplDb() const { return siplDb_; }
+
 private:
     std::vector<std::string> inputFiles_;
     std::string outputFile_;
@@ -135,6 +154,13 @@ private:
     bool lowDelay_ = false;
     bool zeroCopy_ = false;
     int metricsInterval_ = 1000;  // ms; 0 disables periodic metrics
+
+    // hal_camera-only (sentinel defaults; other apps never read these).
+    int numCameras_ = 1;
+    int sensorIndex_ = 0;
+    int durationFrames_ = 0;
+    std::string siplPlatform_;
+    std::string siplDb_;
 };
 
 #endif // PARSE_CLI_H
