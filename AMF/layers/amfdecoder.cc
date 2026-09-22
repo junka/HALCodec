@@ -107,7 +107,10 @@ std::string AMFDecoder::getName() const {
     return "amfdec";
 }
 
-HALCODEC_CONNECT(Decoder, amfdec, AMFDecoder);
+// 数据通路未实现(FillInput/GetFrame/PullFrames 均为 TODO),先不注册,
+// 否则 hal_* 默认 backend(Registry::Names().front())会静默选中空壳解码器
+// 输出 0 帧。caps 仍注册,AMD 机器能力照常展示。数据通路落地后再放开。
+// HALCODEC_CONNECT(Decoder, amfdec, AMFDecoder);
 
 } // namespace amd
 } // namespace halcodec
