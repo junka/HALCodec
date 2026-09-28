@@ -113,10 +113,8 @@ int main(int argc, char* argv[]) {
         return 2;
     }
 
-#ifndef __APPLE__
-    // Load vendor backends lazily so the binary runs without NVIDIA libs.
+    // Load vendor backends lazily so the binary runs without vendor libs.
     halcodec::LoadBackends();
-#endif
 
     std::string backend = cli.getBackend().empty() ? kDefaultDecoder
                                                    : cli.getBackend();
