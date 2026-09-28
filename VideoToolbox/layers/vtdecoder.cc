@@ -302,9 +302,15 @@ bool VTDecoder::decodeFrameAsync(uint8_t* data, size_t size) {
         return false;
     }
 
-    CMBlockBufferCustomBlockSource customBlockSource{0, nullptr,
-                                                     FreeBlockBufferData,
-                                                     nullptr};
+    // Per Apple's advice: CMBlockBufferCustomBlockSource has misaligned function
+    // pointers on 64-bit archs. Fill fields via assignment to avoid link-time
+    // alignment issues that result from brace initialization landing the struct
+    // in a const segment.
+    CMBlockBufferCustomBlockSource customBlockSource;
+    customBlockSource.version = 0;
+    customBlockSource.AllocateBlock = nullptr;
+    customBlockSource.FreeBlock = FreeBlockBufferData;
+    customBlockSource.refCon = nullptr;
     CMBlockBufferRef blockBuffer = nullptr;
     OSStatus status = CMBlockBufferCreateWithMemoryBlock(
         kCFAllocatorDefault,
