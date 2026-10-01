@@ -221,6 +221,172 @@ inline std::vector<uint8_t> ToAnnexB(const std::vector<uint8_t>& rawNal,
     return out;
 }
 
+// ---------------------------------------------------------------------------
+// HEVC helpers — same idea as the H.264 builders above but with the 2-byte
+// NAL header (forbidden_zero_bit + nal_unit_type[6] + nuh_layer_id[6] +
+// nuh_temporal_id_plus1[3]).
+// ---------------------------------------------------------------------------
+
+struct HevcSpsCfg {
+    int spsId = 0;
+    int log2MaxPocLsbMinus4 = 0;  // stored as minus-4 form for wrap testing
+    int maxNumReorderPics = 4;    // default: allow some reordering
+};
+
+// HEVC raw NAL (no start code): 2-byte header + escaped RBSP.
+inline std::vector<uint8_t> MakeHevcRawNal(int nalUnitType,
+                                           const std::vector<uint8_t>& rbsp) {
+    std::vector<uint8_t> out;
+    // forbidden_zero_bit(1) + nal_unit_type(6)
+    out.push_back(static_cast<uint8_t>((nalUnitType & 0x3F) << 1));
+    // nuh_layer_id(6) + nuh_temporal_id_plus1(3), both zero for base layer
+    out.push_back(0x01);  // temporal_id_plus1 = 1 means TID = 0
+    const std::vector<uint8_t> escaped = EscapeRbsp(rbsp);
+    out.insert(out.end(), escaped.begin(), escaped.end());
+    return out;
+}
+
+// HEVC VPS (type 32) — minimal valid syntax to satisfy VideoToolbox/POC parser.
+inline std::vector<uint8_t> MakeHevcVpsNal() {
+    BitWriter w;
+    w.u(2, 3);  // vps_video_parameter_set_id
+    w.u(1, 0);  // vps_base_layer_internal_flag
+    w.u(1, 0);  // vps_base_layer_available_flag
+    w.u(6, 0);  // vps_max_layers_minus1
+    w.u(3, 0);  // vps_max_sub_layers_minus1
+    w.u(1, 1);  // vps_timing_info_present_flag
+    w.u(32, 0); // vps_num_units_in_tick
+    w.u(32, 0); // vps_time_scale
+    w.u(1, 0);  // vps_poc_proportional_to_timing_flag
+    w.u(1, 0);  // vps_nuh_default_max_one_active_ref_pic_list_sps_flag
+    w.ue(0);    // vps_num_layer_sets_minus1
+    w.u(1, 0);  // vps_timing_info_not_present_flag
+    w.rbspTrailer();
+    return MakeHevcRawNal(32, w.bytes());
+}
+
+inline std::vector<uint8_t> MakeHevcSpsNal(const HevcSpsCfg& cfg) {
+    BitWriter w;
+    w.u(4, cfg.spsId);  // sps_video_parameter_set_id
+    w.u(3, 0);          // sps_max_sub_layers_minus1
+    w.u(1, 1);          // sps_temporal_id_nesting_flag
+    
+    // profile_tier_level (simplified: skip most fields)
+    w.u(2, 1);          // general_profile_space
+    w.u(1, 0);          // general_tier_flag
+    w.u(5, 1);          // general_profile_idc (Main)
+    w.u(32, 0);         // general_profile_compatibility_flags
+    w.u(1, 0);          // general_progressive_source_flag
+    w.u(1, 0);          // general_interlaced_source_flag
+    w.u(1, 0);          // general_non_packed_constraint_flag
+    w.u(1, 0);          // general_frame_only_constraint_flag
+    w.u(8, 0);          // general_level_idc
+    
+    w.ue(cfg.spsId);    // sps_seq_parameter_set_id
+    w.ue(1);            // chroma_format_idc (4:2:0)
+    w.u(1, 0);          // separate_colour_plane_flag
+    w.ue(19);           // pic_width_in_luma_samples (320)
+    w.ue(14);           // pic_height_in_luma_samples (240)
+    
+    w.u(1, 0);          // conformance_window_flag
+    w.ue(8);            // bit_depth_luma_minus8
+    w.ue(8);            // bit_depth_chroma_minus8
+    w.ue(cfg.log2MaxPocLsbMinus4);  // log2_max_pic_order_cnt_lsb_minus4
+    
+    // HEVC doesn't have pic_order_cnt_type like H.264; it's always type 0 equivalent
+    // Read sub-layer ordering info
+    w.u(1, 0);          // sps_sub_layer_ordering_info_present_flag
+    w.ue(0);            // sps_max_dec_pic_buffering_minus1[0]
+    w.ue(cfg.maxNumReorderPics);  // sps_max_num_reorder_pics[0]
+    w.ue(0);            // sps_max_latency_increase_plus1[0]
+    
+    w.ue(1);            // log2_min_luma_coding_block_size_minus3
+    w.ue(0);            // log2_diff_max_min_luma_coding_block_size
+    w.ue(0);            // log2_min_transform_block_size_minus2
+    w.ue(0);            // log2_diff_max_min_transform_block_size
+    w.ue(0);            // max_transform_hierarchy_depth_inter
+    w.ue(0);            // max_transform_hierarchy_depth_intra
+    
+    w.u(1, 0);          // scaling_list_enabled_flag
+    w.u(1, 0);          // amp_enabled_flag
+    w.u(1, 0);          // sample_adaptive_offset_enabled_flag
+    w.u(1, 0);          // pcm_enabled_flag
+    
+    w.ue(0);            // num_short_term_ref_pic_sets
+    w.ue(0);            // num_long_term_ref_pics_sps
+    w.u(1, 0);          // sps_temporal_mvp_enabled_flag
+    w.u(1, 0);          // strong_intra_smoothing_enabled_flag
+    
+    w.rbspTrailer();
+    return MakeHevcRawNal(33, w.bytes());
+}
+
+struct HevcPpsCfg {
+    int ppsId = 0;
+    int spsId = 0;
+};
+
+inline std::vector<uint8_t> MakeHevcPpsNal(const HevcPpsCfg& cfg) {
+    BitWriter w;
+    w.ue(cfg.ppsId);    // pps_pic_parameter_set_id
+    w.ue(cfg.spsId);    // pps_seq_parameter_set_id
+    w.u(1, 0);          // dependent_slice_segments_enabled_flag
+    w.u(1, 0);          // output_flag_present_flag
+    w.u(3, 0);          // num_extra_slice_header_bits
+    w.u(1, 0);          // sign_data_hiding_enabled_flag
+    w.u(1, 0);          // cabac_init_present_flag
+    w.ue(0);            // num_ref_idx_l0_default_active_minus1
+    w.ue(0);            // num_ref_idx_l1_default_active_minus1
+    w.se(0);            // init_qp_minus26
+    w.u(1, 0);          // constrained_intra_pred_flag
+    w.u(1, 0);          // transform_skip_enabled_flag
+    w.u(1, 0);          // cu_qp_delta_enabled_flag
+    w.ue(0);            // diff_cu_qp_delta_depth
+    w.se(0);            // pps_cb_qp_offset
+    w.se(0);            // pps_cr_qp_offset
+    w.u(1, 0);          // pps_slice_chroma_qp_offsets_present_flag
+    w.u(1, 0);          // weighted_pred_flag
+    w.u(1, 0);          // weighted_bipred_flag
+    w.u(1, 0);          // transquant_bypass_enabled_flag
+    w.u(1, 0);          // tiles_enabled_flag
+    w.u(1, 0);          // entropy_coding_sync_enabled_flag
+    
+    w.rbspTrailer();
+    return MakeHevcRawNal(34, w.bytes());
+}
+
+struct HevcSliceCfg {
+    bool firstSlice = true;
+    int64_t pocLsb = 0;
+    int nalRefIdc = 1;
+};
+
+inline std::vector<uint8_t> MakeHevcSliceNal(int nalUnitType,
+                                             const HevcSliceCfg& cfg) {
+    BitWriter w;
+    w.u(1, cfg.firstSlice ? 1 : 0);  // first_slice_segment_in_pic_flag
+    if (nalUnitType >= 16 && nalUnitType <= 23) {
+        w.u(1, 0);  // no_output_of_prior_pics_flag (IRAP only)
+    }
+    w.ue(0);        // slice_pic_parameter_set_id
+    w.u(1, 0);      // dependent_slice_segment_flag
+    
+    if (!cfg.firstSlice) {
+        w.ue(0);    // slice_segment_address
+    }
+    
+    // Skip slice_type, prediction weights, etc. — not needed for POC test
+    // Just write enough to make it parseable
+    
+    if (cfg.firstSlice) {
+        // For POC type 0, we need pic_order_cnt_lsb
+        w.u(4, static_cast<int>(cfg.pocLsb & 0xF));  // simplified: use small range
+    }
+    
+    w.rbspTrailer();
+    return MakeHevcRawNal(nalUnitType, w.bytes());
+}
+
 } // namespace haltest
 
 #endif // TESTS_H264_BITS_H_
