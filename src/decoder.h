@@ -67,6 +67,12 @@ public:
     // returns false only when decoding is definitively finished. The caller
     // owns the CodecFrame object and must invoke out.release() to free the
     // underlying buffer.
+    //
+    // Ordering: frames come back in whatever order the vendor decoder emits
+    // them. A backend fed a raw Annex-B stream has no container timing, so it
+    // cannot reorder and emits decode order (vtbox does; its CodecFrame::pts
+    // carries no display order). Callers that need presentation order must
+    // reorder themselves, e.g. from the H.264 picture order count.
     virtual bool GetFrame(CodecFrame& out) { (void)out; return false; }
 
     // Finalize the decoding process and release resources.
