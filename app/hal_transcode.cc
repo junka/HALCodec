@@ -47,6 +47,62 @@ bool ReadFile(const std::string& path, std::vector<uint8_t>* buf) {
     return static_cast<bool>(in.read(reinterpret_cast<char*>(buf->data()), size));
 }
 
+// Packs one NAL unit into AVCC layout ([len:4][nalu]...) for extradata.
+void AppendAvcc(std::vector<uint8_t>* avcc, const uint8_t* data, size_t n) {
+    avcc->push_back(static_cast<uint8_t>((n >> 24) & 0xFF));
+    avcc->push_back(static_cast<uint8_t>((n >> 16) & 0xFF));
+    avcc->push_back(static_cast<uint8_t>((n >> 8) & 0xFF));
+    avcc->push_back(static_cast<uint8_t>(n & 0xFF));
+    avcc->insert(avcc->end(), data, data + n);
+}
+
+// Scans an Annex-B H.264 stream and extracts the first SPS (type 7) and PPS
+// (type 8), packing them into AVCC extradata for decoder initialization.
+bool ExtractParameterSets(const uint8_t* data, size_t size,
+                          std::vector<uint8_t>* extradata) {
+    std::vector<uint8_t> sps, pps;
+    size_t i = 0;
+    while (i + 4 <= size) {
+        if (!(data[i] == 0 && data[i + 1] == 0 &&
+              (data[i + 2] == 1 ||
+               (i + 3 < size && data[i + 2] == 0 && data[i + 3] == 1)))) {
+            ++i;
+            continue;
+        }
+        size_t sc = (data[i + 2] == 1) ? 3 : 4;
+        size_t start = i + sc;
+        size_t j = start + 1;
+        for (; j + 4 <= size; ++j) {
+            if (data[j] != 0 || data[j + 1] != 0) continue;
+            if (data[j + 2] == 1 ||
+                (j + 3 < size && data[j + 2] == 0 && data[j + 3] == 1)) {
+                break;
+            }
+        }
+        size_t end = j;
+        if (start < size) {
+            uint8_t type = data[start] & 0x1F;
+            if (type == 7 && sps.empty()) {
+                sps.assign(data + start, data + end);
+            } else if (type == 8 && pps.empty()) {
+                pps.assign(data + start, data + end);
+            }
+        }
+        if (!sps.empty() && !pps.empty()) break;
+        i = j;
+    }
+    if (sps.empty() && pps.empty()) {
+        return false;
+    }
+    if (!sps.empty()) {
+        AppendAvcc(extradata, sps.data(), sps.size());
+    }
+    if (!pps.empty()) {
+        AppendAvcc(extradata, pps.data(), pps.size());
+    }
+    return true;
+}
+
 const char* kDefaultDecoder = "nvdec";
 const char* kDefaultEncoder = "nvenc";
 
@@ -99,6 +155,13 @@ int main(int argc, char* argv[]) {
     dparams.codec = cli.getCodec();
     dparams.deviceIndex = cli.getGpuIndex();
     dparams.zeroCopy = cli.getZeroCopy();
+    
+    // Extract SPS/PPS from the input stream for backends that need extradata
+    // (e.g. vtbox on macOS). This mirrors what hal_dec does.
+    if (dparams.codec == "h264" || dparams.codec.empty()) {
+        ExtractParameterSets(raw.data(), raw.size(), &dparams.extradata);
+    }
+    
     if (!dec->Initialize(dparams)) {
         std::cerr << "Fail to initialize decoder backend" << std::endl;
         return -1;

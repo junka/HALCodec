@@ -34,6 +34,59 @@ bool ReadFile(const std::string& path, std::vector<uint8_t>* buf) {
     return static_cast<bool>(in.read(reinterpret_cast<char*>(buf->data()), size));
 }
 
+void AppendAvcc(std::vector<uint8_t>* avcc, const uint8_t* data, size_t n) {
+    avcc->push_back(static_cast<uint8_t>((n >> 24) & 0xFF));
+    avcc->push_back(static_cast<uint8_t>((n >> 16) & 0xFF));
+    avcc->push_back(static_cast<uint8_t>((n >> 8) & 0xFF));
+    avcc->push_back(static_cast<uint8_t>(n & 0xFF));
+    avcc->insert(avcc->end(), data, data + n);
+}
+
+bool ExtractParameterSets(const uint8_t* data, size_t size,
+                          std::vector<uint8_t>* extradata) {
+    std::vector<uint8_t> sps, pps;
+    size_t i = 0;
+    while (i + 4 <= size) {
+        if (!(data[i] == 0 && data[i + 1] == 0 &&
+              (data[i + 2] == 1 ||
+               (i + 3 < size && data[i + 2] == 0 && data[i + 3] == 1)))) {
+            ++i;
+            continue;
+        }
+        size_t sc = (data[i + 2] == 1) ? 3 : 4;
+        size_t start = i + sc;
+        size_t j = start + 1;
+        for (; j + 4 <= size; ++j) {
+            if (data[j] != 0 || data[j + 1] != 0) continue;
+            if (data[j + 2] == 1 ||
+                (j + 3 < size && data[j + 2] == 0 && data[j + 3] == 1)) {
+                break;
+            }
+        }
+        size_t end = j;
+        if (start < size) {
+            uint8_t type = data[start] & 0x1F;
+            if (type == 7 && sps.empty()) {
+                sps.assign(data + start, data + end);
+            } else if (type == 8 && pps.empty()) {
+                pps.assign(data + start, data + end);
+            }
+        }
+        if (!sps.empty() && !pps.empty()) break;
+        i = j;
+    }
+    if (sps.empty() && pps.empty()) {
+        return false;
+    }
+    if (!sps.empty()) {
+        AppendAvcc(extradata, sps.data(), sps.size());
+    }
+    if (!pps.empty()) {
+        AppendAvcc(extradata, pps.data(), pps.size());
+    }
+    return true;
+}
+
 } // namespace
 
 int main(int argc, char* argv[]) {
@@ -95,6 +148,12 @@ int main(int argc, char* argv[]) {
     for (size_t s = 0; s < N; s++) {
         params[s].codec = codecFromExt(inputs[s]);
         params[s].deviceIndex = cli.getGpuIndex();
+        
+        // Extract SPS/PPS from the input stream for backends that need extradata.
+        if (params[s].codec == "h264") {
+            ExtractParameterSets(raw[s].data(), raw[s].size(), &params[s].extradata);
+        }
+        
         if (cli.getFormat() == "rgb" || cli.getFormat() == "rgbi") {
             params[s].outputFormat = halcodec::PixelFormat::RGB;
         } else if (cli.getFormat() == "bgr" || cli.getFormat() == "bgri") {
