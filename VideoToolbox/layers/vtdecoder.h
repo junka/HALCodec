@@ -16,6 +16,7 @@
 #include "decoder.h"
 #include "frame.h"
 #include "h264poc.h"
+#include "hevcpoc.h"
 
 namespace halcodec {
 namespace vtbox {
@@ -67,6 +68,8 @@ private:
     // classifies each access unit before submitting it), so it needs no lock;
     // the callback only reads the delay, which is mirrored into reorderDelay_.
     H264Poc poc_;
+    HEVCPoc hevcPoc_;  // HEVC counterpart, used when codec is HEVC
+    bool isHEVC_ = false;  // true if current stream is HEVC, false for H.264
     std::atomic<int> reorderDelay_{0};
 
     // Slots in flight: samples submitted to VideoToolbox plus decoded frames

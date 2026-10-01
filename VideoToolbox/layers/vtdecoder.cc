@@ -42,6 +42,8 @@ bool VTDecoder::Initialize(const CodecParams& params) {
         }
     }
     
+    isHEVC_ = isHEVC;  // Store for PumpInput to use
+    
     if (isHEVC) {
         return InitializeHEVC(params);
     } else {
@@ -185,8 +187,14 @@ bool VTDecoder::InitializeHEVC(const CodecParams& params) {
         return false;
     }
 
-    // HEVC has no POC front end in our code yet, so reorder delay is unknown.
-    reorderDelay_.store(0, std::memory_order_relaxed);
+    // Feed parameter sets to the HEVC POC front end for display-order reordering.
+    if (vpsPointer) {
+        hevcPoc_.FeedParameterSet(vpsPointer, vpsSize);
+    }
+    hevcPoc_.FeedParameterSet(spsPointer, spsSize);
+    hevcPoc_.FeedParameterSet(ppsPointer, ppsSize);
+    reorderDelay_.store(hevcPoc_.usable() ? hevcPoc_.reorderDelay() : 0,
+                        std::memory_order_relaxed);
     
     return CreateSession();
 }
@@ -270,9 +278,15 @@ void VTDecoder::PumpInput() {
         // Grouping advances the picture-order state and only the units submitted
         // here may do that, so plan against a copy and commit the real state over
         // the consumed range afterwards.
-        H264Poc trial = poc_;
-        aus = GroupAUs(trial, nals, nals.size(),
-                       /*closeOpen=*/inputEof && !scanTruncated);
+        if (isHEVC_) {
+            HEVCPoc trial = hevcPoc_;
+            aus = GroupHevcAUs(trial, nals, nals.size(),
+                               /*closeOpen=*/inputEof && !scanTruncated);
+        } else {
+            H264Poc trial = poc_;
+            aus = GroupAUs(trial, nals, nals.size(),
+                           /*closeOpen=*/inputEof && !scanTruncated);
+        }
         // A picture sliced deeper than the bound leaves nothing to close it, so
         // this pump would submit no unit and the stream could never advance;
         // widen the scan until it yields one. The cap bounds the work that a
@@ -296,8 +310,13 @@ void VTDecoder::PumpInput() {
         // The scan bound cut through a single picture too deep to see the end
         // of. No further input can complete it, so submit the slices seen
         // instead of stranding them behind a picture that will never close.
-        H264Poc trial = poc_;
-        aus = GroupAUs(trial, nals, nals.size(), /*closeOpen=*/true);
+        if (isHEVC_) {
+            HEVCPoc trial = hevcPoc_;
+            aus = GroupHevcAUs(trial, nals, nals.size(), /*closeOpen=*/true);
+        } else {
+            H264Poc trial = poc_;
+            aus = GroupAUs(trial, nals, nals.size(), /*closeOpen=*/true);
+        }
     }
     // Units beyond the window's room wait for the next pump, which regroups
     // them from their first NAL along with the input this scan did not reach.
@@ -312,12 +331,21 @@ void VTDecoder::PumpInput() {
             submitAvccAu(BuildAvcc(nals, au.firstNal, au.endNal), au.key);
             consumedNals = au.endNal;
         }
-        FeedPocRange(poc_, nals, consumedNals);
+        if (isHEVC_) {
+            FeedHevcPocRange(hevcPoc_, nals, consumedNals);
+        } else {
+            FeedPocRange(poc_, nals, consumedNals);
+        }
     }
-    // The callback needs the delay but must not touch poc_, whose state only
-    // the feed path owns.
-    reorderDelay_.store(poc_.usable() ? poc_.reorderDelay() : 0,
-                        std::memory_order_relaxed);
+    // The callback needs the delay but must not touch poc_/hevcPoc_, whose state
+    // only the feed path owns.
+    if (isHEVC_) {
+        reorderDelay_.store(hevcPoc_.usable() ? hevcPoc_.reorderDelay() : 0,
+                            std::memory_order_relaxed);
+    } else {
+        reorderDelay_.store(poc_.usable() ? poc_.reorderDelay() : 0,
+                            std::memory_order_relaxed);
+    }
 
     // At end of input whatever the grouping left over can never become an
     // access unit either -- it is parameter sets or filler after the last
@@ -424,6 +452,7 @@ void VTDecoder::Finalize() {
     pending_.clear();
     pendingPos_ = 0;
     poc_.Reset();
+    hevcPoc_.Reset();
     reorderDelay_.store(0, std::memory_order_relaxed);
     if (decompressionSession) {
         VTDecompressionSessionInvalidate(decompressionSession);

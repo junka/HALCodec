@@ -8,12 +8,13 @@ cmake_minimum_required(VERSION 3.10)
 enable_testing()
 
 # ---------------------------------------------------------------------------
-# h264au_test — pure C++, links h264au.cc + h264poc.cc directly.
+# h264au_test — pure C++, links h264au.cc + h264poc.cc + hevcpoc.cc directly.
 # ---------------------------------------------------------------------------
 add_executable(h264au_test
     h264au_test.cc
     ${CMAKE_SOURCE_DIR}/VideoToolbox/layers/h264au.cc
-    ${CMAKE_SOURCE_DIR}/VideoToolbox/layers/h264poc.cc)
+    ${CMAKE_SOURCE_DIR}/VideoToolbox/layers/h264poc.cc
+    ${CMAKE_SOURCE_DIR}/VideoToolbox/layers/hevcpoc.cc)
 target_include_directories(h264au_test PRIVATE
     ${CMAKE_SOURCE_DIR}/src
     ${CMAKE_SOURCE_DIR}/VideoToolbox/layers)

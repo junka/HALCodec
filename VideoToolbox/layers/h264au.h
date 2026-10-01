@@ -6,6 +6,7 @@
 #include <vector>
 
 #include "h264poc.h"
+#include "hevcpoc.h"
 
 namespace halcodec {
 namespace vtbox {
@@ -45,6 +46,11 @@ std::vector<Au> GroupAUs(H264Poc& poc, const std::vector<Nal>& nals,
 // Advances `poc` over nals[0, limit) exactly as GroupAUs does over the same
 // range, for committing state a trial grouping only planned.
 void FeedPocRange(H264Poc& poc, const std::vector<Nal>& nals, size_t limit);
+
+// HEVC variants: groups NALs into access units using HEVCPoc.
+std::vector<Au> GroupHevcAUs(HEVCPoc& poc, const std::vector<Nal>& nals,
+                             size_t limitNals, bool closeOpen);
+void FeedHevcPocRange(HEVCPoc& poc, const std::vector<Nal>& nals, size_t limit);
 
 // Builds one AVCC access unit ([len:4][nalu]...) from nals[begin, end).
 std::vector<uint8_t> BuildAvcc(const std::vector<Nal>& nals, size_t begin,
