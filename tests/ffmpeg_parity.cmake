@@ -30,7 +30,7 @@ endif()
 # Reference decode via ffmpeg (outputs NV12 in presentation order).
 execute_process(COMMAND ${FFMPEG} -hide_banner -loglevel error
                 -f h264 -i ${SYNTH_H264}
-                -pix_fmt nv12 -y ${FFMPEG_REF}
+                -pix_fmt nv12 -f rawvideo -y ${FFMPEG_REF}
                 RESULT_VARIABLE rc2)
 if(NOT rc2 EQUAL 0)
     message("SKIP vtdec.ffmpeg_parity: ffmpeg reference decode failed (${rc2})")
