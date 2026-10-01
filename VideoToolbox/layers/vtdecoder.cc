@@ -26,6 +26,30 @@ void FreeBlockBufferData(void*, void* block, size_t) {
 } // namespace
 
 bool VTDecoder::Initialize(const CodecParams& params) {
+    const auto& ext = params.extradata;
+    if (ext.empty()) {
+        std::cerr << "VTDecoder: no extradata provided" << std::endl;
+        return false;
+    }
+    
+    // Detect codec from the first NAL type in extradata (AVCC layout).
+    bool isHEVC = false;
+    if (ext.size() >= 5) {
+        uint8_t firstNalType = ext[4] & 0x1F;
+        // HEVC VPS=32, SPS=33, PPS=34; H.264 SPS=7, PPS=8
+        if (firstNalType == 32 || firstNalType == 33 || firstNalType == 34) {
+            isHEVC = true;
+        }
+    }
+    
+    if (isHEVC) {
+        return InitializeHEVC(params);
+    } else {
+        return InitializeH264(params);
+    }
+}
+
+bool VTDecoder::InitializeH264(const CodecParams& params) {
     // Parse H.264 parameter sets from extradata (AVCC layout:
     // [len:4][nalu][len:4][nalu] ...). SPS (type 7) and PPS (type 8) are fed
     // to VideoToolbox to build the format description.
@@ -81,15 +105,98 @@ bool VTDecoder::Initialize(const CodecParams& params) {
     );
 
     if (status != noErr) {
-        std::cerr << "Failed to create format description: " << status << std::endl;
+        std::cerr << "Failed to create H.264 format description: " << status << std::endl;
         return false;
     }
 
+    return CreateSession();
+}
+
+bool VTDecoder::InitializeHEVC(const CodecParams& params) {
+    // Parse HEVC parameter sets from extradata (AVCC layout).
+    // Order: VPS (type 32), SPS (type 33), PPS (type 34).
+    const uint8_t* vpsPointer = nullptr;
+    size_t vpsSize = 0;
+    const uint8_t* spsPointer = nullptr;
+    size_t spsSize = 0;
+    const uint8_t* ppsPointer = nullptr;
+    size_t ppsSize = 0;
+    
+    const auto& ext = params.extradata;
+    size_t pos = 0;
+    while (pos + 4 <= ext.size()) {
+        uint32_t naluLen = (static_cast<uint32_t>(ext[pos]) << 24) |
+                           (static_cast<uint32_t>(ext[pos + 1]) << 16) |
+                           (static_cast<uint32_t>(ext[pos + 2]) << 8) |
+                           static_cast<uint32_t>(ext[pos + 3]);
+        pos += 4;
+        if (pos + naluLen > ext.size()) {
+            break;
+        }
+        uint8_t naluType = ext[pos] & 0x3F;  // HEVC uses 6 bits for type
+        if (naluType == 32) {
+            vpsPointer = ext.data() + pos;
+            vpsSize = naluLen;
+        } else if (naluType == 33) {
+            spsPointer = ext.data() + pos;
+            spsSize = naluLen;
+        } else if (naluType == 34) {
+            ppsPointer = ext.data() + pos;
+            ppsSize = naluLen;
+        }
+        pos += naluLen;
+    }
+    
+    if (!spsPointer || !ppsPointer) {
+        std::cerr << "VTDecoder: missing SPS/PPS in HEVC extradata" << std::endl;
+        return false;
+    }
+    
+    // Build parameter set arrays for VideoToolbox.
+    // VPS is optional for CreateFromHEVCParameterSets but usually present.
+    const uint8_t* psPointers[3];
+    size_t psSizes[3];
+    size_t psCount = 0;
+    
+    if (vpsPointer) {
+        psPointers[psCount] = vpsPointer;
+        psSizes[psCount] = vpsSize;
+        ++psCount;
+    }
+    psPointers[psCount] = spsPointer;
+    psSizes[psCount] = spsSize;
+    ++psCount;
+    psPointers[psCount] = ppsPointer;
+    psSizes[psCount] = ppsSize;
+    ++psCount;
+
+    OSStatus status = CMVideoFormatDescriptionCreateFromHEVCParameterSets(
+        kCFAllocatorDefault,
+        psCount,
+        psPointers,
+        psSizes,
+        4,
+        nullptr,  // extensions
+        &formatDescription
+    );
+
+    if (status != noErr) {
+        std::cerr << "Failed to create HEVC format description: " << status << std::endl;
+        return false;
+    }
+
+    // HEVC has no POC front end in our code yet, so reorder delay is unknown.
+    reorderDelay_.store(0, std::memory_order_relaxed);
+    
+    return CreateSession();
+}
+
+bool VTDecoder::CreateSession() {
     VTDecompressionOutputCallbackRecord callback;
     callback.decompressionOutputCallback = DecompressionCallback;
     callback.decompressionOutputRefCon = this;
 
-    status = VTDecompressionSessionCreate(
+    OSStatus status = VTDecompressionSessionCreate(
         kCFAllocatorDefault,
         formatDescription,
         nullptr,

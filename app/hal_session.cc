@@ -44,8 +44,11 @@ void AppendAvcc(std::vector<uint8_t>* avcc, const uint8_t* data, size_t n) {
 
 bool ExtractParameterSets(const uint8_t* data, size_t size,
                           std::vector<uint8_t>* extradata) {
-    std::vector<uint8_t> sps, pps;
+    std::vector<uint8_t> vps, sps, pps;
+    bool isHEVC = false;
     size_t i = 0;
+    
+    // First pass: detect if this is HEVC by checking the first VCL/parameter NAL.
     while (i + 4 <= size) {
         if (!(data[i] == 0 && data[i + 1] == 0 &&
               (data[i + 2] == 1 ||
@@ -55,6 +58,42 @@ bool ExtractParameterSets(const uint8_t* data, size_t size,
         }
         size_t sc = (data[i + 2] == 1) ? 3 : 4;
         size_t start = i + sc;
+        if (start < size) {
+            uint8_t type = data[start] & 0x1F;
+            // H.264 parameter sets: SPS=7, PPS=8
+            // HEVC parameter sets: VPS=32, SPS=33, PPS=34
+            if (type == 7 || type == 8) {
+                isHEVC = false;
+                break;
+            } else if (type >= 32 && type <= 34) {
+                isHEVC = true;
+                break;
+            }
+        }
+        // Skip this NAL to find the next one
+        size_t j = start + 1;
+        for (; j + 4 <= size; ++j) {
+            if (data[j] != 0 || data[j + 1] != 0) continue;
+            if (data[j + 2] == 1 ||
+                (j + 3 < size && data[j + 2] == 0 && data[j + 3] == 1)) {
+                break;
+            }
+        }
+        i = j;
+    }
+    
+    // Second pass: extract parameter sets
+    i = 0;
+    while (i + 4 <= size) {
+        if (!(data[i] == 0 && data[i + 1] == 0 &&
+              (data[i + 2] == 1 ||
+               (i + 3 < size && data[i + 2] == 0 && data[i + 3] == 1)))) {
+            ++i;
+            continue;
+        }
+        size_t sc = (data[i + 2] == 1) ? 3 : 4;
+        size_t start = i + sc;
+        
         size_t j = start + 1;
         for (; j + 4 <= size; ++j) {
             if (data[j] != 0 || data[j + 1] != 0) continue;
@@ -64,25 +103,44 @@ bool ExtractParameterSets(const uint8_t* data, size_t size,
             }
         }
         size_t end = j;
+        
         if (start < size) {
-            uint8_t type = data[start] & 0x1F;
-            if (type == 7 && sps.empty()) {
-                sps.assign(data + start, data + end);
-            } else if (type == 8 && pps.empty()) {
-                pps.assign(data + start, data + end);
+            uint8_t type = data[start] & (isHEVC ? 0x3F : 0x1F);
+            if (isHEVC) {
+                if (type == 32 && vps.empty()) {
+                    vps.assign(data + start, data + end);
+                } else if (type == 33 && sps.empty()) {
+                    sps.assign(data + start, data + end);
+                } else if (type == 34 && pps.empty()) {
+                    pps.assign(data + start, data + end);
+                }
+            } else {
+                if (type == 7 && sps.empty()) {
+                    sps.assign(data + start, data + end);
+                } else if (type == 8 && pps.empty()) {
+                    pps.assign(data + start, data + end);
+                }
             }
         }
-        if (!sps.empty() && !pps.empty()) break;
+        
+        bool haveEnough = isHEVC ? (!sps.empty() && !pps.empty()) 
+                                  : (!sps.empty() && !pps.empty());
+        if (haveEnough) break;
         i = j;
     }
-    if (sps.empty() && pps.empty()) {
+    
+    if ((isHEVC && sps.empty() && pps.empty()) || 
+        (!isHEVC && sps.empty() && pps.empty())) {
         return false;
     }
-    if (!sps.empty()) {
-        AppendAvcc(extradata, sps.data(), sps.size());
-    }
-    if (!pps.empty()) {
-        AppendAvcc(extradata, pps.data(), pps.size());
+    
+    if (isHEVC) {
+        if (!vps.empty()) AppendAvcc(extradata, vps.data(), vps.size());
+        if (!sps.empty()) AppendAvcc(extradata, sps.data(), sps.size());
+        if (!pps.empty()) AppendAvcc(extradata, pps.data(), pps.size());
+    } else {
+        if (!sps.empty()) AppendAvcc(extradata, sps.data(), sps.size());
+        if (!pps.empty()) AppendAvcc(extradata, pps.data(), pps.size());
     }
     return true;
 }
@@ -149,8 +207,8 @@ int main(int argc, char* argv[]) {
         params[s].codec = codecFromExt(inputs[s]);
         params[s].deviceIndex = cli.getGpuIndex();
         
-        // Extract SPS/PPS from the input stream for backends that need extradata.
-        if (params[s].codec == "h264") {
+        // Extract SPS/PPS (or VPS/SPS/PPS for HEVC) from the input stream for backends that need extradata.
+        if (params[s].codec == "h264" || params[s].codec == "hevc") {
             ExtractParameterSets(raw[s].data(), raw[s].size(), &params[s].extradata);
         }
         
