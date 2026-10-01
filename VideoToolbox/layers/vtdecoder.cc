@@ -102,67 +102,87 @@ std::vector<uint8_t> BuildAvcc(const std::vector<Nal>& nals,
     return au;
 }
 
-// One access unit as a half-open range over the NAL vector, so the caller
-// decides *after* grouping which units to build (and can leave the rest for
-// the next pump).
+// One access unit as a half-open range over the NAL vector plus its display
+// order, so the caller decides *after* grouping which units to build (and can
+// leave the rest for the next pump).
 struct Au {
     size_t firstNal;
     size_t endNal;
+    int64_t key;  // negative when the picture order is unknown
 };
 
-// Groups NALs into access units and reports their ranges. The AU boundary rule
-// matches FFmpeg's h264_mp4toannexb: a new AU starts at a NAL that follows a
-// VCL NAL and is itself VCL or a preamble (SEI/SPS/PPS/AUD, types 6..9). The
-// AU still open at the end is emitted only when `closeOpen` (the input ended,
-// so its trailing NAL is complete); otherwise the caller holds its bytes back
-// for the next feed.
-std::vector<Au> GroupAvcc(const std::vector<Nal>& nals, bool closeOpen) {
+// Groups NALs into access units and reports their ranges, walking them the way
+// a decoder's picture state machine would: parameter sets are fed and every VCL
+// NAL classified, exactly once and in stream order.
+//
+// The boundary rule matches FFmpeg's h264_mp4toannexb (a preamble of
+// SEI/SPS/PPS/AUD after a picture starts a new unit) with the one thing that
+// file-oriented rule leaves out: a picture can be split into several slices, and
+// every slice after the first reports first_mb_in_slice != 0. H264Poc surfaces
+// that as a continuation, and those slices stay in the unit they belong to --
+// handing VideoToolbox a lone secondary slice yields no picture at all.
+//
+// Only nals[0, limitNals) is looked at, because state a caller has not consumed
+// must not be advanced. The unit still open at the limit is returned only when
+// `closeOpen` (the input ended, so no further slice of that picture can exist);
+// otherwise its bytes are held for the next feed.
+std::vector<Au> GroupAUs(H264Poc& poc, const std::vector<Nal>& nals,
+                         size_t limitNals, bool closeOpen) {
     std::vector<Au> aus;
     size_t auBegin = 0;
+    int64_t auKey = -1;
     bool hasVcl = false;
-    for (size_t idx = 0; idx < nals.size(); ++idx) {
+    const size_t limit = std::min(limitNals, nals.size());
+    for (size_t idx = 0; idx < limit; ++idx) {
         const Nal& nal = nals[idx];
         const bool vcl = nal.type >= 1 && nal.type <= 5;
-        const bool preamble = nal.type == 6 || nal.type == 7 ||
-                              nal.type == 8 || nal.type == 9;
-        if (idx > 0 && hasVcl && (vcl || preamble)) {
-            aus.push_back({auBegin, idx});
+        int64_t key = -1;
+        bool continuation = false;
+        bool preamble = false;
+        if (vcl) {
+            continuation = poc.ClassifySlice(nal.payload, nal.len, &key) ==
+                           H264Poc::Slice::Continuation;
+        } else {
+            poc.FeedParameterSet(nal.payload, nal.len);
+            preamble = nal.type >= 6 && nal.type <= 9;
+        }
+        // Where the current picture ends: any NAL that starts a new one.
+        if (hasVcl && (vcl ? !continuation : preamble)) {
+            aus.push_back({auBegin, idx, auKey});
             auBegin = idx;
-            hasVcl = vcl;
-        } else if (vcl) {
+            auKey = -1;
+            hasVcl = false;
+        }
+        if (vcl) {
+            // The unit's primary slice carries its display order; a lone
+            // continuation (a picture whose start was already submitted, which a
+            // well-formed stream never lets happen) keeps the key it reports so
+            // it still lands beside its sibling frames.
+            if (!hasVcl && poc.usable()) {
+                auKey = key;
+            }
             hasVcl = true;
         }
     }
     if (closeOpen && hasVcl) {
-        aus.push_back({auBegin, nals.size()});
+        aus.push_back({auBegin, limit, auKey});
     }
     return aus;
 }
 
-// Feeds an access unit's parameter sets to the picture order front end and
-// returns the display-order key of the picture it starts, or -1 when the
-// stream's order cannot be established yet (no SPS/PPS seen, an unsupported
-// pic_order_cnt_type, an unparsable slice header).
-int64_t PictureKey(H264Poc& poc, const std::vector<Nal>& nals, size_t begin,
-                   size_t end) {
-    int64_t key = -1;
-    for (size_t k = begin; k < end; ++k) {
-        const Nal& nal = nals[k];
-        const bool vcl = nal.type >= 1 && nal.type <= 5;
-        if (!vcl) {
+// Advances the picture-order state over nals[0, limit) exactly as GroupAUs does
+// over the same range: parameter sets fed, every VCL NAL classified once and in
+// stream order. Used to commit the state after a group planned against a copy.
+void FeedPocRange(H264Poc& poc, const std::vector<Nal>& nals, size_t limit) {
+    for (size_t idx = 0; idx < std::min(limit, nals.size()); ++idx) {
+        const Nal& nal = nals[idx];
+        if (nal.type >= 1 && nal.type <= 5) {
+            int64_t key = 0;
+            poc.ClassifySlice(nal.payload, nal.len, &key);
+        } else {
             poc.FeedParameterSet(nal.payload, nal.len);
-            continue;
-        }
-        if (key >= 0) {
-            continue;  // a further slice of the same picture
-        }
-        int64_t value = 0;
-        if (poc.ClassifySlice(nal.payload, nal.len, &value)
-                != H264Poc::Slice::Unknown) {
-            key = value;
         }
     }
-    return poc.usable() ? key : -1;
 }
 
 } // namespace
@@ -286,36 +306,68 @@ void VTDecoder::PumpInput() {
         return;
     }
 
-    // Scan only roughly the NALs needed for the available room -- an AU is a
-    // frame plus its optional SPS/PPS/SEI prefix -- rather than the whole
-    // buffer, which may hold the rest of the stream.
-    const size_t maxNals = 4 * room + 8;
-    const std::vector<Nal> nals = ScanNals(data, size, maxNals);
+    // Scan bound: enough NALs to fill the window with pictures, with slack for
+    // pictures split into slices (x264 goes up to 8) -- the walk has to see the
+    // NAL that starts the picture *after* the last unit it emits in order to
+    // close that unit. Scanning the whole buffer instead would walk the rest of
+    // the stream on every pump.
+    constexpr size_t kMaxScanNals = 1024;
     const bool inputEof = IsInputDone();
-    // A scan that stopped at maxNals may be missing the NAL that closes the
-    // last AU, so only reaching the end of the input makes it safe to emit.
-    const bool scanTruncated = nals.size() == maxNals;
+    std::vector<Nal> nals;
+    std::vector<Au> aus;
+    size_t maxNals = 8 * room + 64;
+    bool scanTruncated = false;
+    for (;;) {
+        nals = ScanNals(data, size, maxNals);
+        // A scan that stopped at maxNals may be missing the NAL that closes the
+        // last AU, so only reaching the end of the input makes it safe to emit.
+        scanTruncated = nals.size() == maxNals;
+        // Grouping advances the picture-order state and only the units submitted
+        // here may do that, so plan against a copy and commit the real state over
+        // the consumed range afterwards.
+        H264Poc trial = poc_;
+        aus = GroupAUs(trial, nals, nals.size(),
+                       /*closeOpen=*/inputEof && !scanTruncated);
+        // A picture sliced deeper than the bound leaves nothing to close it, so
+        // this pump would submit no unit and the stream could never advance;
+        // widen the scan until it yields one. The cap bounds the work that a
+        // stream without any picture boundary can cause on every pump.
+        if (!aus.empty() || nals.empty() || !scanTruncated ||
+            maxNals >= kMaxScanNals) {
+            break;
+        }
+        maxNals *= 2;
+    }
     if (nals.empty()) {
         // No complete start code yet (a 3/4-byte start code may itself straddle
         // the chunk boundary); at end of input the leftovers are trailing
         // garbage, and keeping them would leave the stream looking unfinished.
-        if (inputEof && !scanTruncated) {
+        if (inputEof) {
             pendingPos_ += size;
         }
         return;
     }
-
-    const std::vector<Au> aus =
-        GroupAvcc(nals, /*closeOpen=*/inputEof && !scanTruncated);
+    if (aus.empty() && inputEof) {
+        // The scan bound cut through a single picture too deep to see the end
+        // of. No further input can complete it, so submit the slices seen
+        // instead of stranding them behind a picture that will never close.
+        H264Poc trial = poc_;
+        aus = GroupAUs(trial, nals, nals.size(), /*closeOpen=*/true);
+    }
+    // Units beyond the window's room wait for the next pump, which regroups
+    // them from their first NAL along with the input this scan did not reach.
+    if (aus.size() > room) {
+        aus.resize(room);
+    }
 
     size_t consumedNals = 0;
-    for (const Au& au : aus) {
-        if (!ReserveSlot()) {
-            break;
+    if (!aus.empty()) {
+        ReserveSlots(aus.size());
+        for (const Au& au : aus) {
+            submitAvccAu(BuildAvcc(nals, au.firstNal, au.endNal), au.key);
+            consumedNals = au.endNal;
         }
-        const int64_t key = PictureKey(poc_, nals, au.firstNal, au.endNal);
-        submitAvccAu(BuildAvcc(nals, au.firstNal, au.endNal), key);
-        consumedNals = au.endNal;
+        FeedPocRange(poc_, nals, consumedNals);
     }
     // The callback needs the delay but must not touch poc_, whose state only
     // the feed path owns.
@@ -375,13 +427,9 @@ size_t VTDecoder::FreeSlots() {
     return liveFrames_ < kMaxLiveFrames ? kMaxLiveFrames - liveFrames_ : 0;
 }
 
-bool VTDecoder::ReserveSlot() {
+void VTDecoder::ReserveSlots(size_t n) {
     std::lock_guard<std::mutex> lk(mtx_);
-    if (liveFrames_ >= kMaxLiveFrames) {
-        return false;
-    }
-    ++liveFrames_;
-    return true;
+    liveFrames_ += n;
 }
 
 void VTDecoder::ReleaseSlot() {

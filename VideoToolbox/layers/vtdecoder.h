@@ -101,7 +101,10 @@ private:
     int QueuedFrames();
     bool IsInputDone();
     size_t FreeSlots();
-    bool ReserveSlot();
+    // Takes `n` slots for units about to be submitted. PumpInput never plans more
+    // than FreeSlots() reported and only that thread reserves, so this cannot
+    // fail; the other threads (GetFrame, the callback) only ever release.
+    void ReserveSlots(size_t n);
     void ReleaseSlot();
 
     static void DecompressionCallback(void* refcon,
