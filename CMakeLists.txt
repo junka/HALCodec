@@ -133,3 +133,8 @@ endif()
 
 add_subdirectory(app)
 
+if(APPLE OR UNIX)
+    enable_testing()
+    add_subdirectory(tests)
+endif()
+
