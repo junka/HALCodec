@@ -234,15 +234,21 @@ int main(int argc, char* argv[]) {
     };
 
     if (dec->isAsync()) {
-        // Async backends (vtbox): feed the Annex-B stream chunk-by-chunk,
-        // signal EOF, then drain frames until GetFrame() returns false.
+        // Async backends (vtbox): feed the Annex-B stream chunk-by-chunk and
+        // hand back whatever the feed call reports as ready, then signal EOF
+        // and drain until GetFrame() returns false. A decoder that holds input
+        // back when its own queue is full keeps every frame either way, but
+        // interleaving feed and drain is what overlaps the two phases.
         std::ifstream fin(input, std::ios::binary);
         if (!fin) {
             std::cerr << "unable to open input file: " << input << std::endl;
             return -1;
         }
-        const size_t kChunkSize = 1 << 20;  // 1 MiB
+        // Small chunks keep the drain close behind the feed instead of running
+        // the whole input first.
+        const size_t kChunkSize = 1 << 18;  // 256 KiB
         std::vector<uint8_t> chunk(kChunkSize);
+        halcodec::CodecFrame frame;
         while (fin) {
             fin.read(reinterpret_cast<char*>(chunk.data()),
                      static_cast<std::streamsize>(chunk.size()));
@@ -250,13 +256,20 @@ int main(int argc, char* argv[]) {
             if (got <= 0) {
                 break;
             }
-            if (dec->FillInput(chunk.data(), static_cast<size_t>(got)) < 0) {
+            int ready = dec->FillInput(chunk.data(),
+                                       static_cast<size_t>(got));
+            if (ready < 0) {
                 std::cerr << "decoder rejected input (FillInput failed)" << std::endl;
                 return -1;
             }
+            // FillInput's return value counts frames already queued, so these
+            // GetFrame() calls cannot block.
+            while (ready-- > 0 && dec->GetFrame(frame)) {
+                total_frames++;
+                writeFrame(frame);
+            }
         }
         dec->SignalInputComplete();
-        halcodec::CodecFrame frame;
         while (dec->GetFrame(frame)) {
             total_frames++;
             writeFrame(frame);
