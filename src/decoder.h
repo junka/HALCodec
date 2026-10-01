@@ -40,6 +40,11 @@ public:
     //         asynchronously; drain with GetFrame());
     //   -1    this backend does not support explicit feeding.
     // The default implementation reports "not supported".
+    //
+    // A backend may take the chunk without submitting all of it right away --
+    // holding the rest until GetFrame() frees room -- but it must not block
+    // here waiting for a consumer: feeding and draining share the caller's
+    // thread, so only queued input can be drained.
     virtual int FillInput(const uint8_t* data, size_t size) {
         (void)data;
         (void)size;

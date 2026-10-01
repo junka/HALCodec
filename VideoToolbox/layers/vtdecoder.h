@@ -36,16 +36,47 @@ private:
 
     // Queue of decoded frames, filled by the decompression callback and
     // drained by GetFrame(). Guarded by mtx_; cv_ wakes GetFrame().
+    //
+    // The queue is bounded indirectly, by the live-frame window below: the
+    // callback always pushes immediately, and the feed path stops submitting
+    // once the window is full. Peak memory therefore follows the window, not
+    // the length of the stream -- one window slot is one full frame.
     std::deque<CodecFrame> frameQ_;
     std::mutex mtx_;
     std::condition_variable cv_;
-    bool eof_ = false;
+    // Set by SignalInputComplete(); GetFrame only treats the stream as
+    // finished once the queue has drained and no sample is in flight.
+    bool inputDone_ = false;
 
-    // Bytes of the NAL that was still unterminated when the previous FillInput
-    // chunk ended (it may continue inside the next chunk). Feed chunks are
-    // fixed-size reads, so a NAL can straddle a chunk boundary; assembling AU
-    // boundaries from an unterminated NAL would truncate its slices.
+    // Slots in flight: samples submitted to VideoToolbox plus decoded frames
+    // still waiting in frameQ_. A slot is freed when GetFrame() hands its
+    // frame over, so a caller that drains as it feed never blocks the decoder
+    // and a caller that feeds a whole stream merely leaves input queued in
+    // front of the window (compressed bytes, orders of magnitude cheaper than
+    // the frame queue it protects).
+    static constexpr size_t kMaxLiveFrames = 16;
+    size_t liveFrames_ = 0;
+
+    // Input that has not become a submitted access unit yet: everything from
+    // pendingPos_ on, kept because the live-frame window was full or because
+    // the trailing NAL has no end yet (feed chunks are fixed-size reads, so a
+    // NAL can straddle a chunk boundary and splitting each chunk in isolation
+    // would truncate its slices).
     std::vector<uint8_t> pending_;
+    size_t pendingPos_ = 0;
+
+    // Submits as many complete access units as the live-frame window allows.
+    void PumpInput();
+    // Drops already-consumed input bytes, rewriting the buffer only once at
+    // least half of it has been consumed.
+    void CompactPending();
+
+    // Window bookkeeping, all under mtx_.
+    int QueuedFrames();
+    bool IsInputDone();
+    size_t FreeSlots();
+    bool ReserveSlot();
+    void ReleaseSlot();
 
     static void DecompressionCallback(void* refcon,
         void* sourceFrameRefCon,
@@ -62,7 +93,9 @@ private:
 
     // Submits one AVCC access unit for async decoding. The AU bytes are
     // copied into an independent buffer (ownership passed to decodeFrameAsync)
-    // because the source buffer is reused by the next feed chunk.
+    // because the source buffer is reused by the next feed chunk. Consumes the
+    // live-frame slot that PumpInput reserved for it when the sample is not
+    // accepted, since no callback will ever release it.
     void submitAvccAu(const std::vector<uint8_t>& au);
 };
 

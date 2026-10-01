@@ -22,7 +22,10 @@ void FreeBlockBufferData(void*, void* block, size_t) {
 
 // Annex-B NAL scanner. Every NAL except the last is complete (delimited by
 // the following start code); the final NAL may continue inside the next feed
-// chunk and is therefore held pending until its end is seen.
+// chunk and is therefore held pending until its end is seen. `maxNals` bounds
+// the scan so a caller that only wants a few access units never walks the
+// whole pending buffer: NALs are only cut off *between* units, so a truncated
+// scan simply lacks the NAL that would close the last access unit.
 struct Nal {
     size_t startPos;  // offset of the NAL's start code in the buffer
     const uint8_t* payload;
@@ -30,10 +33,11 @@ struct Nal {
     uint8_t type;
 };
 
-std::vector<Nal> ScanNals(const uint8_t* data, size_t size) {
+std::vector<Nal> ScanNals(const uint8_t* data, size_t size,
+                          size_t maxNals) {
     std::vector<Nal> nals;
     size_t i = 0;
-    while (i + 3 <= size) {
+    while (i + 3 <= size && nals.size() < maxNals) {
         if (data[i] != 0 || data[i + 1] != 0) {
             ++i;
             continue;
@@ -97,15 +101,22 @@ std::vector<uint8_t> BuildAvcc(const std::vector<Nal>& nals,
     return au;
 }
 
-// Groups NALs into access units, appending each completed AU to `aus`. The
-// AU boundary rule matches FFmpeg's h264_mp4toannexb: a new AU starts at a
-// NAL that follows a VCL NAL and is itself VCL or a preamble
-// (SEI/SPS/PPS/AUD, types 6..9). Reports in `openAuStart` the index of the
-// first NAL of the AU still open at the end. The open AU is emitted only
-// when `isFinal` (the stream ended, so its trailing NAL is complete);
-// otherwise it is held back for the next feed chunk.
-void GroupAvcc(const std::vector<Nal>& nals, bool isFinal,
-               std::vector<std::vector<uint8_t>>* aus, size_t* openAuStart) {
+// One access unit as a half-open range over the NAL vector, so the caller
+// decides *after* grouping which units to build (and can leave the rest for
+// the next pump).
+struct Au {
+    size_t firstNal;
+    size_t endNal;
+};
+
+// Groups NALs into access units and reports their ranges. The AU boundary rule
+// matches FFmpeg's h264_mp4toannexb: a new AU starts at a NAL that follows a
+// VCL NAL and is itself VCL or a preamble (SEI/SPS/PPS/AUD, types 6..9). The
+// AU still open at the end is emitted only when `closeOpen` (the input ended,
+// so its trailing NAL is complete); otherwise the caller holds its bytes back
+// for the next feed.
+std::vector<Au> GroupAvcc(const std::vector<Nal>& nals, bool closeOpen) {
+    std::vector<Au> aus;
     size_t auBegin = 0;
     bool hasVcl = false;
     for (size_t idx = 0; idx < nals.size(); ++idx) {
@@ -114,17 +125,17 @@ void GroupAvcc(const std::vector<Nal>& nals, bool isFinal,
         const bool preamble = nal.type == 6 || nal.type == 7 ||
                               nal.type == 8 || nal.type == 9;
         if (idx > 0 && hasVcl && (vcl || preamble)) {
-            aus->push_back(BuildAvcc(nals, auBegin, idx));
+            aus.push_back({auBegin, idx});
             auBegin = idx;
             hasVcl = vcl;
         } else if (vcl) {
             hasVcl = true;
         }
     }
-    if (isFinal && hasVcl) {
-        aus->push_back(BuildAvcc(nals, auBegin, nals.size()));
+    if (closeOpen && hasVcl) {
+        aus.push_back({auBegin, nals.size()});
     }
-    *openAuStart = (isFinal && hasVcl) ? nals.size() : auBegin;
+    return aus;
 }
 
 } // namespace
@@ -202,67 +213,120 @@ bool VTDecoder::Initialize(const CodecParams& params) {
 }
 
 int VTDecoder::FillInput(const uint8_t* data, size_t size) {
-    // Append to the unterminated tail of the previous chunk, so a NAL that
-    // straddles a chunk boundary is reassembled before AU grouping. These
-    // chunks are fixed-size reads from the CLI feed path, so a NAL can end
-    // mid-chunk; splitting each chunk in isolation would truncate its slices.
-    std::vector<uint8_t> combined;
-    if (!pending_.empty()) {
-        combined.reserve(pending_.size() + size);
-        combined.insert(combined.end(), pending_.begin(), pending_.end());
-        combined.insert(combined.end(), data, data + size);
-    } else {
-        combined.assign(data, data + size);
+    CompactPending();
+    pending_.insert(pending_.end(), data, data + size);
+    PumpInput();
+    return QueuedFrames();
+}
+
+// Drops the input bytes already turned into access units. Rewriting the buffer
+// only once at least half of it has been consumed keeps a caller that feeds a
+// whole file before taking any frame linear instead of quadratic.
+void VTDecoder::CompactPending() {
+    if (pendingPos_ == 0) {
+        return;
+    }
+    if (pendingPos_ < pending_.size() - pendingPos_) {
+        return;
+    }
+    pending_.erase(pending_.begin(),
+                   pending_.begin() +
+                       static_cast<std::ptrdiff_t>(pendingPos_));
+    pendingPos_ = 0;
+}
+
+// Submits as many complete access units as the live-frame window has room for
+// and leaves the rest of pending_ untouched. It never blocks: a full window
+// simply consumes no input, and GetFrame() pumps again once it has handed a
+// frame (and therefore a slot) to the caller.
+void VTDecoder::PumpInput() {
+    const size_t room = FreeSlots();
+    if (!decompressionSession || room == 0) {
+        return;
+    }
+    const uint8_t* data = pending_.data() + pendingPos_;
+    const size_t size = pending_.size() - pendingPos_;
+    if (size == 0) {
+        return;
     }
 
-    const std::vector<Nal> nals = ScanNals(combined.data(), combined.size());
+    // Scan only roughly the NALs needed for the available room -- an AU is a
+    // frame plus its optional SPS/PPS/SEI prefix -- rather than the whole
+    // buffer, which may hold the rest of the stream.
+    const size_t maxNals = 4 * room + 8;
+    const std::vector<Nal> nals = ScanNals(data, size, maxNals);
     if (nals.empty()) {
         // No complete start code yet (a 3/4-byte start code may itself
-        // straddle the chunk boundary); hold everything for the next chunk.
-        pending_ = std::move(combined);
-        return 0;
+        // straddle the chunk boundary); keep waiting for input.
+        return;
     }
 
-    std::vector<std::vector<uint8_t>> aus;
-    size_t openAuStart = 0;
-    GroupAvcc(nals, /*isFinal=*/false, &aus, &openAuStart);
-    for (const auto& au : aus) {
-        submitAvccAu(au);
+    const bool inputEof = IsInputDone();
+    // A scan that stopped at maxNals may be missing the NAL that closes the
+    // last AU, so only reaching the end of the input makes it safe to emit.
+    const bool scanTruncated = nals.size() == maxNals;
+    const std::vector<Au> aus =
+        GroupAvcc(nals, /*closeOpen=*/inputEof && !scanTruncated);
+
+    size_t consumedNals = 0;
+    for (const Au& au : aus) {
+        if (!ReserveSlot()) {
+            break;
+        }
+        submitAvccAu(BuildAvcc(nals, au.firstNal, au.endNal));
+        consumedNals = au.endNal;
     }
-    // The open AU ends in a possibly incomplete NAL (everything before
-    // nals[openAuStart] was emitted above); keep its bytes for the next
-    // chunk to complete.
-    pending_.assign(combined.data() + nals[openAuStart].startPos,
-                    combined.data() + combined.size());
-    return 0;  // async: frames are produced in the decompression callback
+
+    // Unconsumed input starts at the first NAL of the first AU that was not
+    // submitted, which after all AUs are submitted is the still-open AU (or
+    // the end of the buffer once that one was closed by the EOF flush).
+    pendingPos_ += consumedNals < nals.size()
+                       ? nals[consumedNals].startPos
+                       : size;
+}
+
+int VTDecoder::QueuedFrames() {
+    std::lock_guard<std::mutex> lk(mtx_);
+    return static_cast<int>(frameQ_.size());
+}
+
+bool VTDecoder::IsInputDone() {
+    std::lock_guard<std::mutex> lk(mtx_);
+    return inputDone_;
+}
+
+size_t VTDecoder::FreeSlots() {
+    std::lock_guard<std::mutex> lk(mtx_);
+    return liveFrames_ < kMaxLiveFrames ? kMaxLiveFrames - liveFrames_ : 0;
+}
+
+bool VTDecoder::ReserveSlot() {
+    std::lock_guard<std::mutex> lk(mtx_);
+    if (liveFrames_ >= kMaxLiveFrames) {
+        return false;
+    }
+    ++liveFrames_;
+    return true;
+}
+
+void VTDecoder::ReleaseSlot() {
+    std::lock_guard<std::mutex> lk(mtx_);
+    if (liveFrames_ > 0) {
+        --liveFrames_;
+    }
 }
 
 bool VTDecoder::SignalInputComplete() {
-    // Flush the AU held back across chunk boundaries: no more input is
-    // coming, so the trailing NAL is now definitively complete.
-    if (!pending_.empty()) {
-        const std::vector<Nal> nals =
-            ScanNals(pending_.data(), pending_.size());
-        if (!nals.empty() && decompressionSession) {
-            std::vector<std::vector<uint8_t>> aus;
-            size_t openAuStart = 0;
-            GroupAvcc(nals, /*isFinal=*/true, &aus, &openAuStart);
-            for (const auto& au : aus) {
-                submitAvccAu(au);
-            }
-        }
-        pending_.clear();
-    }
-    // Wait for every submitted sample to be decoded (the decompression
-    // callback flushes into frameQ_ before this returns), so that EOF does
-    // not race with frames still in flight.
-    if (decompressionSession) {
-        VTDecompressionSessionWaitForAsynchronousFrames(decompressionSession);
-    }
     {
         std::lock_guard<std::mutex> lk(mtx_);
-        eof_ = true;
+        inputDone_ = true;
     }
+    // Flush what the window still allows, including the trailing AU that no
+    // further input would have completed. Deliberately does not wait for the
+    // in-flight samples: those frames are owed to the caller, and releasing
+    // here while the window is full would block until the caller drains --
+    // which only GetFrame() can do.
+    PumpInput();
     cv_.notify_all();
     return true;
 }
@@ -270,16 +334,21 @@ bool VTDecoder::SignalInputComplete() {
 void VTDecoder::Finalize() {
     {
         std::lock_guard<std::mutex> lk(mtx_);
-        eof_ = true;
+        // No input can follow a finalize, so a blocked GetFrame() can treat
+        // the stream as finished instead of waiting for frames that never
+        // come.
+        inputDone_ = true;
         for (auto& f : frameQ_) {
             if (f.release) {
                 f.release();
             }
         }
         frameQ_.clear();
+        liveFrames_ = 0;
     }
     cv_.notify_all();
     pending_.clear();
+    pendingPos_ = 0;
     if (decompressionSession) {
         VTDecompressionSessionInvalidate(decompressionSession);
         decompressionSession = nullptr;
@@ -298,13 +367,30 @@ int VTDecoder::PullFrames() {
 
 bool VTDecoder::GetFrame(CodecFrame& out) {
     std::unique_lock<std::mutex> lk(mtx_);
-    cv_.wait(lk, [this] { return !frameQ_.empty() || eof_; });
-    if (frameQ_.empty()) {
-        return false;
+    for (;;) {
+        if (!frameQ_.empty()) {
+            out = std::move(frameQ_.front());
+            frameQ_.pop_front();
+            // The buffer belongs to the caller now: the slot it occupied is
+            // free for the held-back input to move into.
+            --liveFrames_;
+            lk.unlock();
+            PumpInput();
+            return true;
+        }
+        // Nothing queued. Anything still owed to the caller is either inside
+        // VideoToolbox or held back in pending_ by the window, so pump before
+        // deciding the stream is over.
+        lk.unlock();
+        PumpInput();
+        lk.lock();
+        if (inputDone_ && liveFrames_ == 0) {
+            return false;
+        }
+        cv_.wait(lk, [this] {
+            return !frameQ_.empty() || (inputDone_ && liveFrames_ == 0);
+        });
     }
-    out = std::move(frameQ_.front());
-    frameQ_.pop_front();
-    return true;
 }
 
 bool VTDecoder::decodeFrameAsync(uint8_t* data, size_t size) {
@@ -372,11 +458,16 @@ bool VTDecoder::decodeFrameAsync(uint8_t* data, size_t size) {
 
 void VTDecoder::submitAvccAu(const std::vector<uint8_t>& au) {
     auto* copy = static_cast<uint8_t*>(malloc(au.size()));
-    if (!copy) {
+    if (copy) {
+        memcpy(copy, au.data(), au.size());
+    }
+    // decodeFrameAsync takes ownership of `copy` and reports failure without
+    // ever invoking the callback, so such a sample must give its window slot
+    // back itself.
+    if (copy && decodeFrameAsync(copy, au.size())) {
         return;
     }
-    memcpy(copy, au.data(), au.size());
-    decodeFrameAsync(copy, au.size());  // takes ownership of `copy`
+    ReleaseSlot();
 }
 
 void VTDecoder::DecompressionCallback(
@@ -393,6 +484,9 @@ void VTDecoder::DecompressionCallback(
     (void)infoFlags;
     (void)presentationDuration;
     if (status != noErr || !imageBuffer) {
+        // A sample VideoToolbox rejected never reaches the queue, so it must
+        // give its window slot back or the feed path stops making progress.
+        self->ReleaseSlot();
         return;
     }
 
@@ -427,11 +521,22 @@ void VTDecoder::DecompressionCallback(
                         : 0;
         frame.release = [buf]() { free(buf); };
 
-        std::lock_guard<std::mutex> lk(self->mtx_);
-        self->frameQ_.push_back(std::move(frame));
+        CVPixelBufferUnlockBaseAddress(imageBuffer, kCVPixelBufferLock_ReadOnly);
+
+        // Push unconditionally: a callback that ever waited for queue room
+        // would stall VideoToolbox's own decompression queue, and the feed
+        // thread that submits into it is the only one that can drain it. The
+        // window in PumpInput is what keeps this queue bounded instead.
+        {
+            std::lock_guard<std::mutex> lk(self->mtx_);
+            self->frameQ_.push_back(std::move(frame));
+        }
+        self->cv_.notify_one();
+    } else {
+        CVPixelBufferUnlockBaseAddress(imageBuffer, kCVPixelBufferLock_ReadOnly);
+        // No frame reaches the queue, so the slot it reserved is already dead.
+        self->ReleaseSlot();
     }
-    CVPixelBufferUnlockBaseAddress(imageBuffer, kCVPixelBufferLock_ReadOnly);
-    self->cv_.notify_one();
 }
 
 HALCODEC_CONNECT(Decoder, vtbox, VTDecoder);
