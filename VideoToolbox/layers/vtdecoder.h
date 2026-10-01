@@ -34,6 +34,11 @@ public:
     std::string getName() const override { return "vtbox"; }
 
 private:
+    // Internal helpers for codec-specific initialization.
+    bool InitializeH264(const CodecParams& params);
+    bool InitializeHEVC(const CodecParams& params);
+    bool CreateSession();
+    
     VTDecompressionSessionRef decompressionSession = nullptr;
     CMVideoFormatDescriptionRef formatDescription = nullptr;
 
