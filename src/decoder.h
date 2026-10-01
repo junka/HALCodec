@@ -74,10 +74,12 @@ public:
     // underlying buffer.
     //
     // Ordering: frames come back in whatever order the vendor decoder emits
-    // them. A backend fed a raw Annex-B stream has no container timing, so it
-    // cannot reorder and emits decode order (vtbox does; its CodecFrame::pts
-    // carries no display order). Callers that need presentation order must
-    // reorder themselves, e.g. from the H.264 picture order count.
+    // them. vtbox derives the H.264 picture order count from the Annex-B stream
+    // itself and returns presentation order (B frames are reordered inside the
+    // backend); it falls back to decode order only when the stream's picture
+    // order cannot be parsed, e.g. an unsupported pic_order_cnt_type. Other
+    // backends pass their hardware's order through untouched, so a caller that
+    // depends on display order should still check the frame's pts.
     virtual bool GetFrame(CodecFrame& out) { (void)out; return false; }
 
     // Finalize the decoding process and release resources.

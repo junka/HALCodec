@@ -1,6 +1,6 @@
 cmake_minimum_required(VERSION 3.10)
 
-set(enc_src vtdecoder.cc vtencoder.cc vt_caps.cc)
+set(enc_src vtdecoder.cc vtencoder.cc vt_caps.cc h264poc.cc)
 
 add_library(vtbox_layers SHARED ${enc_src})
 

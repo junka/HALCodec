@@ -2,6 +2,7 @@
 
 #include <VideoToolbox/VideoToolbox.h>
 #include <CoreFoundation/CoreFoundation.h>
+#include <algorithm>
 #include <cstdlib>
 #include <cstring>
 #include <iostream>
@@ -138,6 +139,32 @@ std::vector<Au> GroupAvcc(const std::vector<Nal>& nals, bool closeOpen) {
     return aus;
 }
 
+// Feeds an access unit's parameter sets to the picture order front end and
+// returns the display-order key of the picture it starts, or -1 when the
+// stream's order cannot be established yet (no SPS/PPS seen, an unsupported
+// pic_order_cnt_type, an unparsable slice header).
+int64_t PictureKey(H264Poc& poc, const std::vector<Nal>& nals, size_t begin,
+                   size_t end) {
+    int64_t key = -1;
+    for (size_t k = begin; k < end; ++k) {
+        const Nal& nal = nals[k];
+        const bool vcl = nal.type >= 1 && nal.type <= 5;
+        if (!vcl) {
+            poc.FeedParameterSet(nal.payload, nal.len);
+            continue;
+        }
+        if (key >= 0) {
+            continue;  // a further slice of the same picture
+        }
+        int64_t value = 0;
+        if (poc.ClassifySlice(nal.payload, nal.len, &value)
+                != H264Poc::Slice::Unknown) {
+            key = value;
+        }
+    }
+    return poc.usable() ? key : -1;
+}
+
 } // namespace
 
 bool VTDecoder::Initialize(const CodecParams& params) {
@@ -176,6 +203,15 @@ bool VTDecoder::Initialize(const CodecParams& params) {
         std::cerr << "VTDecoder: no SPS/PPS in extradata" << std::endl;
         return false;
     }
+
+    // The same parameter sets tell the picture order front end how this stream
+    // counts display order, which an elementary-stream feed carries no other
+    // way. In-band copies seen later by PumpInput simply re-parse them.
+    for (size_t i = 0; i < parameterSetCount; ++i) {
+        poc_.FeedParameterSet(parameterSetPointers[i], parameterSetSizes[i]);
+    }
+    reorderDelay_.store(poc_.usable() ? poc_.reorderDelay() : 0,
+                        std::memory_order_relaxed);
 
     OSStatus status = CMVideoFormatDescriptionCreateFromH264ParameterSets(
         kCFAllocatorDefault,
@@ -255,16 +291,20 @@ void VTDecoder::PumpInput() {
     // buffer, which may hold the rest of the stream.
     const size_t maxNals = 4 * room + 8;
     const std::vector<Nal> nals = ScanNals(data, size, maxNals);
-    if (nals.empty()) {
-        // No complete start code yet (a 3/4-byte start code may itself
-        // straddle the chunk boundary); keep waiting for input.
-        return;
-    }
-
     const bool inputEof = IsInputDone();
     // A scan that stopped at maxNals may be missing the NAL that closes the
     // last AU, so only reaching the end of the input makes it safe to emit.
     const bool scanTruncated = nals.size() == maxNals;
+    if (nals.empty()) {
+        // No complete start code yet (a 3/4-byte start code may itself straddle
+        // the chunk boundary); at end of input the leftovers are trailing
+        // garbage, and keeping them would leave the stream looking unfinished.
+        if (inputEof && !scanTruncated) {
+            pendingPos_ += size;
+        }
+        return;
+    }
+
     const std::vector<Au> aus =
         GroupAvcc(nals, /*closeOpen=*/inputEof && !scanTruncated);
 
@@ -273,8 +313,21 @@ void VTDecoder::PumpInput() {
         if (!ReserveSlot()) {
             break;
         }
-        submitAvccAu(BuildAvcc(nals, au.firstNal, au.endNal));
+        const int64_t key = PictureKey(poc_, nals, au.firstNal, au.endNal);
+        submitAvccAu(BuildAvcc(nals, au.firstNal, au.endNal), key);
         consumedNals = au.endNal;
+    }
+    // The callback needs the delay but must not touch poc_, whose state only
+    // the feed path owns.
+    reorderDelay_.store(poc_.usable() ? poc_.reorderDelay() : 0,
+                        std::memory_order_relaxed);
+
+    // At end of input whatever the grouping left over can never become an
+    // access unit either -- it is parameter sets or filler after the last
+    // picture -- so drop it instead of holding the stream open on it.
+    if (inputEof && !scanTruncated && aus.empty()) {
+        pendingPos_ += size;
+        return;
     }
 
     // Unconsumed input starts at the first NAL of the first AU that was not
@@ -283,6 +336,28 @@ void VTDecoder::PumpInput() {
     pendingPos_ += consumedNals < nals.size()
                        ? nals[consumedNals].startPos
                        : size;
+}
+
+// Moves every frame whose display slot can no longer be contested out of the
+// reorder window and into the output queue. Needs mtx_.
+void VTDecoder::FlushReorder(bool final) {
+    // A picture is settled once the window holds more frames than the stream's
+    // own reorder depth: a later frame with a smaller order count would have to
+    // come from outside the decoder's picture buffer, which the parameter sets
+    // bound. `final` drops the bound entirely -- the stream has ended, so
+    // nothing smaller is coming at all.
+    //
+    // The depth is also capped at half the live-frame window: frames parked here
+    // still hold their window slot, and a window the reorder buffer can saturate
+    // would stop submissions and starve VideoToolbox of work.
+    size_t delay = final ? 0
+                         : static_cast<size_t>(reorderDelay_.load(
+                               std::memory_order_relaxed));
+    delay = std::min(delay, kMaxLiveFrames / 2);
+    while (!reorder_.empty() && reorder_.size() > delay) {
+        frameQ_.push_back(std::move(reorder_.front().second));
+        reorder_.pop_front();
+    }
 }
 
 int VTDecoder::QueuedFrames() {
@@ -344,11 +419,19 @@ void VTDecoder::Finalize() {
             }
         }
         frameQ_.clear();
+        for (auto& slot : reorder_) {
+            if (slot.second.release) {
+                slot.second.release();
+            }
+        }
+        reorder_.clear();
         liveFrames_ = 0;
     }
     cv_.notify_all();
     pending_.clear();
     pendingPos_ = 0;
+    poc_.Reset();
+    reorderDelay_.store(0, std::memory_order_relaxed);
     if (decompressionSession) {
         VTDecompressionSessionInvalidate(decompressionSession);
         decompressionSession = nullptr;
@@ -379,21 +462,44 @@ bool VTDecoder::GetFrame(CodecFrame& out) {
             return true;
         }
         // Nothing queued. Anything still owed to the caller is either inside
-        // VideoToolbox or held back in pending_ by the window, so pump before
-        // deciding the stream is over.
+        // VideoToolbox, held in the reorder window, or held back in pending_ by
+        // the window, so pump before deciding the stream is over.
         lk.unlock();
         PumpInput();
         lk.lock();
-        if (inputDone_ && liveFrames_ == 0) {
-            return false;
+        if (liveFrames_ == frameQ_.size() + reorder_.size()) {
+            // Nothing is in flight, so no callback can wake this wait and any
+            // frame parked in the reorder window would never be handed over.
+            if (!reorder_.empty()) {
+                FlushReorder(inputDone_);
+                if (frameQ_.empty()) {
+                    // Even the settled prefix is held back by the delay bound,
+                    // and the feed has not caught up with the window: deliver
+                    // the oldest picture instead of spinning. At end of stream
+                    // FlushReorder(true) above already drained everything, so
+                    // this is a stalled live feed.
+                    frameQ_.push_back(std::move(reorder_.front().second));
+                    reorder_.pop_front();
+                }
+                continue;
+            }
+            if (inputDone_) {
+                return false;
+            }
+            // No frames anywhere and no sample in flight: the caller is ahead of
+            // its own feed, which only it can continue.
         }
         cv_.wait(lk, [this] {
+            // A callback is owed (it notifies when a frame reaches either
+            // buffer), plus the terminal wake Finalize() raises so a blocked
+            // consumer is released when another thread ends the stream.
             return !frameQ_.empty() || (inputDone_ && liveFrames_ == 0);
         });
     }
 }
 
-bool VTDecoder::decodeFrameAsync(uint8_t* data, size_t size) {
+bool VTDecoder::decodeFrameAsync(uint8_t* data, size_t size,
+                                int64_t displayKey) {
     if (!decompressionSession || !data || size == 0) {
         free(data);
         return false;
@@ -445,18 +551,25 @@ bool VTDecoder::decodeFrameAsync(uint8_t* data, size_t size) {
         return false;
     }
 
+    // The key travels to the callback as the source frame reference (+1, so
+    // that a picture ordering of 0 is still distinguishable from "unknown").
+    void* sourceFrameRefCon = displayKey >= 0
+        ? reinterpret_cast<void*>(
+              static_cast<intptr_t>(displayKey + 1))
+        : nullptr;
     status = VTDecompressionSessionDecodeFrame(
         decompressionSession,
         sampleBuffer,
         0,
-        nullptr,
+        sourceFrameRefCon,
         nullptr
     );
     CFRelease(sampleBuffer);
     return status == noErr;
 }
 
-void VTDecoder::submitAvccAu(const std::vector<uint8_t>& au) {
+void VTDecoder::submitAvccAu(const std::vector<uint8_t>& au,
+                            int64_t displayKey) {
     auto* copy = static_cast<uint8_t*>(malloc(au.size()));
     if (copy) {
         memcpy(copy, au.data(), au.size());
@@ -464,7 +577,7 @@ void VTDecoder::submitAvccAu(const std::vector<uint8_t>& au) {
     // decodeFrameAsync takes ownership of `copy` and reports failure without
     // ever invoking the callback, so such a sample must give its window slot
     // back itself.
-    if (copy && decodeFrameAsync(copy, au.size())) {
+    if (copy && decodeFrameAsync(copy, au.size(), displayKey)) {
         return;
     }
     ReleaseSlot();
@@ -480,9 +593,14 @@ void VTDecoder::DecompressionCallback(
     CMTime presentationDuration
 ) {
     auto* self = static_cast<VTDecoder*>(decompressionOutputRefCon);
-    (void)sourceFrameRefCon;
     (void)infoFlags;
     (void)presentationDuration;
+    // Reattached to the sample at submit time; the raw key needs no lock
+    // because only the submit path computes it.
+    const int64_t displayKey = sourceFrameRefCon
+        ? static_cast<int64_t>(
+              reinterpret_cast<intptr_t>(sourceFrameRefCon)) - 1
+        : -1;
     if (status != noErr || !imageBuffer) {
         // A sample VideoToolbox rejected never reaches the queue, so it must
         // give its window slot back or the feed path stops making progress.
@@ -523,13 +641,26 @@ void VTDecoder::DecompressionCallback(
 
         CVPixelBufferUnlockBaseAddress(imageBuffer, kCVPixelBufferLock_ReadOnly);
 
-        // Push unconditionally: a callback that ever waited for queue room
+        // Queue unconditionally: a callback that ever waited for queue room
         // would stall VideoToolbox's own decompression queue, and the feed
         // thread that submits into it is the only one that can drain it. The
-        // window in PumpInput is what keeps this queue bounded instead.
+        // window in PumpInput is what keeps the frame memory bounded instead.
         {
             std::lock_guard<std::mutex> lk(self->mtx_);
-            self->frameQ_.push_back(std::move(frame));
+            if (displayKey < 0) {
+                // No picture order known: pass the frame straight through in
+                // the order VideoToolbox delivered it.
+                self->frameQ_.push_back(std::move(frame));
+            } else {
+                auto where = std::upper_bound(
+                    self->reorder_.begin(), self->reorder_.end(), displayKey,
+                    [](int64_t key, const std::pair<int64_t, CodecFrame>& slot) {
+                        return key < slot.first;
+                    });
+                self->reorder_.insert(where,
+                                      {displayKey, std::move(frame)});
+                self->FlushReorder(/*final=*/false);
+            }
         }
         self->cv_.notify_one();
     } else {
