@@ -153,5 +153,66 @@ void FeedPocRange(H264Poc& poc, const std::vector<Nal>& nals, size_t limit) {
     }
 }
 
+// HEVC access unit grouping. Same logic as H.264 but with HEVC NAL types and
+// 2-byte NAL headers. VCL NALs are types 0-9 (non-IRAP) and 16-23 (IRAP).
+std::vector<Au> GroupHevcAUs(HEVCPoc& poc, const std::vector<Nal>& nals,
+                             size_t limitNals, bool closeOpen) {
+    std::vector<Au> aus;
+    size_t auBegin = 0;
+    int64_t auKey = -1;
+    bool hasVcl = false;
+    const size_t limit = std::min(limitNals, nals.size());
+    for (size_t idx = 0; idx < limit; ++idx) {
+        const Nal& nal = nals[idx];
+        // HEVC VCL NAL types: 0-9 (TRAIL_, TSA_, STSA_, RADL_, RASL_) and
+        // 16-23 (BLA_, IDR_, CRA_). Non-VCL preamble types include 32-34
+        // (VPS/SPS/PPS), 39 (SEI_PREFIX), 40 (SEI_SUFFIX).
+        const bool isVcl = (nal.type <= 9) || (nal.type >= 16 && nal.type <= 23);
+        const bool isPreamble = (nal.type >= 32 && nal.type <= 34) ||
+                                nal.type == 39 || nal.type == 40;
+        int64_t key = -1;
+        bool continuation = false;
+        bool preamble = false;
+        if (isVcl) {
+            continuation = poc.ClassifySlice(nal.payload, nal.len, &key) ==
+                           HEVCPoc::Slice::Continuation;
+        } else {
+            poc.FeedParameterSet(nal.payload, nal.len);
+            preamble = isPreamble;
+        }
+        // Where the current picture ends: any NAL that starts a new one.
+        if (hasVcl && (isVcl ? !continuation : preamble)) {
+            aus.push_back({auBegin, idx, auKey});
+            auBegin = idx;
+            auKey = -1;
+            hasVcl = false;
+        }
+        if (isVcl) {
+            if (!hasVcl && poc.usable()) {
+                auKey = key;
+            }
+            hasVcl = true;
+        }
+    }
+    if (closeOpen && hasVcl) {
+        aus.push_back({auBegin, limit, auKey});
+    }
+    return aus;
+}
+
+// Advances the HEVC picture-order state over nals[0, limit).
+void FeedHevcPocRange(HEVCPoc& poc, const std::vector<Nal>& nals, size_t limit) {
+    for (size_t idx = 0; idx < std::min(limit, nals.size()); ++idx) {
+        const Nal& nal = nals[idx];
+        const bool isVcl = (nal.type <= 9) || (nal.type >= 16 && nal.type <= 23);
+        if (isVcl) {
+            int64_t key = 0;
+            poc.ClassifySlice(nal.payload, nal.len, &key);
+        } else {
+            poc.FeedParameterSet(nal.payload, nal.len);
+        }
+    }
+}
+
 } // namespace vtbox
 } // namespace halcodec
