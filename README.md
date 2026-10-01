@@ -189,6 +189,9 @@ Notes:
 - **Current status**: `vtbox` decodes asynchronously via its internal queue
   — `FillInput()` accepts Annex-B access units, frames arrive from the
   decompression callback and `GetFrame()` blocks until the stream ends.
+  The Annex-B feed carries no composition offsets, so frames come back in
+  **decode order**, not presentation order: streams with B-frames must be
+  reordered by the caller (see the `Decoder::GetFrame` contract).
 
 ### hal_enc — encode
 

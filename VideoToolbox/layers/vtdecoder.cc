@@ -33,7 +33,7 @@ struct Nal {
 std::vector<Nal> ScanNals(const uint8_t* data, size_t size) {
     std::vector<Nal> nals;
     size_t i = 0;
-    while (i + 3 < size) {
+    while (i + 3 <= size) {
         if (data[i] != 0 || data[i + 1] != 0) {
             ++i;
             continue;
@@ -41,7 +41,7 @@ std::vector<Nal> ScanNals(const uint8_t* data, size_t size) {
         size_t sc = 3;
         if (data[i + 2] == 1) {
             sc = 3;
-        } else if (data[i + 2] == 0 && data[i + 3] == 1) {
+        } else if (i + 4 <= size && data[i + 2] == 0 && data[i + 3] == 1) {
             sc = 4;
         } else {
             ++i;
@@ -49,13 +49,24 @@ std::vector<Nal> ScanNals(const uint8_t* data, size_t size) {
         }
         const uint8_t* payload = data + i + sc;
         size_t j = i + sc;
-        while (j + 3 < size) {
+        // A 3-byte start code can begin at size-3, so the bound is inclusive.
+        // When no next start code is found the NAL runs to the end of the
+        // buffer: stopping the scan loop at its bound instead (the old
+        // `j + 3 < size` form) cut the last NAL of the stream short, and
+        // VideoToolbox rejected the truncated AU with
+        // kVTVideoDecoderBadDataErr (-12909).
+        bool nextStartFound = false;
+        while (j + 3 <= size) {
             if (data[j] == 0 && data[j + 1] == 0 &&
                 (data[j + 2] == 1 ||
-                 (j + 3 < size && data[j + 2] == 0 && data[j + 3] == 1))) {
+                 (j + 4 <= size && data[j + 2] == 0 && data[j + 3] == 1))) {
+                nextStartFound = true;
                 break;
             }
             ++j;
+        }
+        if (!nextStartFound) {
+            j = size;
         }
         const size_t len = j - (i + sc);
         nals.push_back(
