@@ -94,60 +94,28 @@ const size_t kSlicePrefixBytes = 48;
 
 // Consumes the shared constraint-signalling block of a profile_tier_level entry
 // (general_ or one sub_layer): profile_space/tier/idc, the 32 compatibility
-// flags, the 4 source flags, and the reserved field that follows them.
+// flags, the 4 source flags, and the reserved tail that follows them.
 //
-// Main/Main10 (idc 1/2/3) carry a plain `general_reserved_zero_44bits` field.
-// The Rext/MRange family (idc 4/5/6/7 -- what x265 and VideoToolbox emit for
-// 4:2:2 / 4:4:4 / high-bit-depth) instead writes 9 named constraint flags +
-// 34 reserved bits + 1 reserved_zero_bit: also 44 bits in total. Verified
-// against real ffmpeg-decoded SPS bytes for every Rext chroma/bit-depth combo.
-// The remaining high-tier profiles (SEG idc 8, SVC/MVC/SC idc 9..12) use a
-// different -- and here unverified -- bit count, so this front end reports
-// failure for those and the caller falls back to decode order rather than
-// desynchronising the reader.
+// That tail is ALWAYS 44 bits, whatever the profile: the Main family reads
+// reserved_zero_43bits + reserved_zero_bit and the high-tier (Rext/MRange/SEG/
+// SVC/MVC/SC/SCC, idc 4..13 -- what x265 and VideoToolbox emit for 4:2:2 / 4:4:4
+// / high-bit-depth / screen content) branch reads nine named flags +
+// reserved_zero_34bits + reserved_zero_bit; both sum to 44. Verified against
+// ffmpeg's own SPS parser: flipping only the 5-bit profile_idc of a real Main
+// stream (keeping the 44-bit tail) still yields sane width/height/level for
+// every idc 1..13, so no branch changes the tail length and none needs a
+// special case or a bail here.
 bool SkipProfileConstraints(Bits& b) {
     int64_t v = 0;
     if (!b.u(2, &v) || !b.u(1, &v)) {  // profile_space, tier_flag
         return false;
     }
-    int64_t profileIdc = 0;
-    if (!b.u(5, &profileIdc)) {  // profile_idc
+    if (!b.u(5, &v)) {  // profile_idc (consumed; the tail size does not depend on it)
         return false;
     }
-    // Read the compatibility flags first; a high-tier profile can be signalled
-    // through either general_profile_idc or a compat bit, so both are needed to
-    // pick the branch.
-    static const int kRextFamily[] = {4, 5, 6, 7};
-    static const int kOtherHighTier[] = {8, 9, 10, 11, 12};
-    bool rext = false;
-    bool otherHighTier = false;
     for (int j = 0; j < 32; ++j) {  // profile_compatibility_flag[32]
-        int64_t c = 0;
-        if (!b.u(1, &c)) {
+        if (!b.u(1, &v)) {
             return false;
-        }
-        if (!c) {
-            continue;
-        }
-        for (int r : kRextFamily) {
-            if (j == r) {
-                rext = true;
-            }
-        }
-        for (int o : kOtherHighTier) {
-            if (j == o) {
-                otherHighTier = true;
-            }
-        }
-    }
-    for (int r : kRextFamily) {
-        if (profileIdc == r) {
-            rext = true;
-        }
-    }
-    for (int o : kOtherHighTier) {
-        if (profileIdc == o) {
-            otherHighTier = true;
         }
     }
     for (int i = 0; i < 4; ++i) {  // progressive/interlaced/non_packed/frame_only
@@ -155,20 +123,13 @@ bool SkipProfileConstraints(Bits& b) {
             return false;
         }
     }
-    // Main/Main10 (44) and the Rext family (43 + 1 = 44) share a 44-bit tail;
-    // SEG/SVC/MVC/SC differ and are unsupported here.
-    if (otherHighTier && !rext) {
-        return false;
-    }
-    return b.u(44, &v);
+    return b.u(44, &v);  // fixed-size constraint tail, all profiles
 }
 
 // Consumes a full profile_tier_level() (7.3.2.1.1), including the sub-layer
 // entries a temporally scalable SPS carries, so the reader lands on the fields
-// that hold the picture-order parameters. Returns false -- and the caller gives
-// up on reordering rather than guessing -- for high-tier profiles whose
-// constraint branch this front end cannot size. profilePresentFlag is always 1:
-// the only caller is the SPS.
+// that hold the picture-order parameters. profilePresentFlag is always 1: the
+// only caller is the SPS.
 bool SkipProfileTierLevel(Bits& b, int64_t maxSubLayersMinus1) {
     int64_t v = 0;
     if (!SkipProfileConstraints(b)) {
@@ -278,8 +239,9 @@ void HEVCPoc::ParseSps(const uint8_t* nalu, size_t len) {
         return;
     }
     // profile_tier_level(1, maxSubLayersMinus1): consumes the general entry plus
-    // any sub-layer entries a temporally scalable stream carries. High-tier
-    // profiles cannot be sized here, so the front end gives up on reordering.
+    // any sub-layer entries a temporally scalable stream carries. A truncated or
+    // corrupt header makes the reader run out of bits here, so the front end
+    // gives up on reordering rather than desynchronising the stream.
     if (!SkipProfileTierLevel(b, maxSubLayersMinus1)) {
         gaveUp_ = true;
         return;
