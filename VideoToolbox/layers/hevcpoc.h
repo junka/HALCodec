@@ -16,11 +16,12 @@ namespace vtbox {
 // pic_order_cnt_lsb) with different bitstream layout.
 //
 // Supports the Main/Main10 profile layout that camera and screen encoders emit,
-// including temporally scalable streams (sps_max_sub_layers_minus1 > 0): the
-// sub-layer profile_tier_level entries are skipped so the picture-order fields
-// are still reached. High-tier profiles (Rext/MRange/SEG/MVC/SC), whose
-// constraint branch has a different bit count, are reported unsupported, so the
-// caller keeps emitting decode order rather than guessing.
+// including temporally scalable streams (sps_max_sub_layers_minus1 > 0) and the
+// Rext/MRange family (profile_idc 4-7: 4:2:2 / 4:4:4 / high-bit-depth), whose
+// 44-bit constraint tail this front end skips so the picture-order fields are
+// still reached. The remaining high-tier profiles (SEG/SVC/MVC/SC, idc 8-12),
+// whose profile_tier_level layout differs and is unverified here, are reported
+// unsupported, so the caller keeps emitting decode order rather than guessing.
 class HEVCPoc {
 public:
     // Feeds a non-VCL NAL payload including its 2-byte HEVC NAL header.

@@ -233,6 +233,9 @@ struct HevcSpsCfg {
     int maxNumReorderPics = 4;    // default: allow some reordering
     int maxDpbSize = 16;          // sps_max_dec_pic_buffering = maxDpbSize - 1
     int maxSubLayersMinus1 = 0;   // >0 exercises the temporally scalable path
+    int profileIdc = 1;           // 1=Main, 4=Rext (supported); 8=SEG (bails)
+    int chromaFormatIdc = 1;      // 1=4:2:0, 2=4:2:2, 3=4:4:4
+    int bitDepthLumaMinus8 = 0;   // 0=8-bit, 2=10-bit, 4=12-bit
 };
 
 // HEVC raw NAL (no start code): 2-byte header + escaped RBSP.
@@ -274,18 +277,23 @@ inline std::vector<uint8_t> MakeHevcSpsNal(const HevcSpsCfg& cfg) {
     w.u(3, msl);            // sps_max_sub_layers_minus1
     w.u(1, 1);              // sps_temporal_id_nesting_flag
 
-    // profile_tier_level(1, msl): Main profile, general entry only.
+    // profile_tier_level(1, msl): selected profile, general entry only. The
+    // constraint region is 44 bits for Main and for the Rext/MRange family
+    // (9 named flags + 34 reserved_zero_34bits + 1 reserved_zero_bit); SEG/SVC/
+    // MVC/SC use a different size the parser deliberately does not walk.
     w.u(2, 0);              // general_profile_space
     w.u(1, 0);              // general_tier_flag
-    w.u(5, 1);              // general_profile_idc = 1 (Main)
+    w.u(5, cfg.profileIdc); // general_profile_idc
     for (int j = 0; j < 32; ++j) {
-        w.u(1, j == 0 ? 1 : 0);  // general_profile_compatibility_flag (Main bit)
+        // Set the compatibility bit for this profile (and Main bit 0 so a Main
+        // stream is well-formed); the parser keys its branch off this bit.
+        w.u(1, (j == cfg.profileIdc || j == 0) ? 1 : 0);
     }
     w.u(1, 1);              // general_progressive_source_flag
     w.u(1, 0);              // general_interlaced_source_flag
     w.u(1, 0);              // general_non_packed_constraint_flag
     w.u(1, 1);              // general_frame_only_constraint_flag
-    w.u(44, 0);             // general_reserved_zero_44bits (non high-tier path)
+    w.u(44, 0);             // 44-bit reserved/constraint region
     w.u(8, 60);             // general_level_idc
 
     // Sub-layer signalling: all sub-layers inherit the general profile/level, so
@@ -301,12 +309,15 @@ inline std::vector<uint8_t> MakeHevcSpsNal(const HevcSpsCfg& cfg) {
     }
 
     w.ue(cfg.spsId);        // sps_seq_parameter_set_id
-    w.ue(1);                // chroma_format_idc = 1 (4:2:0)
+    w.ue(cfg.chromaFormatIdc);  // chroma_format_idc
+    if (cfg.chromaFormatIdc == 3) {
+        w.u(1, 0);          // separate_colour_plane_flag
+    }
     w.ue(320);              // pic_width_in_luma_samples
     w.ue(240);              // pic_height_in_luma_samples
     w.u(1, 0);              // conformance_window_flag
-    w.ue(0);                // bit_depth_luma_minus8
-    w.ue(0);                // bit_depth_chroma_minus8
+    w.ue(cfg.bitDepthLumaMinus8);   // bit_depth_luma_minus8
+    w.ue(cfg.bitDepthLumaMinus8);   // bit_depth_chroma_minus8
     w.ue(cfg.log2MaxPocLsbMinus4);  // log2_max_pic_order_cnt_lsb_minus4
     w.u(1, 1);              // sps_sub_layer_ordering_info_present_flag
     // One ordering triple per temporal layer, reorder bound rising with the

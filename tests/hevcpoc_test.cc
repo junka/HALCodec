@@ -150,6 +150,43 @@ void TestPocMsbCarry() {
     }
 }
 
+void TestRextHighTier() {
+    // Rext/MRange (profile_idc 4-7): 4:2:2 / 4:4:4 / high-bit-depth, the family
+    // x265 and VideoToolbox emit for those pixel formats. Its constraint region
+    // is 44 bits (9 named flags + 34 reserved_zero_34bits + 1 reserved_zero_bit),
+    // so the picture-order fields stay reachable and reordering is enabled.
+    HEVCPoc poc;
+    HevcSpsCfg sps;
+    sps.profileIdc = 4;
+    sps.chromaFormatIdc = 3;       // 4:4:4
+    sps.bitDepthLumaMinus8 = 2;    // 10-bit
+    sps.maxNumReorderPics = 2;
+    Seed(&poc, sps, kPps);
+    CHECK(poc.usable());
+    CHECK_EQ(poc.reorderDelay(), 2);
+
+    // POC derivation runs the same over a Rext picture as over Main.
+    for (int64_t i = 0; i < 3; ++i) {
+        int64_t key = -1;
+        CHECK(IsNewPicture(Classify(&poc, 1, HevcSliceCfg{true, i}, &key)));
+        CHECK_EQ(key, i);
+    }
+}
+
+void TestUnsupportedHighTierBails() {
+    // SEG (profile_idc 8) has a different, unmodelled constraint size, so the
+    // front end must give up rather than read a desynchronised POC: usable()
+    // stays false and slices classify as Unknown, leaving the caller in the
+    // safe decode-order passthrough.
+    HEVCPoc poc;
+    HevcSpsCfg sps;
+    sps.profileIdc = 8;
+    Seed(&poc, sps, kPps);
+    CHECK(!poc.usable());
+    int64_t key = 0;
+    CHECK(IsUnknown(Classify(&poc, 1, HevcSliceCfg{true, 0}, &key)));
+}
+
 }  // namespace
 
 int main() {
@@ -160,5 +197,7 @@ int main() {
     TestIrapResetsGop();
     TestScalableSubLayers();
     TestPocMsbCarry();
+    TestRextHighTier();
+    TestUnsupportedHighTierBails();
     return haltest::finish("hevcpoc");
 }
