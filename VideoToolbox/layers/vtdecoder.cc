@@ -32,12 +32,16 @@ bool VTDecoder::Initialize(const CodecParams& params) {
         return false;
     }
     
-    // Detect codec from the first NAL type in extradata (AVCC layout).
+    // Detect codec from the first NAL in extradata (AVCC layout: the first NAL
+    // starts 4 bytes in). HEVC carries a 2-byte header with a 6-bit type at
+    // (b0 >> 1) & 0x3F -- VPS/SPS/PPS are 32/33/34; H.264 has a 1-byte header
+    // with a 5-bit type at b0 & 0x1F -- SPS/PPS are 7/8. Only a 32/33/34 under
+    // the HEVC reading means HEVC: an H.264 SPS byte (0x67) maps to 51, never
+    // into that range, so the test is unambiguous.
     bool isHEVC = false;
     if (ext.size() >= 5) {
-        uint8_t firstNalType = ext[4] & 0x1F;
-        // HEVC VPS=32, SPS=33, PPS=34; H.264 SPS=7, PPS=8
-        if (firstNalType == 32 || firstNalType == 33 || firstNalType == 34) {
+        const uint8_t hevcType = static_cast<uint8_t>((ext[4] >> 1) & 0x3F);
+        if (hevcType == 32 || hevcType == 33 || hevcType == 34) {
             isHEVC = true;
         }
     }
@@ -135,7 +139,8 @@ bool VTDecoder::InitializeHEVC(const CodecParams& params) {
         if (pos + naluLen > ext.size()) {
             break;
         }
-        uint8_t naluType = ext[pos] & 0x3F;  // HEVC uses 6 bits for type
+        // HEVC NAL type lives in bits 1-6 of the first header byte.
+        uint8_t naluType = static_cast<uint8_t>((ext[pos] >> 1) & 0x3F);
         if (naluType == 32) {
             vpsPointer = ext.data() + pos;
             vpsSize = naluLen;

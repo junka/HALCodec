@@ -231,6 +231,8 @@ struct HevcSpsCfg {
     int spsId = 0;
     int log2MaxPocLsbMinus4 = 0;  // stored as minus-4 form for wrap testing
     int maxNumReorderPics = 4;    // default: allow some reordering
+    int maxDpbSize = 16;          // sps_max_dec_pic_buffering = maxDpbSize - 1
+    int maxSubLayersMinus1 = 0;   // >0 exercises the temporally scalable path
 };
 
 // HEVC raw NAL (no start code): 2-byte header + escaped RBSP.
@@ -267,56 +269,54 @@ inline std::vector<uint8_t> MakeHevcVpsNal() {
 
 inline std::vector<uint8_t> MakeHevcSpsNal(const HevcSpsCfg& cfg) {
     BitWriter w;
-    w.u(4, cfg.spsId);  // sps_video_parameter_set_id
-    w.u(3, 0);          // sps_max_sub_layers_minus1
-    w.u(1, 1);          // sps_temporal_id_nesting_flag
-    
-    // profile_tier_level (simplified: skip most fields)
-    w.u(2, 1);          // general_profile_space
-    w.u(1, 0);          // general_tier_flag
-    w.u(5, 1);          // general_profile_idc (Main)
-    w.u(32, 0);         // general_profile_compatibility_flags
-    w.u(1, 0);          // general_progressive_source_flag
-    w.u(1, 0);          // general_interlaced_source_flag
-    w.u(1, 0);          // general_non_packed_constraint_flag
-    w.u(1, 0);          // general_frame_only_constraint_flag
-    w.u(8, 0);          // general_level_idc
-    
-    w.ue(cfg.spsId);    // sps_seq_parameter_set_id
-    w.ue(1);            // chroma_format_idc (4:2:0)
-    w.u(1, 0);          // separate_colour_plane_flag
-    w.ue(19);           // pic_width_in_luma_samples (320)
-    w.ue(14);           // pic_height_in_luma_samples (240)
-    
-    w.u(1, 0);          // conformance_window_flag
-    w.ue(8);            // bit_depth_luma_minus8
-    w.ue(8);            // bit_depth_chroma_minus8
+    const int msl = cfg.maxSubLayersMinus1;
+    w.u(4, cfg.spsId);      // sps_video_parameter_set_id
+    w.u(3, msl);            // sps_max_sub_layers_minus1
+    w.u(1, 1);              // sps_temporal_id_nesting_flag
+
+    // profile_tier_level(1, msl): Main profile, general entry only.
+    w.u(2, 0);              // general_profile_space
+    w.u(1, 0);              // general_tier_flag
+    w.u(5, 1);              // general_profile_idc = 1 (Main)
+    for (int j = 0; j < 32; ++j) {
+        w.u(1, j == 0 ? 1 : 0);  // general_profile_compatibility_flag (Main bit)
+    }
+    w.u(1, 1);              // general_progressive_source_flag
+    w.u(1, 0);              // general_interlaced_source_flag
+    w.u(1, 0);              // general_non_packed_constraint_flag
+    w.u(1, 1);              // general_frame_only_constraint_flag
+    w.u(44, 0);             // general_reserved_zero_44bits (non high-tier path)
+    w.u(8, 60);             // general_level_idc
+
+    // Sub-layer signalling: all sub-layers inherit the general profile/level, so
+    // both presence flags are 0 and only the flags + padding bits are written.
+    for (int i = 0; i < msl; ++i) {
+        w.u(1, 0);          // sub_layer_profile_present_flag[i]
+        w.u(1, 0);          // sub_layer_level_present_flag[i]
+    }
+    if (msl > 0) {
+        for (int i = msl; i < 8; ++i) {
+            w.u(2, 0);      // reserved_zero_2bits[i]
+        }
+    }
+
+    w.ue(cfg.spsId);        // sps_seq_parameter_set_id
+    w.ue(1);                // chroma_format_idc = 1 (4:2:0)
+    w.ue(320);              // pic_width_in_luma_samples
+    w.ue(240);              // pic_height_in_luma_samples
+    w.u(1, 0);              // conformance_window_flag
+    w.ue(0);                // bit_depth_luma_minus8
+    w.ue(0);                // bit_depth_chroma_minus8
     w.ue(cfg.log2MaxPocLsbMinus4);  // log2_max_pic_order_cnt_lsb_minus4
-    
-    // HEVC doesn't have pic_order_cnt_type like H.264; it's always type 0 equivalent
-    // Read sub-layer ordering info
-    w.u(1, 0);          // sps_sub_layer_ordering_info_present_flag
-    w.ue(0);            // sps_max_dec_pic_buffering_minus1[0]
-    w.ue(cfg.maxNumReorderPics);  // sps_max_num_reorder_pics[0]
-    w.ue(0);            // sps_max_latency_increase_plus1[0]
-    
-    w.ue(1);            // log2_min_luma_coding_block_size_minus3
-    w.ue(0);            // log2_diff_max_min_luma_coding_block_size
-    w.ue(0);            // log2_min_transform_block_size_minus2
-    w.ue(0);            // log2_diff_max_min_transform_block_size
-    w.ue(0);            // max_transform_hierarchy_depth_inter
-    w.ue(0);            // max_transform_hierarchy_depth_intra
-    
-    w.u(1, 0);          // scaling_list_enabled_flag
-    w.u(1, 0);          // amp_enabled_flag
-    w.u(1, 0);          // sample_adaptive_offset_enabled_flag
-    w.u(1, 0);          // pcm_enabled_flag
-    
-    w.ue(0);            // num_short_term_ref_pic_sets
-    w.ue(0);            // num_long_term_ref_pics_sps
-    w.u(1, 0);          // sps_temporal_mvp_enabled_flag
-    w.u(1, 0);          // strong_intra_smoothing_enabled_flag
-    
+    w.u(1, 1);              // sps_sub_layer_ordering_info_present_flag
+    // One ordering triple per temporal layer, reorder bound rising with the
+    // layer so the parser's max-across-layers choice is observable.
+    for (int i = 0; i <= msl; ++i) {
+        w.ue(cfg.maxDpbSize - 1);           // sps_max_dec_pic_buffering_minus1[i]
+        w.ue(cfg.maxNumReorderPics + i);    // sps_max_num_reorder_pics[i]
+        w.ue(0);                            // sps_max_latency_increase_plus1[i]
+    }
+
     w.rbspTrailer();
     return MakeHevcRawNal(33, w.bytes());
 }
@@ -358,31 +358,31 @@ inline std::vector<uint8_t> MakeHevcPpsNal(const HevcPpsCfg& cfg) {
 struct HevcSliceCfg {
     bool firstSlice = true;
     int64_t pocLsb = 0;
-    int nalRefIdc = 1;
+    int pocLsbBits = 4;  // must match the SPS's log2_max_pic_order_cnt_lsb
 };
 
 inline std::vector<uint8_t> MakeHevcSliceNal(int nalUnitType,
                                              const HevcSliceCfg& cfg) {
     BitWriter w;
     w.u(1, cfg.firstSlice ? 1 : 0);  // first_slice_segment_in_pic_flag
-    if (nalUnitType >= 16 && nalUnitType <= 23) {
-        w.u(1, 0);  // no_output_of_prior_pics_flag (IRAP only)
-    }
-    w.ue(0);        // slice_pic_parameter_set_id
-    w.u(1, 0);      // dependent_slice_segment_flag
-    
     if (!cfg.firstSlice) {
-        w.ue(0);    // slice_segment_address
+        // The front end returns at the 0 flag and never reads past it, so a
+        // continuation slice needs no further syntax.
+        w.rbspTrailer();
+        return MakeHevcRawNal(nalUnitType, w.bytes());
     }
-    
-    // Skip slice_type, prediction weights, etc. — not needed for POC test
-    // Just write enough to make it parseable
-    
-    if (cfg.firstSlice) {
-        // For POC type 0, we need pic_order_cnt_lsb
-        w.u(4, static_cast<int>(cfg.pocLsb & 0xF));  // simplified: use small range
+
+    const bool isIrap = (nalUnitType >= 16 && nalUnitType <= 23);
+    const bool isIdr = (nalUnitType == 19 || nalUnitType == 20);
+    if (isIrap) {
+        w.u(1, 0);   // no_output_of_prior_pics_flag (before the PPS id)
     }
-    
+    w.ue(0);         // slice_pic_parameter_set_id
+    w.ue(7);         // slice_type (P) — parsed then discarded
+    if (!isIdr) {
+        w.u(cfg.pocLsbBits, cfg.pocLsb);  // pic_order_cnt_lsb
+    }
+
     w.rbspTrailer();
     return MakeHevcRawNal(nalUnitType, w.bytes());
 }

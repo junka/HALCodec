@@ -43,6 +43,9 @@
 build
 build-drive
 build-rel
+build-cov
+*.profraw
+*.profdata
 NVEnc/Video_Codec_SDK_13.0.19/Samples
 
 # AMF SDK: track the headers/docs (needed at build time), skip the 1.2G

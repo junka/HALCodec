@@ -34,6 +34,18 @@ set_target_properties(h264poc_test PROPERTIES CXX_STANDARD 17)
 add_test(NAME h264poc COMMAND h264poc_test)
 
 # ---------------------------------------------------------------------------
+# hevcpoc_test — the HEVC picture-order front end (H.265 8.3.1), same shape.
+# ---------------------------------------------------------------------------
+add_executable(hevcpoc_test
+    hevcpoc_test.cc
+    ${CMAKE_SOURCE_DIR}/VideoToolbox/layers/hevcpoc.cc)
+target_include_directories(hevcpoc_test PRIVATE
+    ${CMAKE_SOURCE_DIR}/src
+    ${CMAKE_SOURCE_DIR}/VideoToolbox/layers)
+set_target_properties(hevcpoc_test PROPERTIES CXX_STANDARD 17)
+add_test(NAME hevcpoc COMMAND hevcpoc_test)
+
+# ---------------------------------------------------------------------------
 # registry_test — links halcodec_core (the shared library that owns the
 # process-wide map). The core exports the storage accessor under HALCODEC_API.
 # ---------------------------------------------------------------------------
