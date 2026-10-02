@@ -94,10 +94,17 @@ const size_t kSlicePrefixBytes = 48;
 
 // Consumes the shared constraint-signalling block of a profile_tier_level entry
 // (general_ or one sub_layer): profile_space/tier/idc, the 32 compatibility
-// flags, the 4 source flags, and the reserved field. Main/Main10 (idc 1/2) use
-// the 44-bit reserved branch; the high-tier profiles (Rext/MRange/SEG/MVC/SC)
-// use a 43-bit branch instead, and this front end does not model their bit
-// counts, so it reports failure rather than desynchronising the reader.
+// flags, the 4 source flags, and the reserved field that follows them.
+//
+// Main/Main10 (idc 1/2/3) carry a plain `general_reserved_zero_44bits` field.
+// The Rext/MRange family (idc 4/5/6/7 -- what x265 and VideoToolbox emit for
+// 4:2:2 / 4:4:4 / high-bit-depth) instead writes 9 named constraint flags +
+// 34 reserved bits + 1 reserved_zero_bit: also 44 bits in total. Verified
+// against real ffmpeg-decoded SPS bytes for every Rext chroma/bit-depth combo.
+// The remaining high-tier profiles (SEG idc 8, SVC/MVC/SC idc 9..12) use a
+// different -- and here unverified -- bit count, so this front end reports
+// failure for those and the caller falls back to decode order rather than
+// desynchronising the reader.
 bool SkipProfileConstraints(Bits& b) {
     int64_t v = 0;
     if (!b.u(2, &v) || !b.u(1, &v)) {  // profile_space, tier_flag
@@ -107,22 +114,40 @@ bool SkipProfileConstraints(Bits& b) {
     if (!b.u(5, &profileIdc)) {  // profile_idc
         return false;
     }
-    static const int kHighTier[] = {4, 5, 6, 7, 10, 11, 12};
-    bool highTier = false;
+    // Read the compatibility flags first; a high-tier profile can be signalled
+    // through either general_profile_idc or a compat bit, so both are needed to
+    // pick the branch.
+    static const int kRextFamily[] = {4, 5, 6, 7};
+    static const int kOtherHighTier[] = {8, 9, 10, 11, 12};
+    bool rext = false;
+    bool otherHighTier = false;
     for (int j = 0; j < 32; ++j) {  // profile_compatibility_flag[32]
         int64_t c = 0;
         if (!b.u(1, &c)) {
             return false;
         }
-        for (int h : kHighTier) {
-            if (j == h && c) {
-                highTier = true;
+        if (!c) {
+            continue;
+        }
+        for (int r : kRextFamily) {
+            if (j == r) {
+                rext = true;
+            }
+        }
+        for (int o : kOtherHighTier) {
+            if (j == o) {
+                otherHighTier = true;
             }
         }
     }
-    for (int h : kHighTier) {
-        if (profileIdc == h) {
-            highTier = true;
+    for (int r : kRextFamily) {
+        if (profileIdc == r) {
+            rext = true;
+        }
+    }
+    for (int o : kOtherHighTier) {
+        if (profileIdc == o) {
+            otherHighTier = true;
         }
     }
     for (int i = 0; i < 4; ++i) {  // progressive/interlaced/non_packed/frame_only
@@ -130,10 +155,12 @@ bool SkipProfileConstraints(Bits& b) {
             return false;
         }
     }
-    if (highTier) {
+    // Main/Main10 (44) and the Rext family (43 + 1 = 44) share a 44-bit tail;
+    // SEG/SVC/MVC/SC differ and are unsupported here.
+    if (otherHighTier && !rext) {
         return false;
     }
-    return b.u(44, &v);  // general_reserved_zero_44bits
+    return b.u(44, &v);
 }
 
 // Consumes a full profile_tier_level() (7.3.2.1.1), including the sub-layer
