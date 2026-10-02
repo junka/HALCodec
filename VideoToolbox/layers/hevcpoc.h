@@ -15,13 +15,13 @@ namespace vtbox {
 // structurally similar to H.264 type 0 (PicOrderCntVal = PicOrderCntMsb +
 // pic_order_cnt_lsb) with different bitstream layout.
 //
-// Supports the Main/Main10 profile layout that camera and screen encoders emit,
-// including temporally scalable streams (sps_max_sub_layers_minus1 > 0) and the
-// Rext/MRange family (profile_idc 4-7: 4:2:2 / 4:4:4 / high-bit-depth), whose
-// 44-bit constraint tail this front end skips so the picture-order fields are
-// still reached. The remaining high-tier profiles (SEG/SVC/MVC/SC, idc 8-12),
-// whose profile_tier_level layout differs and is unverified here, are reported
-// unsupported, so the caller keeps emitting decode order rather than guessing.
+// Supports the whole profile_tier_level family that camera, screen and
+// professional encoders emit, including temporally scalable streams
+// (sps_max_sub_layers_minus1 > 0) and the high-tier profiles (Rext/MRange/SEG/
+// SVC/MVC/SC/SCC, profile_idc 4-13: 4:2:2 / 4:4:4 / high-bit-depth / screen
+// content). Their constraint tail is a fixed 44 bits -- the same size as the
+// Main family's -- verified against ffmpeg's own SPS parser, so this front end
+// skips it uniformly and reaches the picture-order fields for every profile.
 class HEVCPoc {
 public:
     // Feeds a non-VCL NAL payload including its 2-byte HEVC NAL header.

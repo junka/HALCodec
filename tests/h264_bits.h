@@ -233,7 +233,7 @@ struct HevcSpsCfg {
     int maxNumReorderPics = 4;    // default: allow some reordering
     int maxDpbSize = 16;          // sps_max_dec_pic_buffering = maxDpbSize - 1
     int maxSubLayersMinus1 = 0;   // >0 exercises the temporally scalable path
-    int profileIdc = 1;           // 1=Main, 4=Rext (supported); 8=SEG (bails)
+    int profileIdc = 1;           // any of 1..13; all share the fixed 44-bit tail
     int chromaFormatIdc = 1;      // 1=4:2:0, 2=4:2:2, 3=4:4:4
     int bitDepthLumaMinus8 = 0;   // 0=8-bit, 2=10-bit, 4=12-bit
 };
@@ -278,9 +278,10 @@ inline std::vector<uint8_t> MakeHevcSpsNal(const HevcSpsCfg& cfg) {
     w.u(1, 1);              // sps_temporal_id_nesting_flag
 
     // profile_tier_level(1, msl): selected profile, general entry only. The
-    // constraint region is 44 bits for Main and for the Rext/MRange family
-    // (9 named flags + 34 reserved_zero_34bits + 1 reserved_zero_bit); SEG/SVC/
-    // MVC/SC use a different size the parser deliberately does not walk.
+    // constraint region is a fixed 44 bits for every profile -- the Main family
+    // (43 reserved + 1) and the high-tier Rext/MRange/SEG/SVC/MVC/SC/SCC family
+    // (9 named flags + 34 reserved + 1) both sum to 44 -- so the parser skips it
+    // uniformly regardless of profileIdc.
     w.u(2, 0);              // general_profile_space
     w.u(1, 0);              // general_tier_flag
     w.u(5, cfg.profileIdc); // general_profile_idc

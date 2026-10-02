@@ -173,15 +173,35 @@ void TestRextHighTier() {
     }
 }
 
-void TestUnsupportedHighTierBails() {
-    // SEG (profile_idc 8) has a different, unmodelled constraint size, so the
-    // front end must give up rather than read a desynchronised POC: usable()
-    // stays false and slices classify as Unknown, leaving the caller in the
-    // safe decode-order passthrough.
+void TestRemainingHighTierProfiles() {
+    // SEG/SVC/MVC/SC/SCC (profile_idc 8..13) share the same fixed 44-bit
+    // constraint tail as Main and Rext -- verified against ffmpeg's own SPS
+    // parser -- so they must be usable and reorder exactly like Main rather than
+    // falling back to decode order.
+    for (int profileIdc : {8, 9, 10, 11, 12, 13}) {
+        HEVCPoc poc;
+        HevcSpsCfg sps;
+        sps.profileIdc = profileIdc;
+        sps.maxNumReorderPics = 2;
+        Seed(&poc, sps, kPps);
+        CHECK(poc.usable());
+        CHECK_EQ(poc.reorderDelay(), 2);
+        for (int64_t i = 0; i < 3; ++i) {
+            int64_t key = -1;
+            CHECK(IsNewPicture(Classify(&poc, 1, HevcSliceCfg{true, i}, &key)));
+            CHECK_EQ(key, i);
+        }
+    }
+}
+
+void TestTruncatedHeaderBails() {
+    // A profile the tail size does not depend on is fine; a header truncated
+    // before the picture-order fields is not. Feeding a stub SPS that runs out of
+    // bits mid profile_tier_level must leave usable() false and classify slices
+    // Unknown, so the caller stays in the safe decode-order passthrough.
     HEVCPoc poc;
-    HevcSpsCfg sps;
-    sps.profileIdc = 8;
-    Seed(&poc, sps, kPps);
+    const std::vector<uint8_t> stub = haltest::MakeHevcRawNal(33, {0x01, 0x02});
+    poc.FeedParameterSet(stub.data(), stub.size());
     CHECK(!poc.usable());
     int64_t key = 0;
     CHECK(IsUnknown(Classify(&poc, 1, HevcSliceCfg{true, 0}, &key)));
@@ -198,6 +218,7 @@ int main() {
     TestScalableSubLayers();
     TestPocMsbCarry();
     TestRextHighTier();
-    TestUnsupportedHighTierBails();
+    TestRemainingHighTierProfiles();
+    TestTruncatedHeaderBails();
     return haltest::finish("hevcpoc");
 }
