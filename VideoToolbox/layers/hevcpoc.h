@@ -15,11 +15,15 @@ namespace vtbox {
 // structurally similar to H.264 type 0 (PicOrderCntVal = PicOrderCntMsb +
 // pic_order_cnt_lsb) with different bitstream layout.
 //
-// Supports pic_order_cnt_type 0 (the common case). Types 1 and 2 are reported
-// unsupported: the caller then keeps emitting decode order rather than guessing.
+// Supports the Main/Main10 profile layout that camera and screen encoders emit,
+// including temporally scalable streams (sps_max_sub_layers_minus1 > 0): the
+// sub-layer profile_tier_level entries are skipped so the picture-order fields
+// are still reached. High-tier profiles (Rext/MRange/SEG/MVC/SC), whose
+// constraint branch has a different bit count, are reported unsupported, so the
+// caller keeps emitting decode order rather than guessing.
 class HEVCPoc {
 public:
-    // Feeds a non-VCL NAL payload (including its 1-byte NAL header).
+    // Feeds a non-VCL NAL payload including its 2-byte HEVC NAL header.
     // HEVC NAL types: VPS=32, SPS=33, PPS=34.
     void FeedParameterSet(const uint8_t* nalu, size_t len);
 
@@ -52,8 +56,7 @@ private:
     };
     struct Sps {
         bool valid = false;
-        int log2MaxPocLsb = 4;  // default from spec
-        int pocType = 0;
+        int log2MaxPocLsb = 4;  // MaxPicOrderCntLsb = 1 << log2MaxPocLsb
         int maxNumReorderPics = 0;
         int maxDpbSize = 16;
     };

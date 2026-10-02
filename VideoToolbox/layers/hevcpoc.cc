@@ -92,6 +92,96 @@ std::vector<uint8_t> Rbsp(const uint8_t* src, size_t len, size_t want) {
 const size_t kSpsBytes = 512;
 const size_t kSlicePrefixBytes = 48;
 
+// Consumes the shared constraint-signalling block of a profile_tier_level entry
+// (general_ or one sub_layer): profile_space/tier/idc, the 32 compatibility
+// flags, the 4 source flags, and the reserved field. Main/Main10 (idc 1/2) use
+// the 44-bit reserved branch; the high-tier profiles (Rext/MRange/SEG/MVC/SC)
+// use a 43-bit branch instead, and this front end does not model their bit
+// counts, so it reports failure rather than desynchronising the reader.
+bool SkipProfileConstraints(Bits& b) {
+    int64_t v = 0;
+    if (!b.u(2, &v) || !b.u(1, &v)) {  // profile_space, tier_flag
+        return false;
+    }
+    int64_t profileIdc = 0;
+    if (!b.u(5, &profileIdc)) {  // profile_idc
+        return false;
+    }
+    static const int kHighTier[] = {4, 5, 6, 7, 10, 11, 12};
+    bool highTier = false;
+    for (int j = 0; j < 32; ++j) {  // profile_compatibility_flag[32]
+        int64_t c = 0;
+        if (!b.u(1, &c)) {
+            return false;
+        }
+        for (int h : kHighTier) {
+            if (j == h && c) {
+                highTier = true;
+            }
+        }
+    }
+    for (int h : kHighTier) {
+        if (profileIdc == h) {
+            highTier = true;
+        }
+    }
+    for (int i = 0; i < 4; ++i) {  // progressive/interlaced/non_packed/frame_only
+        if (!b.u(1, &v)) {
+            return false;
+        }
+    }
+    if (highTier) {
+        return false;
+    }
+    return b.u(44, &v);  // general_reserved_zero_44bits
+}
+
+// Consumes a full profile_tier_level() (7.3.2.1.1), including the sub-layer
+// entries a temporally scalable SPS carries, so the reader lands on the fields
+// that hold the picture-order parameters. Returns false -- and the caller gives
+// up on reordering rather than guessing -- for high-tier profiles whose
+// constraint branch this front end cannot size. profilePresentFlag is always 1:
+// the only caller is the SPS.
+bool SkipProfileTierLevel(Bits& b, int64_t maxSubLayersMinus1) {
+    int64_t v = 0;
+    if (!SkipProfileConstraints(b)) {
+        return false;
+    }
+    if (!b.u(8, &v)) {  // general_level_idc
+        return false;
+    }
+    if (maxSubLayersMinus1 < 0 || maxSubLayersMinus1 > 7) {
+        return false;
+    }
+    // sub_layer profile/level presence flags.
+    bool subProfilePresent[7] = {false};
+    bool subLevelPresent[7] = {false};
+    for (int i = 0; i < maxSubLayersMinus1; ++i) {
+        int64_t p = 0, l = 0;
+        if (!b.u(1, &p) || !b.u(1, &l)) {
+            return false;
+        }
+        subProfilePresent[i] = p != 0;
+        subLevelPresent[i] = l != 0;
+    }
+    // Padding to 8 sub-layer slots, present whenever there is more than one.
+    for (int i = static_cast<int>(maxSubLayersMinus1); i < 8 &&
+              maxSubLayersMinus1 > 0; ++i) {
+        if (!b.u(2, &v)) {  // reserved_zero_2bits
+            return false;
+        }
+    }
+    for (int i = 0; i < maxSubLayersMinus1; ++i) {
+        if (subProfilePresent[i] && !SkipProfileConstraints(b)) {
+            return false;
+        }
+        if (subLevelPresent[i] && !b.u(8, &v)) {  // sub_layer_level_idc
+            return false;
+        }
+    }
+    return true;
+}
+
 } // namespace
 
 void HEVCPoc::Reset() {
@@ -128,13 +218,11 @@ void HEVCPoc::RefreshUsable() {
 }
 
 void HEVCPoc::ParseVps(const uint8_t* nalu, size_t len) {
-    // Minimal parse: just validate it exists. VPS ID is not needed for POC.
-    const std::vector<uint8_t> rbsp = Rbsp(nalu + 1, len - 1, 64);
-    if (rbsp.size() < 2) {
+    // Minimal parse: just validate it exists. The VPS carries no picture-order
+    // parameters, and its id is not needed to key the SPS/PPS tables.
+    if (len < 2) {
         return;
     }
-    // Skip vps_video_parameter_set_id (4 bits) and reserved bits.
-    // We just mark VPS as present.
     if (vpsById_.empty()) {
         vpsById_.resize(1);
     }
@@ -142,171 +230,130 @@ void HEVCPoc::ParseVps(const uint8_t* nalu, size_t len) {
 }
 
 void HEVCPoc::ParseSps(const uint8_t* nalu, size_t len) {
-    const std::vector<uint8_t> rbsp = Rbsp(nalu + 1, len - 1, kSpsBytes);
+    // HEVC NAL header is 2 bytes; the syntax element stream starts after it.
+    const std::vector<uint8_t> rbsp = Rbsp(nalu + 2, len - 2, kSpsBytes);
     Bits b(rbsp.data(), rbsp.size());
 
     Sps sps;
     int64_t v = 0;
 
-    // sps_video_parameter_set_id (4 bits)
+    // sps_video_parameter_set_id u(4)
     if (!b.u(4, &v)) {
         return;
     }
-    
-    int64_t spsMaxSubLayersMinus1 = 0;
-    int64_t spsTemporallIdNestingFlag = 0;
-    if (!b.u(4, &v) || !b.u(1, &spsTemporallIdNestingFlag)) {
+    // sps_max_sub_layers_minus1 u(3)
+    int64_t maxSubLayersMinus1 = 0;
+    if (!b.u(3, &maxSubLayersMinus1)) {
         return;
     }
-    
-    // profile_tier_level (skip for now, complex structure)
-    // Just skip enough to reach pic_order_cnt_type
-    // general_profile_space (2) + general_tier_flag (1) + general_profile_idc (5)
-    // + general_profile_compatibility_flag[32] + general_progressive_source_flag (1)
-    // + general_interlaced_source_flag (1) + general_non_packed_constraint_flag (1)
-    // + general_frame_only_constraint_flag (1) + general_max_12bit_constraint_flag (1)
-    // + general_max_10bit_constraint_flag (1) + general_max_8bit_constraint_flag (1)
-    // + general_max_422chroma_constraint_flag (1) + general_max_420chroma_constraint_flag (1)
-    // + general_max_monochrome_constraint_flag (1) + general_intra_constraint_flag (1)
-    // + general_one_picture_only_constraint_flag (1) + general_lower_bit_rate_constraint_flag (1)
-    // + general_max_14bit_constraint_flag (1) + reserved_zero_33bits (33)
-    // This is very long, let's use a simpler approach: read until we find what we need
-    
-    // Simplified: skip profile_tier_level by reading known fields
-    int64_t skip = 0;
-    if (!b.u(2, &skip) || !b.u(1, &skip) || !b.u(5, &skip)) {
+    // sps_temporal_id_nesting_flag u(1)
+    if (!b.u(1, &v)) {
         return;
     }
-    // general_profile_compatibility_flag[32]
-    for (int i = 0; i < 32; ++i) {
-        if (!b.u(1, &skip)) {
-            return;
-        }
-    }
-    // progressive_source_flag + interlaced_source_flag + non_packed_constraint_flag + frame_only_constraint_flag
-    if (!b.u(1, &skip) || !b.u(1, &skip) || !b.u(1, &skip) || !b.u(1, &skip)) {
+    // profile_tier_level(1, maxSubLayersMinus1): consumes the general entry plus
+    // any sub-layer entries a temporally scalable stream carries. High-tier
+    // profiles cannot be sized here, so the front end gives up on reordering.
+    if (!SkipProfileTierLevel(b, maxSubLayersMinus1)) {
+        gaveUp_ = true;
         return;
     }
-    // Skip remaining constraint flags (variable length based on profile_idc)
-    // For simplicity, assume main profile and skip the rest
-    // max_12bit + max_10bit + max_8bit + max_422chroma + max_420chroma + max_monochrome + intra + one_picture + lower_bit_rate + max_14bit
-    for (int i = 0; i < 10; ++i) {
-        if (!b.u(1, &skip)) {
-            return;
-        }
-    }
-    // reserved_zero_33bits (actually 32 + 1 in newer specs, but we'll read 33)
-    for (int i = 0; i < 33; ++i) {
-        if (!b.u(1, &skip)) {
-            return;
-        }
-    }
-    
-    // sps_seq_parameter_set_id
+
     int64_t spsId = 0;
     if (!b.ue(&spsId)) {
         return;
     }
-    
-    // chroma_format_idc
+
     int64_t chromaFormatIdc = 1;
     if (!b.ue(&chromaFormatIdc)) {
         return;
     }
     if (chromaFormatIdc == 3) {
-        if (!b.u(1, &skip)) {
+        int64_t separateColourPlane = 0;
+        if (!b.u(1, &separateColourPlane)) {
             return;
         }
     }
-    
-    // pic_width_in_luma_samples, pic_height_in_luma_samples, conformance_window_flag
+
+    // pic_width/height, conformance_window_flag (+ 4 offsets when set).
+    int64_t skip = 0;
     if (!b.ue(&skip) || !b.ue(&skip) || !b.u(1, &skip)) {
         return;
     }
     if (skip) {
-        // conf_win_* offsets
         for (int i = 0; i < 4; ++i) {
             if (!b.ue(&skip)) {
                 return;
             }
         }
     }
-    
-    // bit_depth_luma_minus8, bit_depth_chroma_minus8
+
+    // bit_depth_luma_minus8, bit_depth_chroma_minus8.
     if (!b.ue(&skip) || !b.ue(&skip)) {
         return;
     }
-    
-    // log2_max_pic_order_cnt_lsb_minus4
+
+    // log2_max_pic_order_cnt_lsb_minus4 -> MaxPicOrderCntLsb = 1 << (x + 4).
     int64_t log2MaxPocLsbMinus4 = 0;
     if (!b.ue(&log2MaxPocLsbMinus4)) {
         return;
     }
     sps.log2MaxPocLsb = static_cast<int>(log2MaxPocLsbMinus4) + 4;
-    
-    // sps_sub_layer_ordering_info_present_flag
+
+    // sps_sub_layer_ordering_info_present_flag; one triple per layer, from
+    // layer 0 when present else only the highest layer. The reorder delay takes
+    // the largest bound across the layers, which is what a full-rate decode
+    // (every temporal layer submitted) has to hold back.
     int64_t subLayerOrderingInfoPresent = 0;
     if (!b.u(1, &subLayerOrderingInfoPresent)) {
         return;
     }
-    
-    // For each temporal layer, read max_num_reorder_pics and max_dec_pic_buffering_minus1
-    int startLayer = subLayerOrderingInfoPresent ? 0 : static_cast<int>(spsMaxSubLayersMinus1);
-    for (int i = startLayer; i <= static_cast<int>(spsMaxSubLayersMinus1); ++i) {
-        int64_t maxNumReorderPics = 0;
+    const int firstLayer = subLayerOrderingInfoPresent ? 0
+                                                        : static_cast<int>(maxSubLayersMinus1);
+    int maxReorder = 0;
+    int maxDpb = 0;
+    for (int i = firstLayer; i <= static_cast<int>(maxSubLayersMinus1); ++i) {
         int64_t maxDecPicBufferingMinus1 = 0;
-        if (!b.ue(&maxNumReorderPics) || !b.ue(&maxDecPicBufferingMinus1)) {
+        int64_t maxNumReorderPics = 0;
+        int64_t maxLatencyIncreasePlus1 = 0;
+        if (!b.ue(&maxDecPicBufferingMinus1) || !b.ue(&maxNumReorderPics) ||
+            !b.ue(&maxLatencyIncreasePlus1)) {
             return;
         }
-        if (i == static_cast<int>(spsMaxSubLayersMinus1)) {
-            sps.maxNumReorderPics = static_cast<int>(maxNumReorderPics);
-            sps.maxDpbSize = static_cast<int>(maxDecPicBufferingMinus1) + 1;
-        }
+        maxReorder = std::max(maxReorder, static_cast<int>(maxNumReorderPics));
+        maxDpb = std::max(maxDpb, static_cast<int>(maxDecPicBufferingMinus1) + 1);
     }
-    
-    // log2_min_luma_coding_block_size_minus3, log2_diff_max_min_luma_coding_block_size
-    if (!b.ue(&skip) || !b.ue(&skip)) {
-        return;
-    }
-    // ... many more fields, skip to end
-    
-    // Mark SPS as valid with the fields we extracted
+    sps.maxNumReorderPics = maxReorder;
+    sps.maxDpbSize = maxDpb;
+
+    sps.valid = true;
     if (static_cast<size_t>(spsId) >= spsById_.size()) {
         spsById_.resize(static_cast<size_t>(spsId) + 1);
     }
     spsById_[static_cast<size_t>(spsId)] = sps;
-    sps.valid = true;
-    
+
     RefreshUsable();
 }
 
 void HEVCPoc::ParsePps(const uint8_t* nalu, size_t len) {
-    const std::vector<uint8_t> rbsp = Rbsp(nalu + 1, len - 1, 64);
+    const std::vector<uint8_t> rbsp = Rbsp(nalu + 2, len - 2, 64);
     Bits b(rbsp.data(), rbsp.size());
-    
+
     Pps pps;
-    int64_t v = 0;
-    
-    // pps_pic_parameter_set_id
+
+    // pps_pic_parameter_set_id, pps_seq_parameter_set_id.
     int64_t ppsId = 0;
-    if (!b.ue(&ppsId)) {
-        return;
-    }
-    
-    // pps_seq_parameter_set_id
     int64_t spsId = 0;
-    if (!b.ue(&spsId)) {
+    if (!b.ue(&ppsId) || !b.ue(&spsId)) {
         return;
     }
     pps.spsId = static_cast<int>(spsId);
-    
-    // Mark PPS as valid
+    pps.valid = true;
+
     if (static_cast<size_t>(ppsId) >= ppsById_.size()) {
         ppsById_.resize(static_cast<size_t>(ppsId) + 1);
     }
     ppsById_[static_cast<size_t>(ppsId)] = pps;
-    pps.valid = true;
-    
+
     RefreshUsable();
 }
 
@@ -360,29 +407,11 @@ HEVCPoc::Slice HEVCPoc::ClassifySlice(const uint8_t* nalu, size_t len,
         return Slice::Continuation;
     }
     
-    // Find the PPS this slice refers to
-    int64_t ppsId = 0;
-    if (!b.ue(&ppsId)) {
-        gaveUp_ = true;
-        usable_ = false;
-        return Slice::Unknown;
-    }
-    
-    if (static_cast<size_t>(ppsId) >= ppsById_.size() ||
-        !ppsById_[static_cast<size_t>(ppsId)].valid) {
-        return Slice::Unknown;
-    }
-    
-    const Pps& pps = ppsById_[static_cast<size_t>(ppsId)];
-    if (static_cast<size_t>(pps.spsId) >= spsById_.size() ||
-        !spsById_[static_cast<size_t>(pps.spsId)].valid) {
-        return Slice::Unknown;
-    }
-    
-    const Sps& sps = spsById_[static_cast<size_t>(pps.spsId)];
-    
-    // Check if this is an IRAP (random access point) picture
+    // Slice segment header (7.3.2.2), in the order the syntax defines it.
     const bool isIrap = (nalUnitType >= 16 && nalUnitType <= 23);
+    const bool isIdr = (nalUnitType == 19 || nalUnitType == 20);
+
+    // IRAP pictures carry no_output_of_prior_pics_flag before the PPS id.
     if (isIrap) {
         int64_t noOutputOfPriorPicsFlag = 0;
         if (!b.u(1, &noOutputOfPriorPicsFlag)) {
@@ -390,21 +419,54 @@ HEVCPoc::Slice HEVCPoc::ClassifySlice(const uint8_t* nalu, size_t len,
             usable_ = false;
             return Slice::Unknown;
         }
-        ++gopIndex_;
-        ResetState();
     }
-    
-    // Parse pic_order_cnt_lsb (only for pic_order_cnt_type 0)
-    if (sps.pocType != 0) {
-        // Type 1 or 2 not supported yet
-        return Slice::Unknown;
-    }
-    
-    int64_t lsb = 0;
-    if (!b.u(sps.log2MaxPocLsb, &lsb)) {
+
+    // slice_pic_parameter_set_id, then the PPS/SPS this picture refers to.
+    int64_t ppsId = 0;
+    if (!b.ue(&ppsId)) {
         gaveUp_ = true;
         usable_ = false;
         return Slice::Unknown;
+    }
+
+    if (static_cast<size_t>(ppsId) >= ppsById_.size() ||
+        !ppsById_[static_cast<size_t>(ppsId)].valid) {
+        return Slice::Unknown;
+    }
+
+    const Pps& pps = ppsById_[static_cast<size_t>(ppsId)];
+    if (static_cast<size_t>(pps.spsId) >= spsById_.size() ||
+        !spsById_[static_cast<size_t>(pps.spsId)].valid) {
+        return Slice::Unknown;
+    }
+
+    const Sps& sps = spsById_[static_cast<size_t>(pps.spsId)];
+
+    // slice_type sits between the PPS id and the picture order count; it is
+    // read and discarded -- the front end orders every picture the same way.
+    int64_t sliceType = 0;
+    if (!b.ue(&sliceType)) {
+        gaveUp_ = true;
+        usable_ = false;
+        return Slice::Unknown;
+    }
+
+    // A random access point starts a fresh display-order run.
+    if (isIrap) {
+        ++gopIndex_;
+        ResetState();
+    }
+
+    // IDR pictures have an implicit order count of 0; every other type carries
+    // pic_order_cnt_lsb. (HEVC has no pic_order_cnt_type field: the LSB-plus-
+    // carry derivation of 8.3.1 is the only scheme, always "type 0".)
+    int64_t lsb = 0;
+    if (!isIdr) {
+        if (!b.u(sps.log2MaxPocLsb, &lsb)) {
+            gaveUp_ = true;
+            usable_ = false;
+            return Slice::Unknown;
+        }
     }
     
     // Compute PicOrderCntVal using the same algorithm as H.264 type 0

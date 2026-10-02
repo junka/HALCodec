@@ -155,8 +155,15 @@ void FeedPocRange(H264Poc& poc, const std::vector<Nal>& nals, size_t limit) {
 
 // HEVC access unit grouping. Same logic as H.264 but with HEVC NAL types and
 // 2-byte NAL headers. VCL NALs are types 0-9 (non-IRAP) and 16-23 (IRAP).
+//
+// Nal::type is filled in by ScanNals with H.264's 5-bit mask, which is wrong for
+// HEVC, so the type is re-derived from the payload's first header byte here.
 std::vector<Au> GroupHevcAUs(HEVCPoc& poc, const std::vector<Nal>& nals,
                              size_t limitNals, bool closeOpen) {
+    // The 6-bit nal_unit_type lives in bits 1-6 of the first header byte.
+    auto hevcType = [](const Nal& nal) -> int {
+        return nal.len > 0 ? (nal.payload[0] >> 1) & 0x3F : -1;
+    };
     std::vector<Au> aus;
     size_t auBegin = 0;
     int64_t auKey = -1;
@@ -164,12 +171,12 @@ std::vector<Au> GroupHevcAUs(HEVCPoc& poc, const std::vector<Nal>& nals,
     const size_t limit = std::min(limitNals, nals.size());
     for (size_t idx = 0; idx < limit; ++idx) {
         const Nal& nal = nals[idx];
-        // HEVC VCL NAL types: 0-9 (TRAIL_, TSA_, STSA_, RADL_, RASL_) and
-        // 16-23 (BLA_, IDR_, CRA_). Non-VCL preamble types include 32-34
-        // (VPS/SPS/PPS), 39 (SEI_PREFIX), 40 (SEI_SUFFIX).
-        const bool isVcl = (nal.type <= 9) || (nal.type >= 16 && nal.type <= 23);
-        const bool isPreamble = (nal.type >= 32 && nal.type <= 34) ||
-                                nal.type == 39 || nal.type == 40;
+        const int type = hevcType(nal);
+        // VCL: 0-9 (TRAIL/TSA/STSA/RADL/RASL) and 16-23 (BLA/IDR/CRA).
+        // Preamble: VPS/SPS/PPS 32-34, SEI_PREFIX 39, SEI_SUFFIX 40.
+        const bool isVcl = (type >= 0 && type <= 9) || (type >= 16 && type <= 23);
+        const bool isPreamble = (type >= 32 && type <= 34) ||
+                                type == 39 || type == 40;
         int64_t key = -1;
         bool continuation = false;
         bool preamble = false;
@@ -200,11 +207,14 @@ std::vector<Au> GroupHevcAUs(HEVCPoc& poc, const std::vector<Nal>& nals,
     return aus;
 }
 
-// Advances the HEVC picture-order state over nals[0, limit).
+// Advances the HEVC picture-order state over nals[0, limit). Type is re-derived
+// from the payload for the same reason GroupHevcAUs does it.
 void FeedHevcPocRange(HEVCPoc& poc, const std::vector<Nal>& nals, size_t limit) {
-    for (size_t idx = 0; idx < std::min(limit, nals.size()); ++idx) {
+    const size_t bound = std::min(limit, nals.size());
+    for (size_t idx = 0; idx < bound; ++idx) {
         const Nal& nal = nals[idx];
-        const bool isVcl = (nal.type <= 9) || (nal.type >= 16 && nal.type <= 23);
+        const int type = nal.len > 0 ? (nal.payload[0] >> 1) & 0x3F : -1;
+        const bool isVcl = (type >= 0 && type <= 9) || (type >= 16 && type <= 23);
         if (isVcl) {
             int64_t key = 0;
             poc.ClassifySlice(nal.payload, nal.len, &key);

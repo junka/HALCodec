@@ -59,14 +59,15 @@ bool ExtractParameterSets(const uint8_t* data, size_t size,
         size_t sc = (data[i + 2] == 1) ? 3 : 4;
         size_t start = i + sc;
         if (start < size) {
-            uint8_t type = data[start] & 0x1F;
-            // H.264 parameter sets: SPS=7, PPS=8
-            // HEVC parameter sets: VPS=32, SPS=33, PPS=34
-            if (type == 7 || type == 8) {
-                isHEVC = false;
-                break;
-            } else if (type >= 32 && type <= 34) {
+            // H.264 header: 5-bit type at b0 & 0x1F (SPS=7, PPS=8).
+            // HEVC header: 6-bit type at (b0 >> 1) & 0x3F (VPS/SPS/PPS=32/33/34).
+            uint8_t h264Type = data[start] & 0x1F;
+            uint8_t hevcType = static_cast<uint8_t>((data[start] >> 1) & 0x3F);
+            if (hevcType == 32 || hevcType == 33 || hevcType == 34) {
                 isHEVC = true;
+                break;
+            } else if (h264Type == 7 || h264Type == 8) {
+                isHEVC = false;
                 break;
             }
         }
@@ -105,7 +106,9 @@ bool ExtractParameterSets(const uint8_t* data, size_t size,
         size_t end = j;
         
         if (start < size) {
-            uint8_t type = data[start] & (isHEVC ? 0x3F : 0x1F);
+            uint8_t type = isHEVC
+                              ? static_cast<uint8_t>((data[start] >> 1) & 0x3F)
+                              : static_cast<uint8_t>(data[start] & 0x1F);
             if (isHEVC) {
                 if (type == 32 && vps.empty()) {
                     vps.assign(data + start, data + end);
