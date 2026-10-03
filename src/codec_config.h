@@ -41,7 +41,10 @@ struct CodecParams {
     int height = 0;                   // required for encode
     PixelFormat inputFormat = PixelFormat::Unknown;   // encode input
     PixelFormat outputFormat = PixelFormat::Unknown;  // decode output
-    std::vector<uint8_t> extradata;   // optional codec extradata (e.g. H264 SPS/PPS)
+    std::vector<uint8_t> extradata;   // optional codec extradata: H.264/HEVC want
+                                      // AVCC-packed parameter sets ([len:4][nalu]),
+                                      // AV1 a raw OBU range holding at least one
+                                      // OBU_SEQUENCE_HEADER
     EncodeConfig encode;              // encoder tuning (decoders ignore this)
     bool zeroCopy = false;            // decoder: keep frames in device memory (opt-in per backend)
     // Opaque device-shared handle propagated from a producing decoder to a

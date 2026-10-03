@@ -38,6 +38,7 @@ private:
     // Internal helpers for codec-specific initialization.
     bool InitializeH264(const CodecParams& params);
     bool InitializeHEVC(const CodecParams& params);
+    bool InitializeAV1(const CodecParams& params);
     bool CreateSession();
     
     VTDecompressionSessionRef decompressionSession = nullptr;
@@ -70,6 +71,11 @@ private:
     H264Poc poc_;
     HEVCPoc hevcPoc_;  // HEVC counterpart, used when codec is HEVC
     bool isHEVC_ = false;  // true if current stream is HEVC, false for H.264
+    // True for an AV1 OBU stream. No picture order front end comes with it: an
+    // OBU carries no order count the way an H.264/HEVC slice header carries a POC,
+    // and VideoToolbox hands AV1 frames back in the order they were submitted
+    // (measured on a libsvtav1 stream), so the callback queues them directly.
+    bool isAV1_ = false;
     std::atomic<int> reorderDelay_{0};
 
     // Slots in flight: samples submitted to VideoToolbox plus decoded frames
@@ -97,6 +103,9 @@ private:
 
     // Submits as many complete access units as the live-frame window allows.
     void PumpInput();
+    // The AV1 feed path, reached from PumpInput: cuts pending_ into temporal
+    // units and submits each one's raw OBU bytes.
+    void PumpAv1Input();
     // Drops already-consumed input bytes, rewriting the buffer only once at
     // least half of it has been consumed.
     void CompactPending();
@@ -131,12 +140,13 @@ private:
     // the position it should be inserted at.
     bool decodeFrameAsync(uint8_t* data, size_t size, int64_t displayKey);
 
-    // Submits one AVCC access unit for async decoding. The AU bytes are
-    // copied into an independent buffer (ownership passed to decodeFrameAsync)
-    // because the source buffer is reused by the next feed chunk. Consumes the
+    // Submits one access unit for async decoding. The `au` bytes are copied into
+    // an independent buffer (whose ownership passes to decodeFrameAsync) because
+    // the source buffer belongs to the caller: H.264/HEVC pass an AVCC access unit
+    // they just built, AV1 a range of its own pending_ input. Consumes the
     // live-frame slot that PumpInput reserved for it when the sample is not
     // accepted, since no callback will ever release it.
-    void submitAvccAu(const std::vector<uint8_t>& au, int64_t displayKey);
+    void submitAu(const uint8_t* au, size_t size, int64_t displayKey);
 };
 
 } // namespace vtbox

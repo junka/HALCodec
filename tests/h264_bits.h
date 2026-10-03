@@ -43,6 +43,8 @@ public:
     }
 
     const std::vector<uint8_t>& bytes() const { return bytes_; }
+    // Written bit count, so a builder can pad to a byte boundary itself.
+    size_t bitPos() const { return bitPos_; }
 
 private:
     void bit(int b) {

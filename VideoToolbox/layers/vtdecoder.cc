@@ -2,6 +2,7 @@
 
 #include <VideoToolbox/VideoToolbox.h>
 #include <CoreFoundation/CoreFoundation.h>
+#include <CoreMedia/CMFormatDescriptionBridge.h>
 #include <algorithm>
 #include <cstdlib>
 #include <cstring>
@@ -9,6 +10,7 @@
 #include <utility>
 #include <vector>
 
+#include "av1desc.h"
 #include "h264au.h"
 
 namespace halcodec {
@@ -45,9 +47,19 @@ bool VTDecoder::Initialize(const CodecParams& params) {
             isHEVC = true;
         }
     }
-    
+
+    // AV1 is decided before that sniff, not after it: an extradata that opens
+    // with an in-band sequence header (0a 0b ...) has a 0x00 at the offset the
+    // NAL reading uses, which reads as neither HEVC nor H.264 and would send the
+    // stream to the H.264 path. The caller's codec name is authoritative when it
+    // gives one; otherwise a leading temporal delimiter announces the stream.
+    isAV1_ = params.codec == "av1" || IsAv1ObuStream(ext.data(), ext.size());
+
     isHEVC_ = isHEVC;  // Store for PumpInput to use
-    
+
+    if (isAV1_) {
+        return InitializeAV1(params);
+    }
     if (isHEVC) {
         return InitializeHEVC(params);
     } else {
@@ -204,6 +216,65 @@ bool VTDecoder::InitializeHEVC(const CodecParams& params) {
     return CreateSession();
 }
 
+bool VTDecoder::InitializeAV1(const CodecParams& params) {
+    // AV1 has no parameter-set call to open a session with: CoreMedia offers no
+    // CreateFromAV1ParameterSets, so the description is built as the container
+    // stores it -- an `av01` sample entry carrying an `av1C` record -- and handed
+    // to the big-endian image description bridge.
+    const auto& ext = params.extradata;
+
+    // The extradata is a raw OBU stream and its sequence header OBUs are what a
+    // container keeps as av1C config OBUs. Anything else in the range belongs to
+    // a picture or carries no description, so it is not what the record is built
+    // from and is dropped.
+    std::vector<uint8_t> configObus;
+    const std::vector<Av1Obu> obus = ScanObus(ext.data(), ext.size(), 32);
+    for (const Av1Obu& obu : obus) {
+        if (obu.type != kAv1ObuSequenceHeader) {
+            continue;
+        }
+        configObus.insert(configObus.end(), ext.data() + obu.start,
+                          ext.data() + obu.start + obu.size);
+    }
+    if (configObus.empty()) {
+        std::cerr << "VTDecoder: no sequence header OBU in AV1 extradata"
+                  << std::endl;
+        return false;
+    }
+
+    // The first header describes the stream the session opens on; VideoToolbox
+    // checks the record built from it against the in-band headers of the frames,
+    // and refuses the session when the two disagree.
+    Av1SequenceHeader header;
+    if (!ParseAv1SequenceHeader(configObus.data(), configObus.size(), &header)) {
+        std::cerr << "VTDecoder: could not parse the AV1 sequence header"
+                  << std::endl;
+        return false;
+    }
+    if (header.unsupported) {
+        std::cerr << "VTDecoder: " << header.unsupported << std::endl;
+        return false;
+    }
+
+    const std::vector<uint8_t> entry =
+        BuildAv01SampleEntry(header, configObus.data(), configObus.size());
+    OSStatus status = CMVideoFormatDescriptionCreateFromBigEndianImageDescriptionData(
+        kCFAllocatorDefault,
+        entry.data(),
+        entry.size(),
+        kCFStringEncodingMacRoman,
+        kCMImageDescriptionFlavor_ISOFamily,
+        &formatDescription
+    );
+    if (status != noErr) {
+        std::cerr << "Failed to create AV1 format description: " << status
+                  << std::endl;
+        return false;
+    }
+
+    return CreateSession();
+}
+
 bool VTDecoder::CreateSession() {
     VTDecompressionOutputCallbackRecord callback;
     callback.decompressionOutputCallback = DecompressionCallback;
@@ -254,6 +325,12 @@ void VTDecoder::CompactPending() {
 // simply consumes no input, and GetFrame() pumps again once it has handed a
 // frame (and therefore a slot) to the caller.
 void VTDecoder::PumpInput() {
+    // AV1 units are not NAL assemblies and carry no picture order, so none of
+    // the grouping below applies to them; it has its own scan.
+    if (isAV1_) {
+        PumpAv1Input();
+        return;
+    }
     const size_t room = FreeSlots();
     if (!decompressionSession || room == 0) {
         return;
@@ -333,7 +410,9 @@ void VTDecoder::PumpInput() {
     if (!aus.empty()) {
         ReserveSlots(aus.size());
         for (const Au& au : aus) {
-            submitAvccAu(BuildAvcc(nals, au.firstNal, au.endNal), au.key);
+            const std::vector<uint8_t> avcc =
+                BuildAvcc(nals, au.firstNal, au.endNal);
+            submitAu(avcc.data(), avcc.size(), au.key);
             consumedNals = au.endNal;
         }
         if (isHEVC_) {
@@ -366,6 +445,71 @@ void VTDecoder::PumpInput() {
     pendingPos_ += consumedNals < nals.size()
                        ? nals[consumedNals].startPos
                        : size;
+}
+
+// Submits as many complete temporal units as the live-frame window has room for,
+// the AV1 counterpart of PumpInput. The scan is shaped the same way because the
+// constraints are: fixed-size feed chunks let a unit straddle one, and only a scan
+// that reached the delimiter opening the unit *after* the last one it emits bounds
+// that unit. What differs is the delimiting itself -- AV1 has no start code to
+// resynchronise on, so input that stops parsing as OBUs is not submitted -- and the
+// key each unit carries, which is always "unknown": an OBU states no display
+// position, and VideoToolbox returns AV1 frames in submission order.
+void VTDecoder::PumpAv1Input() {
+    const size_t room = FreeSlots();
+    if (!decompressionSession || room == 0) {
+        return;
+    }
+    const uint8_t* data = pending_.data() + pendingPos_;
+    const size_t size = pending_.size() - pendingPos_;
+    if (size == 0) {
+        return;
+    }
+
+    constexpr size_t kMaxScanObus = 4096;
+    const bool inputEof = IsInputDone();
+    // OBU bound: enough to fill the window with units, with slack for the tile
+    // groups and metadata OBUs a single frame can be split across.
+    size_t maxObus = 8 * room + 64;
+    std::vector<Av1TemporalUnit> units;
+    bool scanTruncated = false;
+    for (;;) {
+        units = GroupAv1TemporalUnits(data, size, room, maxObus,
+                                      /*closeOpen=*/false, &scanTruncated);
+        if (!units.empty() || !scanTruncated || maxObus >= kMaxScanObus) {
+            break;
+        }
+        maxObus *= 2;
+    }
+    if (units.empty() && !inputEof) {
+        return;
+    }
+    if (units.empty()) {
+        // No unit closed, and no further delimiter is coming to close the one
+        // still open, so submit what there is of it rather than strand it. A unit
+        // whose last OBU never arrived in full goes out too: VideoToolbox rejects
+        // the sample and the slot it held comes back either way.
+        units = GroupAv1TemporalUnits(data, size, room, kMaxScanObus,
+                                      /*closeOpen=*/true, &scanTruncated);
+        if (units.empty()) {
+            // Nothing in the leftovers ever formed a unit. At end of input they
+            // are trailing bytes, and keeping them would leave the stream looking
+            // unfinished.
+            if (!scanTruncated) {
+                pendingPos_ += size;
+            }
+            return;
+        }
+    }
+
+    ReserveSlots(units.size());
+    for (const Av1TemporalUnit& unit : units) {
+        submitAu(data + unit.firstByte, unit.endByte - unit.firstByte,
+                 /*displayKey=*/-1);
+    }
+    // Everything up to the end of the last submitted unit is consumed, the bytes
+    // ahead of the first delimiter with them -- they belong to no unit.
+    pendingPos_ += units.back().endByte;
 }
 
 // Moves every frame whose display slot can no longer be contested out of the
@@ -494,6 +638,12 @@ bool VTDecoder::GetFrame(CodecFrame& out) {
         lk.unlock();
         PumpInput();
         lk.lock();
+        if (!frameQ_.empty()) {
+            // The pump's sample was small enough for VideoToolbox to finish it
+            // inside the call, so the frame it owed arrived here rather than
+            // through a later wake-up. Take it before deciding nothing is left.
+            continue;
+        }
         if (liveFrames_ == frameQ_.size() + reorder_.size()) {
             // Nothing is in flight, so no callback can wake this wait and any
             // frame parked in the reorder window would never be handed over.
@@ -595,18 +745,19 @@ bool VTDecoder::decodeFrameAsync(uint8_t* data, size_t size,
     return status == noErr;
 }
 
-void VTDecoder::submitAvccAu(const std::vector<uint8_t>& au,
-                            int64_t displayKey) {
-    auto* copy = static_cast<uint8_t*>(malloc(au.size()));
+void VTDecoder::submitAu(const uint8_t* au, size_t size, int64_t displayKey) {
+    auto* copy = static_cast<uint8_t*>(malloc(size));
     if (copy) {
-        memcpy(copy, au.data(), au.size());
+        memcpy(copy, au, size);
     }
     // decodeFrameAsync takes ownership of `copy` and reports failure without
     // ever invoking the callback, so such a sample must give its window slot
     // back itself.
-    if (copy && decodeFrameAsync(copy, au.size(), displayKey)) {
+    if (copy && decodeFrameAsync(copy, size, displayKey)) {
         return;
     }
+    std::cerr << "VTDecoder: access unit of " << size
+              << " bytes was not handed to the session" << std::endl;
     ReleaseSlot();
 }
 
@@ -629,6 +780,8 @@ void VTDecoder::DecompressionCallback(
               reinterpret_cast<intptr_t>(sourceFrameRefCon)) - 1
         : -1;
     if (status != noErr || !imageBuffer) {
+        std::cerr << "VTDecoder: decoded frame came back with status " << status
+                  << std::endl;
         // A sample VideoToolbox rejected never reaches the queue, so it must
         // give its window slot back or the feed path stops making progress.
         self->ReleaseSlot();

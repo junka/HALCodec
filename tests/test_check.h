@@ -19,6 +19,9 @@ inline int& failures() {
 inline bool check(bool ok, const char* file, int line, const std::string& what) {
     if (!ok) {
         std::printf("FAIL %s:%d  %s\n", file, line, what.c_str());
+        // Flush now: a suite that crashes later would otherwise take the only
+        // record of what failed down with it.
+        std::fflush(stdout);
         ++failures();
     }
     return ok;

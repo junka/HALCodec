@@ -46,6 +46,19 @@ set_target_properties(hevcpoc_test PROPERTIES CXX_STANDARD 17)
 add_test(NAME hevcpoc COMMAND hevcpoc_test)
 
 # ---------------------------------------------------------------------------
+# av1desc_test — the AV1 OBU/sequence-header front end and the av01 sample entry
+# it synthesises. Same shape again: no framework, no decoder.
+# ---------------------------------------------------------------------------
+add_executable(av1desc_test
+    av1desc_test.cc
+    ${CMAKE_SOURCE_DIR}/VideoToolbox/layers/av1desc.cc)
+target_include_directories(av1desc_test PRIVATE
+    ${CMAKE_SOURCE_DIR}/src
+    ${CMAKE_SOURCE_DIR}/VideoToolbox/layers)
+set_target_properties(av1desc_test PROPERTIES CXX_STANDARD 17)
+add_test(NAME av1desc COMMAND av1desc_test)
+
+# ---------------------------------------------------------------------------
 # registry_test — links halcodec_core (the shared library that owns the
 # process-wide map). The core exports the storage accessor under HALCODEC_API.
 # ---------------------------------------------------------------------------
@@ -85,5 +98,15 @@ if(FFMPEG_EXE AND EXISTS "${_cars_h264}")
                     -DINPUT_NV12=${_cars_nv12}
                     -DWORKDIR=${CMAKE_CURRENT_BINARY_DIR}
                     -P ${CMAKE_CURRENT_SOURCE_DIR}/ffmpeg_parity.cmake)
+
+        # AV1 arrives as IVF, so this case encodes one and checks hal_dec's
+        # VideoToolbox output against ffmpeg's own AV1 decode. The script skips
+        # by itself if this ffmpeg build has no AV1 encoder.
+        add_test(NAME vtdec.av1_ivf_parity
+            COMMAND ${CMAKE_COMMAND} -DHAL_DEC=${HAL_DEC_EXE}
+                    -DFFMPEG=${FFMPEG_EXE}
+                    -DINPUT_NV12=${_cars_nv12}
+                    -DWORKDIR=${CMAKE_CURRENT_BINARY_DIR}
+                    -P ${CMAKE_CURRENT_SOURCE_DIR}/av1_ivf_parity.cmake)
     endif()
 endif()
