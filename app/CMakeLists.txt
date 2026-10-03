@@ -90,8 +90,15 @@ target_link_libraries(hal_cam PUBLIC halcodec_core Boost::program_options ${CMAK
 
 # Stage backend shared libraries (*_layers.so / *_layers.dylib) next to the
 # executables so plugin_loader's ExeDir() search finds them in the build tree.
-# Each exe depends on the backends so a backend rebuild triggers the exe's
-# POST_BUILD copy.
+# All the executables share this directory, so one staged copy per backend
+# suffices.
+#
+# The copy is declared as a file-level rule whose OUTPUT is the staged file and
+# whose DEPENDS names the backend target, rather than as an exe POST_BUILD step:
+# an exe's POST_BUILD only reruns when the exe itself relinks, and a shared
+# library is not an input to the link, so a backend rebuild would have left a
+# stale copy sitting next to the exe -- which then silently decodes with the old
+# backend code.
 set(_halcodec_backends "")
 if(TARGET vtbox_layers)
     list(APPEND _halcodec_backends vtbox_layers)
@@ -111,14 +118,20 @@ endif()
 if(TARGET nvmedia_layers)
     list(APPEND _halcodec_backends nvmedia_layers)
 endif()
+
+set(_halcodec_staged "")
+foreach(_layer ${_halcodec_backends})
+    set(_staged_lib
+        "${CMAKE_CURRENT_BINARY_DIR}/${CMAKE_SHARED_LIBRARY_PREFIX}${_layer}${CMAKE_SHARED_LIBRARY_SUFFIX}")
+    add_custom_command(OUTPUT ${_staged_lib}
+        COMMAND ${CMAKE_COMMAND} -E copy_if_different
+            $<TARGET_FILE:${_layer}> ${_staged_lib}
+        DEPENDS ${_layer})
+    list(APPEND _halcodec_staged ${_staged_lib})
+endforeach()
+add_custom_target(halcodec_stage_backends DEPENDS ${_halcodec_staged})
 foreach(_tgt hal_enc codecinfo hal_dec hal_session hal_transcode hal_cam)
-    if(NOT TARGET ${_tgt})
-        continue()
+    if(TARGET ${_tgt})
+        add_dependencies(${_tgt} halcodec_stage_backends)
     endif()
-    foreach(_layer ${_halcodec_backends})
-        add_dependencies(${_tgt} ${_layer})
-        add_custom_command(TARGET ${_tgt} POST_BUILD
-            COMMAND ${CMAKE_COMMAND} -E copy_if_different
-                $<TARGET_FILE:${_layer}> $<TARGET_FILE_DIR:${_tgt}>)
-    endforeach()
 endforeach()
