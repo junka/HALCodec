@@ -110,3 +110,23 @@ if(FFMPEG_EXE AND EXISTS "${_cars_h264}")
                     -P ${CMAKE_CURRENT_SOURCE_DIR}/av1_ivf_parity.cmake)
     endif()
 endif()
+
+# ---------------------------------------------------------------------------
+# Integration: HEVC Main 10 encode -- hal_enc takes P010 raw input and the
+# stream must come back as Main 10 / yuv420p10le. Registered separately because
+# it needs hal_enc and ffprobe rather than hal_dec.
+# ---------------------------------------------------------------------------
+find_program(HAL_ENC_EXE NAMES hal_enc PATHS ${CMAKE_BINARY_DIR}/app NO_DEFAULT_PATH)
+find_program(FFPROBE_EXE NAMES ffprobe)
+if(FFMPEG_EXE AND FFPROBE_EXE AND HAL_ENC_EXE)
+    set(_cars_nv12_enc "${CMAKE_SOURCE_DIR}/QSV/libvpl-2.17.0/examples/content/cars_320x240.nv12")
+    if(EXISTS "${_cars_nv12_enc}")
+        add_test(NAME vtenc.hevc_main10
+            COMMAND ${CMAKE_COMMAND} -DHAL_ENC=${HAL_ENC_EXE}
+                    -DFFMPEG=${FFMPEG_EXE}
+                    -DFFPROBE=${FFPROBE_EXE}
+                    -DINPUT_NV12=${_cars_nv12_enc}
+                    -DWORKDIR=${CMAKE_CURRENT_BINARY_DIR}
+                    -P ${CMAKE_CURRENT_SOURCE_DIR}/vtenc_main10.cmake)
+    endif()
+endif()
