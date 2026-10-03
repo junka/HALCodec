@@ -25,7 +25,7 @@ public:
                 ("encoder,B", po::value<std::string>(&encoderBackend_), "Encoder backend for apps that chain two backends (e.g. hal_transcode -b nvdec -B nvenc); defaults per application")
                 ("gpu", po::value<int>(&gpuIndex_)->default_value(0), "GPU index")
                 ("format,f", po::value<std::string>(&format_)->default_value("yuv"),
-                 "Format: yuv(i420)/nv12/yuv444/y(rgb gray)/bgr/bgri/rgbi/bgra/rgba/bmp")
+                 "Format: yuv(i420)/nv12/p010/p016/yuv444/y(rgb gray)/bgr/bgri/rgbi/bgra/rgba/bmp")
                 ("codec,c", po::value<std::string>(&codec_)->default_value("h264"))
                 ("colorspace,c", po::value<std::string>(&cs_)->default_value("420"), "Color sapce: 420/444/410")
                 ("encode-config", po::value<std::string>(&encodeConfigFile_), "JSON encoder config file (overrides defaults; CLI items below override this)")

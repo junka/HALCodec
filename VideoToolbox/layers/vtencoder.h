@@ -57,7 +57,7 @@ private:
     // 元素流,拷贝为独立缓冲后入队。
     void emitSample(CMSampleBufferRef sampleBuffer, bool isKeyframe);
 
-    // 把宿主内存 I420/NV12 帧逐行拷入池中像素缓冲(lib 按行对齐)。
+    // 把宿主内存 I420/NV12/P010 帧逐行拷入池中像素缓冲(lib 按行对齐)。
     bool copyFrameToPixelBuffer(const CodecFrame& in,
                                 CVPixelBufferRef pixelBuffer);
 };

@@ -58,6 +58,10 @@ int main(int argc, char* argv[]) {
         params.inputFormat = halcodec::PixelFormat::BGR;
     } else if (cli.getFormat() == "nv12") {
         params.inputFormat = halcodec::PixelFormat::NV12;
+    } else if (cli.getFormat() == "p010") {
+        params.inputFormat = halcodec::PixelFormat::P010;
+    } else if (cli.getFormat() == "p016") {
+        params.inputFormat = halcodec::PixelFormat::P016;
     } else if (cli.getFormat() == "yuv444") {
         params.inputFormat = halcodec::PixelFormat::YUV444P;
     } else {
@@ -285,6 +289,8 @@ int main(int argc, char* argv[]) {
             frameBytes = w * h;
         } else if (fmt == "bgra" || fmt == "rgba") {
             frameBytes = w * h * 4;
+        } else if (fmt == "p010" || fmt == "p016") {
+            frameBytes = w * h * 3; // 16-bit storage, 4:2:0: 2 bytes * 1.5 samples
         } else if (fmt == "yuv444" || fmt == "rgb" || fmt == "bgr"
                    || fmt == "rgbi" || fmt == "bgri") {
             frameBytes = w * h * 3;
