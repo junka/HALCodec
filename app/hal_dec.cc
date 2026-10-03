@@ -1,6 +1,8 @@
 #include <cstdint>
+#include <cstring>
 #include <fstream>
 #include <iostream>
+#include <memory>
 #include <string>
 #include <vector>
 
@@ -148,6 +150,100 @@ bool ExtractParameterSets(const uint8_t* data, size_t size,
     return true;
 }
 
+// IVF: the container AV1 test streams travel in (a 32-byte file header -- 'DKIF',
+// version, header length, fourcc, width, height, timebase, frame count -- then one
+// record per frame: a 4-byte little-endian payload size, an 8-byte presentation
+// counter, and the packet). It carries no codec description, so the first frame's
+// in-band sequence header is what a decoder has to open with.
+
+bool IsIvf(const uint8_t* data, size_t size, size_t* headerSize, bool* isAv1) {
+    if (!data || size < 32 || memcmp(data, "DKIF", 4) != 0) {
+        return false;
+    }
+    // The header length is stated rather than fixed, so the records start where
+    // the file says they do.
+    *headerSize = static_cast<size_t>(data[6]) |
+                  (static_cast<size_t>(data[7]) << 8);
+    *isAv1 = memcmp(data + 8, "AV01", 4) == 0;
+    return *headerSize >= 32 && *headerSize <= size;
+}
+
+bool FirstIvfPacket(const uint8_t* data, size_t size, size_t headerSize,
+                    const uint8_t** out, size_t* outSize) {
+    if (headerSize + 12 > size) {
+        return false;
+    }
+    const uint8_t* record = data + headerSize;
+    const size_t n = static_cast<size_t>(record[0]) |
+                     (static_cast<size_t>(record[1]) << 8) |
+                     (static_cast<size_t>(record[2]) << 16) |
+                     (static_cast<size_t>(record[3]) << 24);
+    if (headerSize + 12 + n > size) {
+        return false;
+    }
+    *out = record + 12;
+    *outSize = n;
+    return true;
+}
+
+// Hands out an IVF file's packets as elementary-stream spans, dropping the file
+// header and every frame record. Containers stay outside the decoder layer, and
+// the split has to be exact: AV1 packets carry no start code, so container bytes
+// reaching the feed would be indistinguishable from a corrupt stream.
+class IvfPayloadReader {
+public:
+    explicit IvfPayloadReader(size_t headerSize) : skip_(headerSize) {}
+
+    // Feeds `sink` one span per run of packet bytes this buffer holds. Both a
+    // record and a packet can straddle a read boundary, which is what the carried
+    // position is for.
+    template <class Sink>
+    void Feed(const uint8_t* data, size_t size, const Sink& sink) {
+        size_t pos = 0;
+        if (skip_ > 0) {
+            const size_t drop = skip_ < size ? skip_ : size;
+            skip_ -= drop;
+            pos = drop;
+            if (skip_ > 0) {
+                return;
+            }
+        }
+        while (pos < size) {
+            if (payloadLeft_ == 0) {
+                while (pos < size && recordLen_ < kRecordSize) {
+                    record_[recordLen_++] = data[pos++];
+                }
+                if (recordLen_ < kRecordSize) {
+                    return;
+                }
+                payloadLeft_ = static_cast<size_t>(record_[0]) |
+                    (static_cast<size_t>(record_[1]) << 8) |
+                    (static_cast<size_t>(record_[2]) << 16) |
+                    (static_cast<size_t>(record_[3]) << 24);
+                // record_[4..11] is the frame's presentation counter. The decode
+                // API has no slot for it, and AV1 needs no order key: the decoder
+                // layer returns what VideoToolbox gives it, which is submission
+                // order.
+                recordLen_ = 0;
+                if (payloadLeft_ == 0) {
+                    continue;
+                }
+            }
+            const size_t n = payloadLeft_ < size - pos ? payloadLeft_ : size - pos;
+            sink(data + pos, n);
+            pos += n;
+            payloadLeft_ -= n;
+        }
+    }
+
+private:
+    static constexpr size_t kRecordSize = 12;
+    size_t skip_;
+    size_t payloadLeft_ = 0;
+    size_t recordLen_ = 0;
+    uint8_t record_[kRecordSize];
+};
+
 #ifdef __APPLE__
 const char* kDefaultDecoder = "vtbox";
 #else
@@ -212,8 +308,24 @@ int main(int argc, char* argv[]) {
     // Decoders that build a format description from parameter sets (vtbox)
     // need SPS/PPS; extract them from the Annex-B input stream when present.
     std::vector<uint8_t> raw;
+    std::unique_ptr<IvfPayloadReader> ivf;
     if (ReadFile(cli.getInputFile(), &raw)) {
-        ExtractParameterSets(raw.data(), raw.size(), &params.extradata);
+        size_t headerSize = 0;
+        bool isAv1 = false;
+        const uint8_t* packet = nullptr;
+        size_t packetSize = 0;
+        if (IsIvf(raw.data(), raw.size(), &headerSize, &isAv1) && isAv1 &&
+            FirstIvfPacket(raw.data(), raw.size(), headerSize, &packet,
+                           &packetSize)) {
+            // An IVF/AV01 input says which codec its bytes are, which the name
+            // has to carry because the frame records make the stream look like
+            // nothing to the Annex-B sniff below.
+            params.codec = "av1";
+            params.extradata.assign(packet, packet + packetSize);
+            ivf.reset(new IvfPayloadReader(headerSize));
+        } else {
+            ExtractParameterSets(raw.data(), raw.size(), &params.extradata);
+        }
     }
     if (!dec->Initialize(params)) {
         std::cerr << "Fail to initialize decoder backend: " << backend << std::endl;
@@ -290,7 +402,7 @@ int main(int argc, char* argv[]) {
     };
 
     if (dec->isAsync()) {
-        // Async backends (vtbox): feed the Annex-B stream chunk-by-chunk and
+        // Async backends (vtbox): feed the stream chunk-by-chunk and
         // hand back whatever the feed call reports as ready, then signal EOF
         // and drain until GetFrame() returns false. A decoder that holds input
         // back when its own queue is full keeps every frame either way, but
@@ -312,8 +424,20 @@ int main(int argc, char* argv[]) {
             if (got <= 0) {
                 break;
             }
-            int ready = dec->FillInput(chunk.data(),
-                                       static_cast<size_t>(got));
+            const size_t gotSize = static_cast<size_t>(got);
+            int ready = 0;
+            if (ivf) {
+                // Each packet goes in as its own span, container bytes left
+                // behind. Only the last FillInput count matters: it is the queue
+                // this chunk leaves, while an earlier one is stale by exactly the
+                // frames that arrived since.
+                ivf->Feed(chunk.data(), gotSize,
+                          [&dec, &ready](const uint8_t* span, size_t spanSize) {
+                              ready = dec->FillInput(span, spanSize);
+                          });
+            } else {
+                ready = dec->FillInput(chunk.data(), gotSize);
+            }
             if (ready < 0) {
                 std::cerr << "decoder rejected input (FillInput failed)" << std::endl;
                 return -1;
