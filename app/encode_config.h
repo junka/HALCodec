@@ -14,6 +14,7 @@
 //     "bitrateKbps": 8000,
 //     "maxBitrateKbps": 12000,
 //     "qp": -1,
+//     "quality": 90,
 //     "gopLength": 60,
 //     "numBFrames": 2,
 //     "frameRateNum": 30,
@@ -53,6 +54,7 @@ inline bool LoadEncodeConfig(const std::string& path, EncodeConfig& cfg) {
     cfg.bitrateKbps  = pt.get("bitrateKbps",  cfg.bitrateKbps);
     cfg.maxBitrateKbps = pt.get("maxBitrateKbps", cfg.maxBitrateKbps);
     cfg.qp           = pt.get("qp",           cfg.qp);
+    cfg.quality      = pt.get("quality",      cfg.quality);
     cfg.gopLength    = pt.get("gopLength",    cfg.gopLength);
     cfg.numBFrames   = pt.get("numBFrames",   cfg.numBFrames);
     cfg.frameRateNum = pt.get("frameRateNum", cfg.frameRateNum);

@@ -63,6 +63,13 @@ public:
     // Finalize the encoding process and release resources.
     virtual void Finalize() {}
 
+    // True when each encoded frame is a standalone output file rather than a
+    // piece of one stream: image coders (JPEG) emit a complete codestream per
+    // frame, so appending two of them to one file yields an unreadable file.
+    // Callers that were handed one output path per input image use this to
+    // decide whether to move to the next file after every frame.
+    virtual bool oneOutputFilePerFrame() const { return false; }
+
     virtual std::string getName() const { return ""; }
 };
 

@@ -21,6 +21,7 @@ struct EncodeConfig {
     int bitrateKbps = -1;        // target bitrate; -1 = unset
     int maxBitrateKbps = -1;     // VBR ceiling; -1 = unset (defaults to bitrate)
     int qp = -1;                 // CQP constant QP; -1 = unset (when >=0, overrides bitrate)
+    int quality = -1;            // image encoders (JPEG): 1-100, higher is better; -1 = unset
     int gopLength = -1;          // IDR interval; -1 = unset (backend default)
     int numBFrames = -1;         // B-frame count; -1 = unset (set 0 for low delay)
     int frameRateNum = -1;       // fps numerator; -1 = unset

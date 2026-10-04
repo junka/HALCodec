@@ -6,6 +6,7 @@
 #include <deque>
 #include <mutex>
 #include <string>
+#include <vector>
 
 #include <VideoToolbox/VideoToolbox.h>
 
@@ -29,6 +30,13 @@ public:
     bool isAsync() const override { return true; }
     bool GetFrame(CodecFrame& out) override;
     void Finalize() override;
+
+    // JPEG 是图像编码器:每个 sample 都是一条完整 JFIF 码流,首尾相接写进
+    // 同一个文件就读不出来了,所以一帧对应一个输出文件。
+    bool oneOutputFilePerFrame() const override {
+        return codecType_ == kCMVideoCodecType_JPEG;
+    }
+
     std::string getName() const override { return "vtenc"; }
 
 private:
@@ -54,8 +62,12 @@ private:
                                     CMSampleBufferRef sampleBuffer);
 
     // 把 length-prefixed 的 AVCC 访问单元(关键帧含参数集)转成 Annex-B
-    // 元素流,拷贝为独立缓冲后入队。
+    // 元素流;JPEG 则原样透出一条 JFIF 码流。
     void emitSample(CMSampleBufferRef sampleBuffer, bool isKeyframe);
+
+    // 把一条已编码的码流拷成独立缓冲推入输出队列,PTS 取自 sample。
+    void queueEncoded(const std::vector<uint8_t>& bytes,
+                      CMSampleBufferRef sampleBuffer);
 
     // 把宿主内存 I420/NV12/P010 帧逐行拷入池中像素缓冲(lib 按行对齐)。
     bool copyFrameToPixelBuffer(const CodecFrame& in,

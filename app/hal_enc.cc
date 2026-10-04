@@ -60,6 +60,8 @@ int main(int argc, char* argv[]) {
         params.inputFormat = halcodec::PixelFormat::NV12;
     } else if (cli.getFormat() == "p010") {
         params.inputFormat = halcodec::PixelFormat::P010;
+    } else if (cli.getFormat() == "p210") {
+        params.inputFormat = halcodec::PixelFormat::P210;
     } else if (cli.getFormat() == "p016") {
         params.inputFormat = halcodec::PixelFormat::P016;
     } else if (cli.getFormat() == "yuv444") {
@@ -85,6 +87,7 @@ int main(int argc, char* argv[]) {
     if (cli.getBitrateKbps() >= 0)      params.encode.bitrateKbps = cli.getBitrateKbps();
     if (cli.getMaxBitrateKbps() >= 0)   params.encode.maxBitrateKbps = cli.getMaxBitrateKbps();
     if (cli.getQp() >= 0)               params.encode.qp = cli.getQp();
+    if (cli.getQuality() >= 0)          params.encode.quality = cli.getQuality();
     if (cli.getGopLength() >= 0)        params.encode.gopLength = cli.getGopLength();
     if (cli.getNumBFrames() >= 0)       params.encode.numBFrames = cli.getNumBFrames();
     if (cli.getFps() > 0)               params.encode.frameRateNum = cli.getFps();
@@ -151,6 +154,9 @@ int main(int argc, char* argv[]) {
     // would leave the worker reading freed memory.
     std::vector<uint8_t> rawBuf;
 
+    // An image coder emits a whole codestream per frame, so each one has to
+    // land in its own file instead of being appended to the previous one.
+    const bool perFrameFile = enc->oneOutputFilePerFrame();
     auto drain = [&]() {
         halcodec::CodecFrame out;
         while (enc->GetFrame(out)) {
@@ -159,7 +165,7 @@ int main(int argc, char* argv[]) {
             // defensively in case a future encoder yields a device buffer.
             halcodec::DownloadToHost(out);
             fpout.write(reinterpret_cast<const char *>(out.data), out.size);
-            if (enc->getName() == "nvjpegenc" && fidx < files.size()) {
+            if (perFrameFile && fidx < files.size()) {
                 fpout.close();
                 fpout.open(files[fidx++], std::ios::out|std::ios::binary);
             }
@@ -171,8 +177,8 @@ int main(int argc, char* argv[]) {
     // Async encoders pipeline hardware submissions across frames: FillFrame
     // returns without blocking on completion, so we defer draining until the
     // stream is complete (deeper pipeline, higher throughput). Sync encoders
-    // drain after every submission as before. nvjpegenc is always sync (one
-    // image per output file), so per-frame draining there is unaffected.
+    // drain after every submission as before. Image coders are covered by
+    // perFrameFile above: one image per output file, however the backend runs.
     const bool asyncEnc = enc->isAsync();
     auto drainIfSync = [&]() { if (!asyncEnc) drain(); };
 
@@ -291,6 +297,8 @@ int main(int argc, char* argv[]) {
             frameBytes = w * h * 4;
         } else if (fmt == "p010" || fmt == "p016") {
             frameBytes = w * h * 3; // 16-bit storage, 4:2:0: 2 bytes * 1.5 samples
+        } else if (fmt == "p210") {
+            frameBytes = w * h * 4; // 16-bit storage, 4:2:2: 2 bytes * 2 samples
         } else if (fmt == "yuv444" || fmt == "rgb" || fmt == "bgr"
                    || fmt == "rgbi" || fmt == "bgri") {
             frameBytes = w * h * 3;

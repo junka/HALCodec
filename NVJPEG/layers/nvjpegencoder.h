@@ -22,6 +22,10 @@ public:
     bool GetFrame(CodecFrame& out) override;
     void Finalize() override;
 
+    // nvjpeg emits one complete JFIF codestream per image, so each frame the
+    // caller feeds has to end up in the next output file.
+    bool oneOutputFilePerFrame() const override { return true; }
+
     std::string getName() const override { return "nvjpegenc"; }
 
     static int dev_malloc(void **p, size_t s) { return (int)cudaMalloc(p, s); }
