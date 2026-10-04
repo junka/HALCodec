@@ -70,3 +70,8 @@ test_cars_320x240.jpg
 test_cars_320x240.bmp
 test_cars_mjpeg.avi
 test_cars_mjpeg.mjpeg
+
+# ProRes RAW 测试素材是第三方的（samples.ffmpeg.org，1 GB 片子里取的两帧），
+# 按需 tools/fetch_prores_raw_sample.sh 拉取，不入库；golden 是它的内容对拍件。
+tests/data/prores_raw_*.prrf
+tests/data/*.golden8.bin
