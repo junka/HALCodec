@@ -18,12 +18,44 @@ enum class PixelFormat {
     P210,          // 10-bit YUV 4:2:2 (16-bit storage), semi-planar
     YUV444P,       // 8-bit YUV 4:4:4, planar
     YUV444P10LE,   // 10-bit planar 4:4:4, little endian
+    YUV444P16LE,   // planar 4:4:4 in 16-bit words, little endian (VideoToolbox
+                   // 'sv44': the samples already sit at 16-bit scale, so the
+                   // decode layer de-interleaves without rescaling)
     RGB,
     BGR,
     GRAY,          // 8-bit single plane, greyscale (nvjpeg "y" output)
     BGRA,
     ARGB,
     RGBA,
+    BAYER16LE,     // one plane of 16-bit little-endian Bayer sensels at the
+                   // sensor's full size (VideoToolbox 'bp16', what a ProRes RAW
+                   // picture decodes to). `width`/`height` count sensels, so the
+                   // grid is the mosaic itself -- not a demosaiced picture, and
+                   // not subsampled like the YUV formats. Which phase is which
+                   // colour, and the levels the samples sit between, are in
+                   // `bayer`: they are not recoverable from the bytes.
+};
+
+// The phase order of a Bayer grid: the colour of the top-left sensel and how the
+// rows alternate. The numbering is the one the ProRes RAW bitstream and
+// VideoToolbox use (`bayer_pattern`), carried through rather than remapped.
+enum class BayerPattern {
+    Unknown = -1,
+    RGGB = 0,   // top-left red, rows alternating with green
+    GRBG = 1,   // top-left green, top row alternating with red
+    GBRG = 2,   // top-left green, top row alternating with blue
+    BGGR = 3,   // top-left blue
+};
+
+// What a consumer needs to turn a Bayer grid into colour and cannot reconstruct
+// from the sensels: the phase order, and the two levels the grid is scaled
+// between. Measured on Apple's ProRes RAW decode, which hands back 16-bit
+// sensels with a black level of 256 and a white level of 61568 -- so the samples
+// are neither left-aligned like P010 nor a bare 12-bit number.
+struct BayerInfo {
+    BayerPattern pattern = BayerPattern::Unknown;
+    uint16_t blackLevel = 0;
+    uint16_t whiteLevel = 0;
 };
 
 // Where a frame's pixels live. Host = a normal CPU buffer reachable via
@@ -92,6 +124,13 @@ struct CodecFrame {
     PixelFormat format = PixelFormat::Unknown;
     std::array<size_t, 4> strides{}; // row stride per plane (0 = tightly packed)
     int64_t pts = 0;
+
+    // Set for a Bayer format, meaningless for every other one. VideoToolbox hands
+    // the rest of a RAW stream's metadata over as buffer attachments -- white
+    // balance factors, a colour matrix, a recommended crop, gain -- and this is
+    // the part a consumer genuinely cannot do without; the remainder stays
+    // unread rather than half-modelled.
+    BayerInfo bayer;
 
     FrameLocality locality = FrameLocality::Host;
     DeviceMem device;

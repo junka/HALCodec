@@ -244,6 +244,24 @@ private:
     uint8_t record_[kRecordSize];
 };
 
+// ProRes: a bare element stream is a concatenation of pictures that each open
+// with a 32-bit big-endian count of their own bytes, followed by the frame tag --
+// 'icpf' for the YUV flavours, 'prrf' for RAW. Unlike every video codec here it
+// has no parameter set, and that header is the only place the picture dimensions
+// live, so the decoder needs it before a session can open -- and nothing else of
+// the stream, which runs to gigabytes.
+bool IsProRes(const uint8_t* data, size_t size) {
+    if (!data || size < 8) {
+        return false;
+    }
+    const size_t declared = static_cast<size_t>(data[0]) << 24 |
+                            static_cast<size_t>(data[1]) << 16 |
+                            static_cast<size_t>(data[2]) << 8 |
+                            static_cast<size_t>(data[3]);
+    return declared >= 20 && (memcmp(data + 4, "icpf", 4) == 0 ||
+                              memcmp(data + 4, "prrf", 4) == 0);
+}
+
 #ifdef __APPLE__
 const char* kDefaultDecoder = "vtbox";
 #else
@@ -323,6 +341,21 @@ int main(int argc, char* argv[]) {
             params.codec = "av1";
             params.extradata.assign(packet, packet + packetSize);
             ivf.reset(new IvfPayloadReader(headerSize));
+        } else if (IsProRes(raw.data(), raw.size())) {
+            // The name has to say ProRes before the feed starts: a picture's own
+            // byte count is what the decoder splits on, and no other codec's
+            // bytes are delimited that way.
+            params.codec = "prores";
+            const size_t headerBytes = raw.size() < 20 ? raw.size() : 20;
+            params.extradata.assign(raw.begin(), raw.begin() + headerBytes);
+        } else if (raw.size() >= 2 && raw[0] == 0xFF && raw[1] == 0xD8) {
+            // A JPEG file is one image and says so with its own two magic bytes.
+            // It has no parameter set to hand over, so the codestream itself is
+            // the extradata: the decoder reads the picture size out of its frame
+            // header before opening a session, and the feed below then streams
+            // the same bytes as usual.
+            params.codec = "jpeg";
+            params.extradata = raw;
         } else {
             ExtractParameterSets(raw.data(), raw.size(), &params.extradata);
         }
@@ -376,12 +409,32 @@ int main(int argc, char* argv[]) {
     }
 
     int total_frames = 0;
+    bool printedBayer = false;
     auto writeFrame = [&](halcodec::CodecFrame& frame) {
         // Device-resident frames (e.g. NvMedia zero-copy) must be materialized
         // to host memory before the file/BMP writers can touch the pixels.
         if (!halcodec::DownloadToHost(frame)) {
             std::cerr << "decoder produced a device frame this build cannot "
                          "download to host" << std::endl;
+        }
+        // A Bayer grid is the one output whose pixels are meaningless without the
+        // metadata that travels with them, so it is the one format worth saying
+        // something about here.
+        if (frame.format == halcodec::PixelFormat::BAYER16LE && !printedBayer) {
+            printedBayer = true;
+            const char* phases = "unknown";
+            switch (frame.bayer.pattern) {
+                case halcodec::BayerPattern::RGGB: phases = "RGGB"; break;
+                case halcodec::BayerPattern::GRBG: phases = "GRBG"; break;
+                case halcodec::BayerPattern::GBRG: phases = "GBRG"; break;
+                case halcodec::BayerPattern::BGGR: phases = "BGGR"; break;
+                case halcodec::BayerPattern::Unknown: break;
+            }
+            std::cout << "raw sensel grid: " << frame.width << "x"
+                      << frame.height << " " << phases
+                      << " black=" << static_cast<int>(frame.bayer.blackLevel)
+                      << " white=" << static_cast<int>(frame.bayer.whiteLevel)
+                      << std::endl;
         }
         if (cli.getFormat() == "y" || cli.getFormat() == "bgr"
             || cli.getFormat() == "rgb" || cli.getFormat() == "rgbi"

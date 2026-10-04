@@ -39,7 +39,12 @@ private:
     bool InitializeH264(const CodecParams& params);
     bool InitializeHEVC(const CodecParams& params);
     bool InitializeAV1(const CodecParams& params);
-    bool CreateSession();
+    bool InitializeJPEG(const CodecParams& params);
+    bool InitializeProRes(const CodecParams& params);
+    // Opens the session. `requestedFormat` asks VideoToolbox for a particular
+    // output pixel format instead of the one it would pick; 0 (the default for
+    // every stream but a RAW one) leaves the choice to it.
+    bool CreateSession(OSType requestedFormat = 0);
     
     VTDecompressionSessionRef decompressionSession = nullptr;
     CMVideoFormatDescriptionRef formatDescription = nullptr;
@@ -76,6 +81,21 @@ private:
     // and VideoToolbox hands AV1 frames back in the order they were submitted
     // (measured on a libsvtav1 stream), so the callback queues them directly.
     bool isAV1_ = false;
+    // True for a JPEG codestream. Like AV1 it needs no picture order front end --
+    // one codestream is one image, so there is nothing to reorder -- and unlike
+    // every video codec it has no parameter set to open a session with: the
+    // picture size comes out of the frame header markers instead (jpegdesc).
+    bool isJPEG_ = false;
+    // True for a ProRes element stream: a concatenation of self-delimiting
+    // pictures, each opening with its own byte count (proresdesc). Intra-only, so
+    // no picture order front end, and no parameter set either -- the frame header
+    // carries the picture size the session opens on.
+    bool isProRes_ = false;
+    // True for a ProRes RAW picture ('prrf'), which is a ProRes stream in every
+    // structural sense and a different kind of frame: the decoder hands back a
+    // Bayer sensel grid plus the metadata that says how to turn it into colour,
+    // not a YUV picture, so the session is asked for that output explicitly.
+    bool isProResRaw_ = false;
     std::atomic<int> reorderDelay_{0};
 
     // Slots in flight: samples submitted to VideoToolbox plus decoded frames
@@ -106,6 +126,12 @@ private:
     // The AV1 feed path, reached from PumpInput: cuts pending_ into temporal
     // units and submits each one's raw OBU bytes.
     void PumpAv1Input();
+    // The JPEG feed path: submits one codestream once its end-of-image marker
+    // has arrived (feed chunks are fixed-size, so a large image straddles them).
+    void PumpJpegInput();
+    // The ProRes feed path: submits pictures whose own 32-bit count has arrived
+    // in full. No grouping, no order key -- every picture is a keyframe.
+    void PumpProResInput();
     // Drops already-consumed input bytes, rewriting the buffer only once at
     // least half of it has been consumed.
     void CompactPending();
