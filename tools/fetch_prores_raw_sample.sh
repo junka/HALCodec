@@ -5,6 +5,8 @@
 #   用法:
 #     tools/fetch_prores_raw_sample.sh                 # 拉到 tests/data/，2 帧
 #     tools/fetch_prores_raw_sample.sh --frames 3 --out /tmp/samples
+#     tools/fetch_prores_raw_sample.sh --window 40000000 --chunk 1048576
+#                                       # 窗口开大、单块调小（站点抽风时用）
 #     tools/fetch_prores_raw_sample.sh --list          # 只打印帧表，不写文件
 #     tools/fetch_prores_raw_sample.sh --from window.bin  # 用已存下来的开头窗口，不联网
 #     tools/fetch_prores_raw_sample.sh golden <sample.prrf> <native-b16q-planes.bin>
@@ -47,6 +49,7 @@ while [[ $# -gt 0 ]]; do
     --frames) FRAMES="$2"; shift 2 ;;
     --out)    OUT_DIR="$2"; shift 2 ;;
     --window) WINDOW="$2"; shift 2 ;;
+    --chunk)  CHUNK="$2"; shift 2 ;;
     --from)   FROM="$2"; shift 2 ;;
     --list)   LIST_ONLY=1; shift ;;
     -h|--help) sed -n '2,40p' "${BASH_SOURCE[0]}"; exit 0 ;;
@@ -109,8 +112,13 @@ if [[ -n "$FROM" ]]; then
 else
   echo "==> range-fetch $((WINDOW / 1024 / 1024)) MiB from samples.ffmpeg.org"
   # 这个站实测只有 ~5-10 KB/s 且会整段停住（#42 拉 4 MiB 的 tail 重试了 8 轮），
-  # 所以每块单独落盘并用 -C 续传：--speed-limit/--speed-time 把卡死的连接掐掉，
-  # 下一轮从该块已写下的字节数接着要，不从头再来。
+  # 所以每块单独落盘、按已写下的字节数显式接着要：--speed-limit/--speed-time
+  # 把卡死的连接掐掉，同一块重试时 Range 起点抬到 off+have，正文 shell 追加。
+  #
+  # 不用 curl 的 -C：它和 -r 同时给的时候，curl 发出去的是 "bytes=N-"（丢掉区间
+  # 末尾），这个站照单把剩下的整片都吐回来 —— 实测单块能冲到 4 MiB 以上，
+  # window.bin 的几何就废了。-C "-0" 更是直接被 curl 拒（"expected a positive
+  # numerical parameter"）。--max-filesize 兜住"站点哪天忽略 Range 回整篇正文"。
   WIN_FILE="${TMP}/window.bin"
   : > "${WIN_FILE}"
   for ((off = 0; off < WINDOW; off += CHUNK)); do
@@ -122,19 +130,20 @@ else
       have=0
       [[ -f "${part}" ]] && have="$(stat -f%z "${part}")"
       if ((have >= want)); then break; fi
-      echo "    ${off}-${end} (have ${have}/${want}, attempt ${try})"
-      # -C - 让 curl 自己按 -o 文件的现有大小续传（会把 Range 起点抬到 off+N）。
-      # 不要写成 -C "-$have"：负数形式的参数 curl 直接拒绝（"expected a positive
-      # numerical parameter"），have=0 时整轮都跑不起来。用 -o 而不是 >>，避免
-      # 站点忽略 Range 时把正文重复追加进来。
+      remain=$((want - have))
+      echo "    $((off + have))-${end} (${have}/${want}, attempt ${try})"
       curl -sS --fail --speed-limit 4096 --speed-time 30 --max-time 900 \
-           -r "${off}-${end}" -C - "${BASE_URL}" -o "${part}" || true
+           --max-filesize "${remain}" -r "$((off + have))-${end}" "${BASE_URL}" \
+           >> "${part}" || true
     done
     have="$(stat -f%z "${part}" 2>/dev/null || echo 0)"
     if ((have < want)); then
       echo "停在 ${off}-${end}（只拿到 ${have}/${want} 字节）—— samples.ffmpeg.org" >&2
       echo "此刻不可用。换网络重试，或自己存好开头窗口后用 --from <file> 走本地。" >&2
       exit 1
+    fi
+    if ((have > want)); then   # 宁可少也不让一块溢出污染窗口几何
+      head -c "${want}" "${part}" > "${part}.trim" && mv "${part}.trim" "${part}"
     fi
     cat "${part}" >> "${WIN_FILE}"
     rm -f "${part}"
