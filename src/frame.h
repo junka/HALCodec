@@ -24,6 +24,12 @@ enum class PixelFormat {
     RGB,
     BGR,
     GRAY,          // 8-bit single plane, greyscale (nvjpeg "y" output)
+    GRAY10LE,      // 10-bit single plane, greyscale, each sample in the top ten
+                   // bits of a 16-bit little-endian word -- the alignment HAL's
+                   // other 10-bit formats carry, and the one VideoToolbox's 'L010'
+                   // hands over unchanged. Note that ffmpeg's gray10le keeps the
+                   // ten bits at the *bottom* of the word, so the two are not the
+                   // same bytes.
     BGRA,
     ARGB,
     RGBA,

@@ -211,6 +211,27 @@ if(FFMPEG_EXE AND EXISTS "${_cars_h264}")
                         -DINPUT_NV12=${_cars_nv12}
                         -DWORKDIR=${CMAKE_CURRENT_BINARY_DIR}
                         -P ${CMAKE_CURRENT_SOURCE_DIR}/vtdec_av1_10bit.cmake)
+
+            # 10-bit 4:2:2 ('p422'/'pf22'): the packed rows of 'pf20' with a
+            # chroma row against every picture row, so the chroma height -- not
+            # the unpack -- is what this case pins.
+            add_test(NAME vtdec.hevc_42210
+                COMMAND ${CMAKE_COMMAND} -DHAL_DEC=${HAL_DEC_EXE}
+                        -DFFMPEG=${FFMPEG_EXE}
+                        -DFFPROBE=${FFPROBE_EXE}
+                        -DINPUT_NV12=${_cars_nv12}
+                        -DWORKDIR=${CMAKE_CURRENT_BINARY_DIR}
+                        -P ${CMAKE_CURRENT_SOURCE_DIR}/vtdec_hevc_42210.cmake)
+
+            # The monochrome profiles ('L008', 'L010'), whose buffers the API
+            # reports as having no planes at all: one allocation, no chroma.
+            add_test(NAME vtdec.hevc_mono
+                COMMAND ${CMAKE_COMMAND} -DHAL_DEC=${HAL_DEC_EXE}
+                        -DFFMPEG=${FFMPEG_EXE}
+                        -DFFPROBE=${FFPROBE_EXE}
+                        -DINPUT_NV12=${_cars_nv12}
+                        -DWORKDIR=${CMAKE_CURRENT_BINARY_DIR}
+                        -P ${CMAKE_CURRENT_SOURCE_DIR}/vtdec_hevc_mono.cmake)
         endif()
     endif()
 endif()

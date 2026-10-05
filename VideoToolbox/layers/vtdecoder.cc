@@ -44,10 +44,12 @@ constexpr OSType FourccOf(char a, char b, char c, char d) {
 
 // One row of the decoder's packed 10-bit plane to one row of 16-bit samples.
 //
-// 'pf20' stores three 10-bit samples per little-endian 32-bit word and pads
-// every row to a 64-byte pitch -- 448 bytes for a 320-wide picture, neither the
-// 640 a 16-bit row would need nor a multiple of the packed row, so the tail of
-// each row is padding and the row has to be decoded rather than copied.
+// Every 10-bit picture buffer VideoToolbox hands back ('pf20' and 'p420' for
+// 4:2:0, 'pf22' and 'p422' for 4:2:2) stores three 10-bit samples per
+// little-endian 32-bit word and pads every row to a 64-byte pitch -- 448 bytes
+// for a 320-wide picture, neither the 640 a 16-bit row would need nor a multiple
+// of the packed row, so the tail of each row is padding and the row has to be
+// decoded rather than copied.
 //
 // The packed samples are the bare 10-bit numbers, while HAL's P010 (like
 // ffmpeg's p010le, and like the 'xf20' encode pool this repository already
@@ -1098,8 +1100,8 @@ void VTDecoder::DecompressionCallback(
     // its chroma plane has: ProRes comes back as a 16-bit picture whose chroma
     // plane is as tall as the luma one, so the h/2 rows an 8-bit 4:2:0 frame
     // carries would drop half of it. Formats this output path cannot name -- a
-    // 10-bit 4:2:2 'p422', say -- are refused instead of being labelled NV12 and
-    // handed over with the wrong depth and subsampling.
+    // RAW picture left to pick its own 'b16q' layout, say -- are refused instead
+    // of being labelled NV12 and handed over with the wrong depth and subsampling.
     const size_t w = CVPixelBufferGetWidth(imageBuffer);
     const size_t h = CVPixelBufferGetHeight(imageBuffer);
     const OSType fourcc = CVPixelBufferGetPixelFormatType(imageBuffer);
@@ -1108,6 +1110,7 @@ void VTDecoder::DecompressionCallback(
     bool packed10 = false;
     bool planar444 = false;
     bool bayerGrid = false;
+    bool oneComponent = false;
     if (fourcc == kCVPixelFormatType_420YpCbCr8BiPlanarVideoRange ||
         fourcc == kCVPixelFormatType_420YpCbCr8BiPlanarFullRange) {
         format = PixelFormat::NV12;
@@ -1140,13 +1143,33 @@ void VTDecoder::DecompressionCallback(
         format = PixelFormat::P010;
         chromaRows = h / 2;
         packed10 = true;
+    } else if (fourcc == FourccOf('p', '4', '2', '2') ||
+               fourcc == FourccOf('p', 'f', '2', '2')) {
+        // 10-bit 4:2:2, the same packed rows as 'pf20' but with a chroma row
+        // against every picture row (measured: plane 1 is 160x240 for a 320x240
+        // picture at the same 448-byte pitch, so it holds w samples a row). That
+        // is HAL's P210 -- the same output 'sv22' carries in 16-bit words, so one
+        // format name serves both, and only the unpack differs.
+        format = PixelFormat::P210;
+        chromaRows = h;
+        packed10 = true;
+    } else if (fourcc == kCVPixelFormatType_OneComponent8 ||
+               fourcc == kCVPixelFormatType_OneComponent10) {
+        // HEVC Main Monochrome and Main 10 Monochrome ('L008', 'L010'): one
+        // component, no chroma plane at all. The 10-bit one arrives as the ten
+        // significant bits already at the top of each 16-bit word, which is what
+        // HAL's GRAY10LE says, so neither needs rescaling here.
+        format = fourcc == kCVPixelFormatType_OneComponent8
+                     ? PixelFormat::GRAY
+                     : PixelFormat::GRAY10LE;
+        oneComponent = true;
     }
     if (format == PixelFormat::Unknown) {
-        // Measured layouts this path still cannot name: 10-bit 4:2:2 ('p422'),
-        // greyscale ('L008', 'L010'), and a RAW picture left to pick its own
-        // output ('b16q', four planes of one Bayer phase each), which is why the
-        // RAW session asks for 'bp16' instead. Handing one of these over under an
-        // existing format would be a wrong-labelled frame; the reason is printed.
+        // Measured layouts this path still cannot name: a RAW picture left to pick
+        // its own output ('b16q', four planes of one Bayer phase each), which is
+        // why the RAW session asks for 'bp16' instead. Handing one of these over
+        // under an existing format would be a wrong-labelled frame; the reason is
+        // printed.
         std::cerr << "VTDecoder: decoded frame came back as '" << FourCC(fourcc)
                   << "', which HAL has no pixel format for" << std::endl;
         self->ReleaseSlot();
@@ -1160,13 +1183,28 @@ void VTDecoder::DecompressionCallback(
     CVPixelBufferLockBaseAddress(imageBuffer, kCVPixelBufferLock_ReadOnly);
     size_t row0 = CVPixelBufferGetBytesPerRowOfPlane(imageBuffer, 0);
     size_t row1 = CVPixelBufferGetBytesPerRowOfPlane(imageBuffer, 1);
+    // A one-component buffer has no planes to index (measured: the API reports 0
+    // of them for 'L008' and 'L010'), so its geometry comes from the buffer itself.
+    if (oneComponent) {
+        row0 = CVPixelBufferGetBytesPerRow(imageBuffer);
+        row1 = 0;
+    }
     // A packed 10-bit row, a Bayer row and a 16-bit chroma row are all padded to
     // a 64-byte pitch (measured: 'bp16' gives 8256 bytes a row for a 4112-wide
     // grid whose own row is 8224), which is a different width from the row the HAL
     // format carries, so the output strides are the format's own and those rows
     // move one at a time.
-    const size_t outRow0 = (packed10 || planar444 || bayerGrid) ? w * 2 : row0;
+    size_t outRow0 = (packed10 || planar444 || bayerGrid) ? w * 2 : row0;
     const size_t outRow1 = (packed10 || planar444 || bayerGrid) ? w * 2 : row1;
+    if (oneComponent) {
+        // A greyscale picture leaves here tightly packed, as every other
+        // single-plane grey frame in HAL is (nvjpeg's GRAY is w bytes a row, and
+        // ffmpeg reads both letters at the picture's own width). VideoToolbox
+        // pads these rows to 64 bytes too -- measured 384 bytes a row for 'L008'
+        // at 336 wide, and 704 for 'L010' whose row is 672 -- so its rows move
+        // one at a time, padding left behind.
+        outRow0 = w * (format == PixelFormat::GRAY10LE ? 2 : 1);
+    }
     size_t plane0Bytes = outRow0 * h;
     size_t plane1Bytes = outRow1 * chromaRows;
     // A planar 4:4:4 picture splits its interleaved chroma into a third plane.
@@ -1174,10 +1212,19 @@ void VTDecoder::DecompressionCallback(
     auto* buf =
         static_cast<uint8_t*>(malloc(plane0Bytes + plane1Bytes + plane2Bytes));
     if (buf) {
-        const uint8_t* src0 = static_cast<const uint8_t*>(
-            CVPixelBufferGetBaseAddressOfPlane(imageBuffer, 0));
-        const uint8_t* src1 = static_cast<const uint8_t*>(
-            CVPixelBufferGetBaseAddressOfPlane(imageBuffer, 1));
+        const uint8_t* src0 = nullptr;
+        const uint8_t* src1 = nullptr;
+        if (oneComponent) {
+            // The single plane is the whole allocation, and there is no chroma
+            // plane to point at.
+            src0 = static_cast<const uint8_t*>(
+                CVPixelBufferGetBaseAddress(imageBuffer));
+        } else {
+            src0 = static_cast<const uint8_t*>(
+                CVPixelBufferGetBaseAddressOfPlane(imageBuffer, 0));
+            src1 = static_cast<const uint8_t*>(
+                CVPixelBufferGetBaseAddressOfPlane(imageBuffer, 1));
+        }
         if (packed10) {
             for (size_t r = 0; r < h; ++r) {
                 UnpackPacked10Row(src0 + r * row0, row0, w, buf + r * outRow0);
@@ -1205,6 +1252,13 @@ void VTDecoder::DecompressionCallback(
             for (size_t r = 0; r < h; ++r) {
                 memcpy(buf + r * outRow0, src0 + r * row0, outRow0);
             }
+        } else if (oneComponent) {
+            for (size_t r = 0; r < h; ++r) {
+                memcpy(buf + r * outRow0, src0 + r * row0, outRow0);
+            }
+            // dataSize also carries a few bytes past the last row (measured 76864
+            // and 153664 for the two letters at 320x240) that belong to no row,
+            // so only plane0Bytes of the buffer are read.
         } else {
             memcpy(buf, src0, plane0Bytes);
             memcpy(buf + plane0Bytes, src1, plane1Bytes);
@@ -1217,7 +1271,9 @@ void VTDecoder::DecompressionCallback(
         frame.height = static_cast<int>(h);
         frame.format = format;
         frame.strides[0] = outRow0;
-        // A Bayer grid is one plane: no chroma stride to report.
+        // A Bayer grid and a greyscale picture are one plane: no chroma stride to
+        // report (a one-component frame's outRow1 is 0 because it has no second
+        // plane to measure).
         frame.strides[1] = bayerGrid ? 0 : outRow1;
         frame.strides[2] = planar444 ? outRow1 : 0;
         if (bayerGrid) {
