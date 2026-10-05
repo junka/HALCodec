@@ -34,7 +34,7 @@ All types live in the `halcodec` namespace:
 | AMD AMF     | `amfdec` | `amfenc` (empty) | `amf`    | Linux + AMD |
 | Intel QSV   | `qsvdec` | `qsvenc` (empty) | `qsv`    | Linux + Intel iGPU |
 | NVIDIA DRIVE NvMedia | `nvmedia` | `nvmedia` (empty) | `nvmedia` | Linux (DRIVE OS) aarch64 |
-| Apple VideoToolbox | `vtbox`  | -        | `vtbox`       | macOS        |
+| Apple VideoToolbox | `vtbox`  | `vtenc`  | `vtbox`       | macOS        |
 
 The NvMedia adapter targets NVIDIA DRIVE OS (Linux aarch64) and is built only
 when the SDK headers are present under `NvMedia/include/nvmedia_6x` plus
@@ -141,7 +141,7 @@ backend with `-b/--backend`; when omitted, the platform default is used:
 | Tool      | Default backend         | Alternative backends |
 |-----------|-------------------------|----------------------|
 | `hal_dec` | macOS: `vtbox`; Linux aarch64: `nvmedia`; other Linux: `nvdec` | `nvjpeg`, `amfdec`, `qsvdec` |
-| `hal_enc` | `nvenc`                 | `amfenc`, `qsvenc`, `nvmedia` |
+| `hal_enc` | the first registered encoder backend: `vtenc` on macOS, `nvenc` on Linux + CUDA | `amfenc`, `qsvenc`, `nvmedia` |
 | `codecinfo` | all registered capability providers | `-b` restricts to one |
 
 Common options (from `app/parse_cli.h`):
@@ -189,9 +189,14 @@ Notes:
 - **Current status**: `vtbox` decodes asynchronously via its internal queue
   — `FillInput()` accepts Annex-B access units, frames arrive from the
   decompression callback and `GetFrame()` blocks until the stream ends.
-  The Annex-B feed carries no composition offsets, so frames come back in
-  **decode order**, not presentation order: streams with B-frames must be
-  reordered by the caller (see the `Decoder::GetFrame` contract).
+  For the Annex-B H.264/HEVC feeds the layer parses picture order out of the
+  parameter sets and slices, so frames leave `GetFrame()` in **presentation
+  order**, B-frames included; the reorder depth it parks frames at comes from
+  the stream's own POC arithmetic (`vtdecoder.cc`, `FlushReorder`). Feeds that
+  carry no picture order — an AV1 OBU stream, one image per sample — are
+  emitted as they are submitted. `vtdec.ffmpeg_parity` and
+  `vtdec.av1_ivf_parity` compare the emitted order against ffmpeg byte for
+  byte, so a regression here fails a test rather than a reader's eye.
 
 ### hal_enc — encode
 
@@ -228,6 +233,120 @@ codec via `VTIsHardwareDecodeSupported` (e.g. `H264: hw decode supported`);
 encoders are listed via `VTCopyVideoEncoderList`
 (e.g. `codec=avc1 Apple H.264 (HW)`). Reports `no capability providers
 registered` when nothing is available.
+
+## Measured throughput on Apple M5
+
+Numbers come from an Apple M5 Max running macOS 26.3, `vtbox` backend, built
+from a Release tree:
+
+```sh
+cmake -B build-rel -DCMAKE_BUILD_TYPE=Release && cmake --build build-rel -j
+```
+
+The build type matters more than anything else here. The same code, the same
+material, the Debug tree next to the Release one:
+
+| 1080p, whole process | Debug | Release |
+| --- | ---: | ---: |
+| H.264 encode | 56.5 fps | 218.7 fps |
+| ProRes 422 decode | 181.7 fps | 759.5 fps |
+| H.264 decode | 578.9 fps | 787.3 fps |
+
+At `-O0` the element-wise destruction of `hal_enc`'s whole-file input buffer,
+and of every frame copy on the decode side, is a genuine share of the wall
+time, so a Debug-tree rate measures the compiler flags as much as the codec.
+Every number below is from the Release tree.
+
+Method: `hal_dec` / `hal_enc` run end to end (exec to exit), decoded or encoded
+frames discarded with `-o /dev/null`, best of three passes, and the lowest
+pass recorded below in whole fps. Material is ffmpeg-generated at
+`ultrafast` / `preset 8`, 200 frames at 25 fps for 1080p and 80 frames for 4K.
+Reported frame counts are checked against the input length, so a short run
+shows up as a failure rather than a rate. Run-to-run spread is about 12% for
+the video codecs and up to 20% on the ProRes tiers, so the last digit is noise.
+
+### Decode
+
+| feed | 1080p | 4K | software decode, 1080p |
+| --- | ---: | ---: | ---: |
+| H.264 High | 766 fps | 246 fps | 3283 fps |
+| HEVC Main 8 | 820 | 281 | 2601 |
+| HEVC Main 10 | 484 | 124 | 1205 |
+| HEVC Main 4 2:2 10 | 378 | — | 1017 |
+| HEVC Monochrome 8 | 1014 | — | 2957 |
+| HEVC Monochrome 10 | 895 | — | 1549 |
+| AV1 Main 8 | 814 | — | 1400 |
+| AV1 Main 10 | 484 | — | 1132 |
+| ProRes 422 | 765 | 244 | 1489 |
+| ProRes 4444 | 465 | — | 619 |
+
+A `—` is a case the matrix did not cover, not a failure. The last column is
+ffmpeg with all cores and no VideoToolbox, measured by the same whole-process
+method; it clears the hardware because it never has to hand a frame back to a
+caller, so read it as a floor to beat, not a like-for-like rate.
+
+### Encode
+
+| encode | input | 1080p | 4K |
+| --- | --- | ---: | ---: |
+| H.264 High | NV12 | 210 fps | 90 fps |
+| HEVC Main 8 | NV12 | 198 | 91 |
+| HEVC Main 10 | P010 | 186 | 77 |
+| HEVC Main 4 2:2 10 | P210 | 170 | — |
+| HEVC Monochrome 8 | NV12 | 199 | — |
+| HEVC Monochrome 10 | P010 | 182 | — |
+| ProRes Proxy | P210 | 475 | — |
+| ProRes LT | P210 | 356 | — |
+| ProRes 422 | P210 | 475 | — |
+| ProRes 422 HQ | P210 | 474 | — |
+| ProRes 4444 | P210 | 309 | — |
+| ProRes 4444 XQ | P210 | 262 | — |
+| JPEG, q90 | NV12 | 137 img/s | — |
+
+The video profiles all land within about 20% of one rate whatever the profile
+or bit depth, which is what an XPC-bound session looks like:
+`VTCompressionSessionEncodeFrame` blocks in
+`xpc_connection_send_message_with_reply_sync`, so the wait is the codec
+engine's own pace rather than the work asked of it. ProRes runs ahead of it
+and its tiers differ only by output size because that session rejects rate
+control outright: `AverageBitRate`, `Quality`, `MaxKeyFrameInterval` and
+`DataRateLimits` each answer `kVTPropertyNotSupportedErr`.
+
+### What actually moves these numbers
+
+- **Keeping the decoded frames.** Writing the raw output halves the rate:
+  1080p H.264 to `/dev/null` 766 fps, to a 622 MB file 368 fps; 4K HEVC Main 10
+  to `/dev/null` 124 fps, to a 1.99 GB file 52 fps. In a pipeline that stores
+  frames the decoder is not the limit.
+- **Session properties, not the CLI flags.** On a replica of this layer's
+  session (1080p, 8 Mbps, real NV12 content, 200 frames): default 3.72
+  ms/frame, `AllowFrameReordering=false` 1.96 ms/frame (510 fps),
+  `RealTime=true` 5.54 ms/frame (180 fps). `--lowdelay` sets both, and the two
+  effects cancel: 211.4 to 210.6 fps through `hal_enc`. `--bframes` is not
+  mapped to VideoToolbox at all (211.4 to 212.1, inside the noise).
+- **JPEG and ProRes RAW cost per picture, not per stream.** A `hal_dec`
+  process spends ~58 ms before it touches a pixel — `hal_dec -h` alone is
+  2.4 ms, so that is VideoToolbox session set-up, not process start. Decoding
+  one 1080p JPEG takes 59.4 ms and one 4K JPEG 65.6 ms, so the picture itself
+  is ~1.6-1.9 ms at 1080p and ~7.8 ms at 4K once the fixed cost is subtracted;
+  that difference is a small fraction of either run, so treat it as ±20%. A
+  multi-picture run would spread the 58 ms, but the feeds here carry one image
+  per sample, so no measured case does. JPEG encode is the multi-picture
+  counterexample: 730 ms for a directory of 100 1080p q90 frames, 7.3
+  ms/picture, every output verified as decodable 1920x1080 mjpeg. ProRes RAW is
+  a 2-picture 4112x2176 sample (81.6 ms), so its ~10 ms/picture is indicative
+  only.
+
+### No hardware path on this machine
+
+- **AV1 encode**: `VTCopyVideoEncoderList` has no AV1 entry on M5, so AV1 is
+  decode-only.
+- **ProRes RAW encode**: decode-only.
+- ffmpeg's `-hwaccel videotoolbox` rates are deliberately left out. It falls
+  back to the software decoder without saying so on profiles it does not hand
+  over, and the results show it: Monochrome 8 "hardware" at 2823 fps is its own
+  CPU rate, and Main 10 at 805 fps beats Main 8 at 508 fps. A column like that
+  is not a hardware measurement.
 
 ## Build
 
