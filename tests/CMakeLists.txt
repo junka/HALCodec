@@ -277,6 +277,18 @@ if(FFMPEG_EXE AND FFPROBE_EXE AND HAL_ENC_EXE)
                     -DWORKDIR=${CMAKE_CURRENT_BINARY_DIR}
                     -P ${CMAKE_CURRENT_SOURCE_DIR}/vtenc_jpeg.cmake)
 
+        # The same image coder over a directory whose inputs carry the --format
+        # extension, so every output names the input it was made from. Above is
+        # .yuv in / .nv12 out, where nothing collides; here the two are the same
+        # path, which is what used to drop a picture and shift the rest.
+        add_test(NAME vtenc.jpeg_collision
+            COMMAND ${CMAKE_COMMAND} -DHAL_ENC=${HAL_ENC_EXE}
+                    -DFFMPEG=${FFMPEG_EXE}
+                    -DFFPROBE=${FFPROBE_EXE}
+                    -DINPUT_NV12=${_cars_nv12_enc}
+                    -DWORKDIR=${CMAKE_CURRENT_BINARY_DIR}
+                    -P ${CMAKE_CURRENT_SOURCE_DIR}/vtenc_jpeg_collision.cmake)
+
         # The HEVC profiles this hardware answers for that the encoder had no
         # name for -- Main 4:2:2 10 and the two monochrome ones -- asserted
         # through ffprobe's pix_fmt, which is read out of the SPS.

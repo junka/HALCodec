@@ -182,11 +182,16 @@ Notes:
   one Annex-B stream.
   Note the collision this creates for `hal_enc`: `--format` names the *raw*
   layout, so `-f nv12` on a directory of `.nv12` files maps each input onto
-  itself, and the first output is opened for writing before any input is read.
-  Measured on a 3-file directory: the first-listed input is truncated to 0
-  bytes before it is read, so 3 inputs yield 2 pictures, and the last output
-  path is opened and left empty. Point `-f` at an extension the inputs do not
-  carry, or encode a copy.
+  itself. Each input is now read whole before the output named after it is
+  opened, and the directory is scanned only once, so nothing is dropped or
+  re-ingested -- N files give N codestreams, each in the file its own frame was
+  named after -- but the raw frames are replaced by what was encoded from them,
+  and `hal_enc` says so on stderr first. Point `-f` at an extension the inputs
+  do not carry, or encode a copy, to keep both. (It used to be worse: the first
+  output was opened before any input was read, so the first-listed input was
+  truncated to 0 bytes, 3 files yielded 2 pictures, every later picture landed
+  one name off, and the last output was left empty.
+  `tests/vtenc_jpeg_collision.cmake` holds that shape down.)
 - **Decode loop**: synchronous backends are driven by `PullFrames()` (feeds
   input, then each returned frame is written via `GetFrame()` and released with
   `frame.release()`). Async backends (`vtbox`, `isAsync() == true`) are fed
@@ -329,7 +334,7 @@ material for; every other cell was measured.
 | ProRes 422 HQ | P210 | 432 | 79.1 MB |
 | ProRes 4444 | P210 | 289 | 118.4 MB |
 | ProRes 4444 XQ | P210 | 286 | 123.1 MB |
-| JPEG, q90 | NV12 | 390 img/s | 15.6 MB / 99 pictures |
+| JPEG, q90 | NV12 | 393 img/s | 15.8 MB / 100 pictures |
 
 4K, 80 frames: H.264 High 87 fps, HEVC Main 8 86, HEVC Main 10 72.
 
@@ -372,11 +377,12 @@ control outright: `AverageBitRate`, `Quality`, `MaxKeyFrameInterval` and
   and falls into a per-character loop -- user time, not syscalls (98.7 ms against
   5.0 ms, 156 G instructions for 315 MB) -- and `pubsetbuf` does not bring it
   back. `hal_enc`'s per-picture JPEG mode writes one file per picture, so it hit
-  this on every picture: the same 99 1080p q90 frames take 254 ms with a fresh
+  this on every picture: the same 1080p q90 frames take 254 ms with a fresh
   stream per picture and 532 ms with one reused, 2.56 against 5.38 ms/picture.
-  (The source directory holds 100 files and yields 99 pictures because of the
-  output-naming collision described above; both arms wrote the same 99, so the
-  pair is still valid.) On the single-stream encode rows the same fix is worth
+  (That pair was measured while the output-naming collision above was still
+  eating a picture, so both arms wrote the same 99; the fixed directory path
+  now yields all 100 in 254 ms, 2.54 ms/picture.) On the single-stream encode
+  rows the same fix is worth
   6-12% where the run writes 47-123 MB (ProRes LT 403 to 429, 422 397 to 438,
   HQ 388 to 432, 4444 260 to 289, XQ 255 to 286 fps), 2.6% for ProRes Proxy at
   20.7 MB, and nothing outside the spread for H.264 and HEVC at 5-8 MB -- which
@@ -394,7 +400,7 @@ control outright: `AverageBitRate`, `Quality`, `MaxKeyFrameInterval` and
   is ~1.6-1.9 ms at 1080p and ~7.8 ms at 4K once the fixed cost is subtracted;
   that difference is a small fraction of either run, so treat it as ±20%. No
   measured *decode* case spreads that 58 ms, because those feeds carry one image
-  per sample; the encode side does (the JPEG row above is 99 pictures in one
+  per sample; the encode side does (the JPEG row above is 100 pictures in one
   process). ProRes RAW is
   a 2-picture 4112x2176 sample (81.6 ms), so its ~10 ms/picture is indicative
   only.

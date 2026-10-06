@@ -4,6 +4,7 @@
 #include <iostream>
 #include <regex>
 #include <string>
+#include <utility>
 #include <vector>
 
 #include <dirent.h>
@@ -39,6 +40,13 @@ Stream OpenBuffered(const std::string& path, std::ios::openmode mode,
     s.open(path, mode);
     return s;
 }
+
+// One input picture and the file its codestream goes to. Directory mode names
+// the output after the input, so the two belong together in one list.
+struct RawImage {
+    std::string inputPath;
+    std::string outputPath;
+};
 
 }  // namespace
 
@@ -127,7 +135,11 @@ int main(int argc, char* argv[]) {
         std::cout << "Cannot access " << input << std::endl;
         return -1;
     }
-    std::vector<std::string> files;
+    // The directory is walked once, here, and the encoder is fed from the list
+    // this produces. The feed loop used to walk it a second time, by which point
+    // the outputs this run creates are regular files in the same directory, so a
+    // codestream could be read back as raw pixels.
+    std::vector<RawImage> images;
     if (info.st_mode & S_IFDIR) {
         DIR *dir;
         struct dirent *ent;
@@ -138,32 +150,46 @@ int main(int argc, char* argv[]) {
             while ((ent = readdir(dir)) != NULL) {
                 if (ent->d_type == DT_REG) { // Regular file
                     std::string inputFileName = input + '/' + ent->d_name;
-                    size_t lastDot = inputFileName.find_last_of('.');
+                    std::string outputFileName = inputFileName;
+                    size_t lastDot = outputFileName.find_last_of('.');
                     if (lastDot != std::string::npos) {
-                        inputFileName = inputFileName.substr(0, lastDot);
+                        outputFileName = outputFileName.substr(0, lastDot);
                     }
-                    files.emplace_back(inputFileName + "." + cli.getFormat());
+                    outputFileName += "." + cli.getFormat();
+                    images.push_back({std::move(inputFileName),
+                                      std::move(outputFileName)});
                 }
             }
             closedir(dir);
         }
     } else {
-        files.push_back(cli.getOutputFile());
+        images.push_back({input, cli.getOutputFile()});
     }
-
-    for (auto p : files) {
-        std::cout << p << std::endl;
-    }
-    int fidx = 0;
-    std::vector<char> out_buf(kIoBufBytes);
-    std::vector<char> in_buf(kIoBufBytes);
-    std::ofstream fpout =
-        OpenBuffered<std::ofstream>(files[fidx++],
-                                    std::ios::out | std::ios::binary, out_buf);
-    if (!fpout) {
-        std::cerr << "unable to open output file" << std::endl;
+    if (images.empty()) {
+        std::cerr << "No regular files to encode in " << input << std::endl;
         return -1;
     }
+
+    // --format names the raw layout, so when the inputs already carry that
+    // extension every picture is named after the frame it was made from: `-f
+    // nv12` over a directory of .nv12 files gives each output the path of its
+    // own input. Each input is read whole before its output is opened, so no
+    // picture is lost -- but the raw frames are replaced by codestreams, which
+    // is worth saying before any of them are written.
+    for (const auto& im : images) {
+        if (im.inputPath == im.outputPath) {
+            std::cerr << "Note: " << im.outputPath
+                      << " is both an input and an output; the raw files are "
+                         "being replaced by their encoded pictures" << std::endl;
+            break;
+        }
+    }
+
+    for (const auto& im : images) {
+        std::cout << im.outputPath << std::endl;
+    }
+    std::vector<char> out_buf(kIoBufBytes);
+    std::vector<char> in_buf(kIoBufBytes);
 
     int total_frames = 0;
     // The app owns input reading: raw frames are delivered one CodecFrame at
@@ -183,6 +209,37 @@ int main(int argc, char* argv[]) {
     // An image coder emits a whole codestream per frame, so each one has to
     // land in its own file instead of being appended to the previous one.
     const bool perFrameFile = enc->oneOutputFilePerFrame();
+    // Every output opens on the write that fills it rather than up front. The
+    // first one used to be opened before any input was read, and directory mode
+    // names its outputs after its inputs, so that truncate could land on a frame
+    // that had not been read yet -- which then read back as an empty picture.
+    std::ofstream fpout;
+    bool outOpen = false;
+    size_t openIdx = 0;
+    size_t pictures = 0;
+    bool outFailed = false;
+    auto openFor = [&](size_t idx) {
+        // A fresh stream for the next file rather than close() plus open() on
+        // the one already held. On this libc++ a filebuf that has been closed and
+        // reopened loses the buffered write path for good: every byte then goes
+        // through the per-character sputn loop instead of one bulk copy, and it is
+        // user time rather than syscalls (156 G instructions and 98.7 ms against
+        // 5.0 ms in the kernel for 315 MB). pubsetbuf does not bring the fast path
+        // back; only a filebuf that has not been closed yet does. Measured on the
+        // shipped path -- 99 JPEG pictures of 158 KB each -- that costs 2.81 ms a
+        // picture, the difference between 532 ms and 254 ms for the whole run.
+        fpout = OpenBuffered<std::ofstream>(
+            images[idx].outputPath, std::ios::out | std::ios::binary, out_buf);
+        if (!fpout) {
+            std::cerr << "unable to open output file " << images[idx].outputPath
+                      << std::endl;
+            outFailed = true;
+            return false;
+        }
+        outOpen = true;
+        openIdx = idx;
+        return true;
+    };
     auto drain = [&]() {
         halcodec::CodecFrame out;
         while (enc->GetFrame(out)) {
@@ -190,22 +247,23 @@ int main(int argc, char* argv[]) {
             // Encoded packets are always host memory today, but download
             // defensively in case a future encoder yields a device buffer.
             halcodec::DownloadToHost(out);
-            fpout.write(reinterpret_cast<const char *>(out.data), out.size);
-            if (perFrameFile && fidx < files.size()) {
-                // A fresh stream for the next picture rather than close() plus
-                // open() on the one already held. On this libc++ a filebuf that
-                // has been closed and reopened loses the buffered write path for
-                // good: every byte then goes through the per-character sputn loop
-                // instead of one bulk copy, and it is user time rather than
-                // syscalls (156 G instructions and 98.7 ms against 5.0 ms in the
-                // kernel for 315 MB). pubsetbuf does not bring the fast path back;
-                // only a filebuf that has not been closed yet does. Measured on
-                // the shipped path -- 99 JPEG pictures of 158 KB each -- that costs
-                // 2.81 ms a picture, the difference between 532 ms and 254 ms for
-                // the whole directory.
-                fpout = OpenBuffered<std::ofstream>(
-                    files[fidx++], std::ios::out | std::ios::binary, out_buf);
+            // One file per picture for an image coder, one file for the whole
+            // stream otherwise. Anything past the last name appends to it rather
+            // than inventing a file no input was read from.
+            size_t idx = perFrameFile ? pictures : 0;
+            if (idx >= images.size()) {
+                idx = images.size() - 1;
             }
+            if (!outOpen || openIdx != idx) {
+                if (!openFor(idx)) {
+                    if (out.release) {
+                        out.release();
+                    }
+                    return;
+                }
+            }
+            fpout.write(reinterpret_cast<const char *>(out.data), out.size);
+            ++pictures;
             if (out.release) {
                 out.release();
             }
@@ -220,68 +278,72 @@ int main(int argc, char* argv[]) {
     auto drainIfSync = [&]() { if (!asyncEnc) drain(); };
 
     if (info.st_mode & S_IFDIR) {
-        // Feed each file in the directory as one whole image.
-        DIR *dir;
-        struct dirent *ent;
-        if ((dir = opendir(input.c_str())) != NULL) {
-            std::vector<uint8_t> buf;
-            while ((ent = readdir(dir)) != NULL) {
-                if (ent->d_type != DT_REG) {
+        // Feed each file in the directory as one whole image, in the order the
+        // single scan produced -- which is also the order the pictures are named
+        // in, so picture i can only land in the file derived from input i.
+        std::vector<uint8_t> buf;
+        for (const auto& im : images) {
+            if (outFailed) {
+                break;
+            }
+            const std::string& path = im.inputPath;
+            if (cli.getFormat() == "bmp") {
+                int w = 0, h = 0, n_chan = 0;
+                BMPReader reader(path);
+                in.data = reader.readBMP(&w, &h, &n_chan);
+                if (!in.data) {
+                    std::cerr << "Failed to read BMP: " << path << std::endl;
                     continue;
                 }
-                std::string path = input + '/' + ent->d_name;
-                if (cli.getFormat() == "bmp") {
-                    int w = 0, h = 0, n_chan = 0;
-                    BMPReader reader(path);
-                    in.data = reader.readBMP(&w, &h, &n_chan);
-                    if (!in.data) {
-                        std::cerr << "Failed to read BMP: " << path << std::endl;
-                        continue;
-                    }
-                    int rowPadding = (4 - ((w * n_chan) % 4)) % 4;
-                    in.size = (static_cast<size_t>(w) * n_chan + rowPadding) * h;
-                    in.width = w;
-                    in.height = h;
-                    enc->FillFrame(in);
-                    std::free(in.data);
-                } else {
-                    std::ifstream fin =
-                        OpenBuffered<std::ifstream>(path,
-                                                   std::ios::binary |
-                                                       std::ios::ate,
-                                                   in_buf);
-                    if (!fin) {
-                        std::cerr << "Cannot open " << path << std::endl;
-                        continue;
-                    }
-                    std::streamsize sz = fin.tellg();
-                    fin.seekg(0, std::ios::beg);
-                    buf.resize(static_cast<size_t>(sz));
-                    fin.read(reinterpret_cast<char *>(buf.data()), sz);
-                    // Resolve dimensions from the filename when the CLI did
-                    // not carry them.
-                    int w = params.width, h = params.height;
-                    if (w <= 0 || h <= 0) {
-                        std::smatch m;
-                        if (std::regex_search(path, m, pattern)) {
-                            w = std::stoi(m[1].str());
-                            h = std::stoi(m[2].str());
-                        }
-                    }
-                    if (w <= 0 || h <= 0) {
-                        std::cerr << "Cannot determine dimensions for "
-                                  << path << std::endl;
-                        continue;
-                    }
-                    in.data = buf.data();
-                    in.size = buf.size();
-                    in.width = w;
-                    in.height = h;
-                    enc->FillFrame(in);
+                int rowPadding = (4 - ((w * n_chan) % 4)) % 4;
+                in.size = (static_cast<size_t>(w) * n_chan + rowPadding) * h;
+                in.width = w;
+                in.height = h;
+                enc->FillFrame(in);
+                std::free(in.data);
+            } else {
+                std::ifstream fin =
+                    OpenBuffered<std::ifstream>(path,
+                                               std::ios::binary |
+                                                   std::ios::ate,
+                                               in_buf);
+                if (!fin) {
+                    std::cerr << "Cannot open " << path << std::endl;
+                    continue;
                 }
-                drainIfSync();
+                std::streamsize sz = fin.tellg();
+                if (sz <= 0) {
+                    // Not a picture. CodecFrame::size == 0 is the end-of-stream
+                    // marker, so submitting an empty file would end the encode
+                    // rather than skip one input.
+                    std::cerr << "Skipping empty input " << path << std::endl;
+                    continue;
+                }
+                fin.seekg(0, std::ios::beg);
+                buf.resize(static_cast<size_t>(sz));
+                fin.read(reinterpret_cast<char *>(buf.data()), sz);
+                // Resolve dimensions from the filename when the CLI did
+                // not carry them.
+                int w = params.width, h = params.height;
+                if (w <= 0 || h <= 0) {
+                    std::smatch m;
+                    if (std::regex_search(path, m, pattern)) {
+                        w = std::stoi(m[1].str());
+                        h = std::stoi(m[2].str());
+                    }
+                }
+                if (w <= 0 || h <= 0) {
+                    std::cerr << "Cannot determine dimensions for " << path
+                              << std::endl;
+                    continue;
+                }
+                in.data = buf.data();
+                in.size = buf.size();
+                in.width = w;
+                in.height = h;
+                enc->FillFrame(in);
             }
-            closedir(dir);
+            drainIfSync();
         }
     } else {
         // Single raw file. BMP input is a single whole image (header parsed by
@@ -311,7 +373,9 @@ int main(int argc, char* argv[]) {
             // The frame data is only safe to free once the async worker has
             // drained; for sync backends drainIfSync() already consumed it.
             std::free(in.data);
-            fpout.close();
+            if (outOpen) {
+                fpout.close();
+            }
             enc->Finalize();
             std::cout << "Encode total frames: " << total_frames << std::endl;
             return 0;
@@ -348,11 +412,15 @@ int main(int argc, char* argv[]) {
         }
         in.width = params.width;
         in.height = params.height;
-        for (size_t off = 0; off + frameBytes <= rawBuf.size(); off += frameBytes) {
+        for (size_t off = 0; off + frameBytes <= rawBuf.size();
+             off += frameBytes) {
             in.data = rawBuf.data() + off;
             in.size = frameBytes;
             enc->FillFrame(in);
             drainIfSync();
+            if (outFailed) {
+                break;
+            }
         }
     }
 
@@ -365,7 +433,9 @@ int main(int argc, char* argv[]) {
     if (asyncEnc) enc->SignalInputComplete();
     drain();
 
-    fpout.close();
+    if (outOpen) {
+        fpout.close();
+    }
     enc->Finalize();
 
     std::cout << "Encode total frames: "<< total_frames << std::endl;
