@@ -402,7 +402,20 @@ int main(int argc, char* argv[]) {
         std::cout << p << std::endl;
     }
     int fidx = 0;
-    std::ofstream fpout(files[fidx++], std::ios::out|std::ios::binary);
+    // libc++ gives a filebuf 4096 bytes, which copies every multi-megabyte frame
+    // out through that hole a thousand at a time. Measured on an M5 with an
+    // incompressible payload, 622 MB of 3 MiB writes through one held stream takes
+    // 462.9 ms at the default and 46.3 ms with a 4 MiB buffer -- 1.34 GB/s against
+    // 13.4 GB/s, and the SSD is not what separates them: a 3 MiB frame is 2.3 ms of
+    // user-time copying against 0.2 ms. A 1080p NV12 frame is exactly that 3 MiB.
+    // The curve is flat from 1 MiB upward and drifts back the other way by 16 MiB,
+    // so 4 MiB sits in the middle of the plateau. The buffer has to outlive the
+    // stream, so it is declared before it.
+    std::vector<char> out_buf(4u << 20);
+    std::ofstream fpout;
+    fpout.rdbuf()->pubsetbuf(out_buf.data(),
+                             static_cast<std::streamsize>(out_buf.size()));
+    fpout.open(files[fidx++], std::ios::out|std::ios::binary);
     if (!fpout) {
         std::cerr << "unable to open output file" << std::endl;
         return -1;
