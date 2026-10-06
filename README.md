@@ -180,6 +180,13 @@ Notes:
   meaningful for backend decoders that walk the path themselves (e.g. `nvjpeg`
   on Linux); `vtbox` requires a single file, since its parameter sets come from
   one Annex-B stream.
+  Note the collision this creates for `hal_enc`: `--format` names the *raw*
+  layout, so `-f nv12` on a directory of `.nv12` files maps each input onto
+  itself, and the first output is opened for writing before any input is read.
+  Measured on a 3-file directory: the first-listed input is truncated to 0
+  bytes before it is read, so 3 inputs yield 2 pictures, and the last output
+  path is opened and left empty. Point `-f` at an extension the inputs do not
+  carry, or encode a copy.
 - **Decode loop**: synchronous backends are driven by `PullFrames()` (feeds
   input, then each returned frame is written via `GetFrame()` and released with
   `frame.release()`). Async backends (`vtbox`, `isAsync() == true`) are fed
@@ -244,64 +251,87 @@ cmake -B build-rel -DCMAKE_BUILD_TYPE=Release && cmake --build build-rel -j
 ```
 
 The build type matters more than anything else here. The same code, the same
-material, the Debug tree next to the Release one:
+material, the Debug tree next to the Release one, one pass:
 
-| 1080p, whole process | Debug | Release |
-| --- | ---: | ---: |
-| H.264 encode | 56.5 fps | 218.7 fps |
-| ProRes 422 decode | 181.7 fps | 759.5 fps |
-| H.264 decode | 578.9 fps | 787.3 fps |
-
-At `-O0` the element-wise destruction of `hal_enc`'s whole-file input buffer,
-and of every frame copy on the decode side, is a genuine share of the wall
-time, so a Debug-tree rate measures the compiler flags as much as the codec.
-Every number below is from the Release tree.
-
-Method: `hal_dec` / `hal_enc` run end to end (exec to exit), decoded or encoded
-frames discarded with `-o /dev/null`, best of three passes, and the lowest
-pass recorded below in whole fps. Material is ffmpeg-generated at
-`ultrafast` / `preset 8`, 200 frames at 25 fps for 1080p and 80 frames for 4K.
-Reported frame counts are checked against the input length, so a short run
-shows up as a failure rather than a rate. Run-to-run spread is about 12% for
-the video codecs and up to 20% on the ProRes tiers, so the last digit is noise.
-
-### Decode
-
-| feed | 1080p | 4K | software decode, 1080p |
+| 1080p, whole process | Debug | Release | ratio |
 | --- | ---: | ---: | ---: |
-| H.264 High | 766 fps | 246 fps | 3283 fps |
-| HEVC Main 8 | 820 | 281 | 2601 |
-| HEVC Main 10 | 484 | 124 | 1205 |
-| HEVC Main 4 2:2 10 | 378 | — | 1017 |
-| HEVC Monochrome 8 | 1014 | — | 2957 |
-| HEVC Monochrome 10 | 895 | — | 1549 |
-| AV1 Main 8 | 814 | — | 1400 |
-| AV1 Main 10 | 484 | — | 1132 |
-| ProRes 422 | 765 | 244 | 1489 |
-| ProRes 4444 | 465 | — | 619 |
+| H.264 decode | 395 fps | 708 fps | 1.79x |
+| ProRes 422 decode | 288 | 950 | 3.30x |
+| H.264 encode | 56 | 214 | 3.85x |
 
-A `—` is a case the matrix did not cover, not a failure. The last column is
-ffmpeg with all cores and no VideoToolbox, measured by the same whole-process
-method; it clears the hardware because it never has to hand a frame back to a
-caller, so read it as a floor to beat, not a like-for-like rate.
+The Release column here agrees with the tables below to within 2%. At `-O0` the
+element-wise destruction of `hal_enc`'s whole-file input buffer, and of every
+frame copy on the decode side, is a genuine share of the wall time, so a
+Debug-tree rate measures the compiler flags as much as the codec. Every number
+below is from the Release tree.
+
+Method: `hal_dec` / `hal_enc` run end to end (exec to exit), best of five passes
+for decode and three for encode, and the lowest pass recorded below in whole fps.
+`-o /dev/null` and `-o <file>` are both measured, because they are different
+numbers (see below). Frame counts come out of the program's own output and are
+checked against what `ffprobe` says the stream holds, so a short run shows up as a
+failure rather than a rate -- the 4K HEVC Main 10 stream really carries 75
+frames, not 80. Material is ffmpeg-generated at `ultrafast` / `preset 8`, 200
+frames at 25 fps for 1080p and 80 for 4K. Run-to-run spread is about 12% for the
+video codecs and up to 20% on the ProRes tiers, and absolute rates move by that
+much between material sets, so read a row against the other rows of the same
+table rather than against a table from another day.
+
+The software column is `ffmpeg -hide_banner -loglevel error -y -i <stream> -f
+null -`, all cores, no VideoToolbox, same whole-process method and the same
+machine state. It is not like-for-like -- ffmpeg never hands a frame back to a
+caller through HAL's frame model -- but on the 10-bit HEVC profiles it is now
+below the hardware path, so it is no longer simply a floor to beat.
+
+### Decode, 1080p
+
+| feed | `/dev/null` | to file | ffmpeg |
+| --- | ---: | ---: | ---: |
+| H.264 High | 695 fps | 600 fps | 2346 fps |
+| HEVC Main 8 | 883 | 751 | 644 |
+| HEVC Main 10 | 716 | 566 | 460 |
+| HEVC Main 4 2:2 10 | 594 | 457 | 400 |
+| HEVC Monochrome 8 | 1030 | 892 | 925 |
+| HEVC Monochrome 10 | 935 | 749 | 674 |
+| AV1 Main 8 | 822 | 704 | 1022 |
+| AV1 Main 10 | 680 | 540 | 987 |
+| ProRes 422 | 938 | 591 | 1956 |
+| ProRes 4444 | 629 | 398 | 1334 |
+
+"to file" writes every decoded frame to disk: 396 MB to 2.37 GB per run depending
+on the pixel format, at a marginal 13-19 GB/s. The two ProRes software rows are
+ffmpeg's own reference ProRes decoder, so they price the inner format rather than
+a competitive decoder. ProRes 4K is the one combination this matrix has no
+material for; every other cell was measured.
+
+### Decode, 4K
+
+| feed | frames | `/dev/null` | to file | ffmpeg |
+| --- | ---: | ---: | ---: | ---: |
+| H.264 High | 80 | 228 fps | 192 fps | 622 fps |
+| HEVC Main 8 | 80 | 305 | 249 | 313 |
+| HEVC Main 10 | 75 | 225 | 167 | 217 |
+
 
 ### Encode
 
-| encode | input | 1080p | 4K |
+| encode | input | 1080p | output per run |
 | --- | --- | ---: | ---: |
-| H.264 High | NV12 | 210 fps | 90 fps |
-| HEVC Main 8 | NV12 | 198 | 91 |
-| HEVC Main 10 | P010 | 186 | 77 |
-| HEVC Main 4 2:2 10 | P210 | 170 | — |
-| HEVC Monochrome 8 | NV12 | 199 | — |
-| HEVC Monochrome 10 | P010 | 182 | — |
-| ProRes Proxy | P210 | 475 | — |
-| ProRes LT | P210 | 356 | — |
-| ProRes 422 | P210 | 475 | — |
-| ProRes 422 HQ | P210 | 474 | — |
-| ProRes 4444 | P210 | 309 | — |
-| ProRes 4444 XQ | P210 | 262 | — |
-| JPEG, q90 | NV12 | 137 img/s | — |
+| H.264 High | NV12 | 215 fps | 8.3 MB |
+| HEVC Main 8 | NV12 | 200 | 5.8 MB |
+| HEVC Main 10 | P010 | 180 | 5.7 MB |
+| HEVC Main 4 2:2 10 | P210 | 165 | 5.8 MB |
+| HEVC Monochrome 8 | NV12 | 195 | 5.4 MB |
+| HEVC Monochrome 10 | P010 | 175 | 5.5 MB |
+| ProRes Proxy | P210 | 433 | 20.7 MB |
+| ProRes LT | P210 | 429 | 46.6 MB |
+| ProRes 422 | P210 | 438 | 59.3 MB |
+| ProRes 422 HQ | P210 | 432 | 79.1 MB |
+| ProRes 4444 | P210 | 289 | 118.4 MB |
+| ProRes 4444 XQ | P210 | 286 | 123.1 MB |
+| JPEG, q90 | NV12 | 390 img/s | 15.6 MB / 99 pictures |
+
+4K, 80 frames: H.264 High 87 fps, HEVC Main 8 86, HEVC Main 10 72.
 
 The video profiles all land within about 20% of one rate whatever the profile
 or bit depth, which is what an XPC-bound session looks like:
@@ -314,10 +344,43 @@ control outright: `AverageBitRate`, `Quality`, `MaxKeyFrameInterval` and
 
 ### What actually moves these numbers
 
-- **Keeping the decoded frames.** Writing the raw output halves the rate:
-  1080p H.264 to `/dev/null` 766 fps, to a 622 MB file 368 fps; 4K HEVC Main 10
-  to `/dev/null` 124 fps, to a 1.99 GB file 52 fps. In a pipeline that stores
-  frames the decoder is not the limit.
+- **Keeping the decoded frames costs the write, and only the write.** Storing
+  every frame is now a marginal 13-19 GB/s, which takes 13-23% off the video
+  rates (1080p H.264 695 fps to `/dev/null` against 600 to a 622 MB file, Main
+  10 716 against 566, 4K Main 10 225 against 167 to 1.78 GB) and about a third
+  off ProRes, whose frames are 8.3-12.4 MB each (938 against 591, 629 against
+  398). It used to halve every row in the table. What changed is the output
+  `std::ofstream`: libc++ hands a `filebuf` 4096 bytes, so a 3 MB frame went out
+  through that hole a thousand bytes at a time. A `pubsetbuf` of 4 MiB in front
+  of `open()` takes 622 MB of 3 MB writes from 462.9 ms (1.34 GB/s) to 46.3 ms
+  (13.4 GB/s), and the curve is flat from 1 MiB upward. The SSD was never the
+  difference -- 3 MB is 2.3 ms of user-time copying against 0.2 ms in the kernel.
+- **The 10-bit output plane is unpacked in NEON, not a scalar loop.**
+  VideoToolbox packs three 10-bit samples into a little-endian word and pads the
+  row to 64 bytes, so a 10-bit frame cannot be copied out; the row has to be
+  decoded. Vectorized with `vst3q_u16` it costs 0.245 ms per 1080p P010 frame
+  against 0.722 ms for the scalar form (2.94x; 4K 2.848 to 0.989), and in the
+  decoder that is worth +36 to +45% on exactly the four rows whose output is
+  packed 10-bit -- Main 10 517 to 716 fps, Main 422 10 411 to 594, AV1 Main 10
+  499 to 680, 4K Main 10 158 to 225 -- while every 8-bit and ProRes control row
+  moves by less than 2%. The two agree to within the noise: 0.477 ms taken off
+  the unpack is 0.537 ms off the wall. The other vectorization that looked
+  available, the `'sv44'` 4:4:4 chroma split, measured slower (0.64x, 0.87x) than
+  what `-O3` already does with the scalar loop, so it stayed scalar.
+- **One `filebuf` cannot be closed and reopened.** On this libc++ a stream that
+  has been `close()`d and `open()`ed again loses the bulk `xsputn` path for good
+  and falls into a per-character loop -- user time, not syscalls (98.7 ms against
+  5.0 ms, 156 G instructions for 315 MB) -- and `pubsetbuf` does not bring it
+  back. `hal_enc`'s per-picture JPEG mode writes one file per picture, so it hit
+  this on every picture: the same 99 1080p q90 frames take 254 ms with a fresh
+  stream per picture and 532 ms with one reused, 2.56 against 5.38 ms/picture.
+  (The source directory holds 100 files and yields 99 pictures because of the
+  output-naming collision described above; both arms wrote the same 99, so the
+  pair is still valid.) On the single-stream encode rows the same fix is worth
+  6-12% where the run writes 47-123 MB (ProRes LT 403 to 429, 422 397 to 438,
+  HQ 388 to 432, 4444 260 to 289, XQ 255 to 286 fps), 2.6% for ProRes Proxy at
+  20.7 MB, and nothing outside the spread for H.264 and HEVC at 5-8 MB -- which
+  is the profile this fix is supposed to have, one file per run.
 - **Session properties, not the CLI flags.** On a replica of this layer's
   session (1080p, 8 Mbps, real NV12 content, 200 frames): default 3.72
   ms/frame, `AllowFrameReordering=false` 1.96 ms/frame (510 fps),
@@ -329,13 +392,20 @@ control outright: `AverageBitRate`, `Quality`, `MaxKeyFrameInterval` and
   2.4 ms, so that is VideoToolbox session set-up, not process start. Decoding
   one 1080p JPEG takes 59.4 ms and one 4K JPEG 65.6 ms, so the picture itself
   is ~1.6-1.9 ms at 1080p and ~7.8 ms at 4K once the fixed cost is subtracted;
-  that difference is a small fraction of either run, so treat it as ±20%. A
-  multi-picture run would spread the 58 ms, but the feeds here carry one image
-  per sample, so no measured case does. JPEG encode is the multi-picture
-  counterexample: 730 ms for a directory of 100 1080p q90 frames, 7.3
-  ms/picture, every output verified as decodable 1920x1080 mjpeg. ProRes RAW is
+  that difference is a small fraction of either run, so treat it as ±20%. No
+  measured *decode* case spreads that 58 ms, because those feeds carry one image
+  per sample; the encode side does (the JPEG row above is 99 pictures in one
+  process). ProRes RAW is
   a 2-picture 4112x2176 sample (81.6 ms), so its ~10 ms/picture is indicative
   only.
+
+One caveat about how the pairs above were measured, since it changes what a
+number means: an A/B of the decoder layer has to stage the dylib once rather than
+swap it per run -- replacing a Mach-O in the program's directory costs the next
+process load ~166 ms (219 ms against 386 ms for the same run), which is AMFI
+assessing a new inode, and a per-run swap depresses every absolute by about a
+third. Only paired arms from one session are comparable; the tables above carry
+the fixed tree.
 
 ### No hardware path on this machine
 
