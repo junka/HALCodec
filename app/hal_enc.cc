@@ -14,6 +14,7 @@
 
 #include "bmp_write.h"
 #include "encoder.h"
+#include "output_paths.h"
 #include "parse_cli.h"
 
 #include "codec_config.h"
@@ -22,24 +23,6 @@
 #include "plugin_loader.h"
 
 namespace {
-
-// One buffer per live stream, installed before the file is opened: libc++ gives
-// a filebuf 4096 bytes otherwise, which turns a multi-megabyte read or write
-// into per-chunk work. Measured on an M5 with incompressible payloads, 622 MB of
-// 3 MiB writes through one held std::ofstream takes 462.9 ms at the default and
-// 46.3 ms with a 4 MiB buffer (1.34 GB/s against 13.4 GB/s); the curve is flat
-// from 1 MiB on and drifts slightly back the other way by 16 MiB. The SSD is
-// not what separates either end of that range.
-constexpr size_t kIoBufBytes = 4u << 20;
-
-template <class Stream>
-Stream OpenBuffered(const std::string& path, std::ios::openmode mode,
-                    std::vector<char>& buf) {
-    Stream s;
-    s.rdbuf()->pubsetbuf(buf.data(), static_cast<std::streamsize>(buf.size()));
-    s.open(path, mode);
-    return s;
-}
 
 // One input picture and the file its codestream goes to. Directory mode names
 // the output after the input, so the two belong together in one list.
@@ -60,45 +43,6 @@ std::string CodecStreamExt(const std::string& codec) {
     if (codec == "appleprores") return ".prores";
     if (codec == "mpeg2") return ".mpg2";
     return "." + codec;
-}
-
-// Everything up to the last dot, but only when that dot is inside the final
-// path component -- "in.put/f0" has no extension to strip.
-std::string StripExt(const std::string& path) {
-    size_t dot = path.find_last_of('.');
-    if (dot == std::string::npos) {
-        return path;
-    }
-    size_t slash = path.find_last_of('/');
-    if (slash != std::string::npos && dot < slash) {
-        return path;
-    }
-    return path.substr(0, dot);
-}
-
-// -o names a directory in directory mode, because each picture needs a file of
-// its own. Create it if it is missing so `-o out/` works on a clean tree.
-bool EnsureDir(const std::string& path) {
-    struct stat st;
-    if (stat(path.c_str(), &st) == 0) {
-        if (st.st_mode & S_IFDIR) {
-            return true;
-        }
-        std::cerr << "-o " << path << " is a file; with a directory input it "
-                  << "names the output directory" << std::endl;
-        return false;
-    }
-    size_t slash = path.find_last_of('/');
-    if (slash != std::string::npos && slash > 0) {
-        if (!EnsureDir(path.substr(0, slash))) {
-            return false;
-        }
-    }
-    if (mkdir(path.c_str(), 0755) != 0) {
-        std::cerr << "Cannot create output directory " << path << std::endl;
-        return false;
-    }
-    return true;
 }
 
 }  // namespace
