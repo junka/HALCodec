@@ -3,7 +3,9 @@
 #include <fstream>
 #include <iostream>
 #include <memory>
+#include <set>
 #include <string>
+#include <utility>
 #include <vector>
 
 #include <dirent.h>
@@ -13,6 +15,7 @@
 
 #include "parse_cli.h"
 #include "bmp_write.h"
+#include "output_paths.h"
 
 #include "codec_config.h"
 #include "decoder.h"
@@ -272,6 +275,37 @@ const char* kDefaultDecoder = "vtbox";
 const char* kDefaultDecoder = "";
 #endif
 
+// The --format values whose file is a BMP rather than a dump of the frame's own
+// bytes. They are the ones that ask the decoder for converted pixels.
+bool IsBmpFormat(const std::string& format) {
+    return format == "y" || format == "bgr" || format == "rgb" ||
+           format == "rgbi" || format == "bgri";
+}
+
+const char* PixelFormatName(halcodec::PixelFormat format) {
+    switch (format) {
+        case halcodec::PixelFormat::NV12: return "NV12";
+        case halcodec::PixelFormat::P010: return "P010";
+        case halcodec::PixelFormat::I420: return "I420";
+        case halcodec::PixelFormat::P016: return "P016";
+        case halcodec::PixelFormat::NV16: return "NV16";
+        case halcodec::PixelFormat::P210: return "P210";
+        case halcodec::PixelFormat::YUV444P: return "YUV444P";
+        case halcodec::PixelFormat::YUV444P10LE: return "YUV444P10LE";
+        case halcodec::PixelFormat::YUV444P16LE: return "YUV444P16LE";
+        case halcodec::PixelFormat::RGB: return "RGB";
+        case halcodec::PixelFormat::BGR: return "BGR";
+        case halcodec::PixelFormat::GRAY: return "GRAY";
+        case halcodec::PixelFormat::GRAY10LE: return "GRAY10LE";
+        case halcodec::PixelFormat::BGRA: return "BGRA";
+        case halcodec::PixelFormat::ARGB: return "ARGB";
+        case halcodec::PixelFormat::RGBA: return "RGBA";
+        case halcodec::PixelFormat::BAYER16LE: return "BAYER16LE";
+        case halcodec::PixelFormat::Unknown: break;
+    }
+    return "unknown";
+}
+
 } // namespace
 
 int main(int argc, char* argv[]) {
@@ -373,6 +407,15 @@ int main(int argc, char* argv[]) {
         return -1;
     }
     std::vector<std::string> files;
+    // The input each name was derived from, so an output that turns out to be an
+    // input can be caught before anything is opened.
+    std::vector<std::string> srcs;
+    // A BMP format writes a BMP: the writer renames whatever it is handed to
+    // `<name>.bmp`, so the extension here is the one the bytes really carry, and
+    // the list the run prints is the list of files it leaves behind. The format
+    // string itself still says which pixels to ask the decoder for.
+    const std::string outExt =
+        IsBmpFormat(cli.getFormat()) ? "bmp" : cli.getFormat();
     if (info.st_mode & S_IFDIR) {
         DIR *dir;
         struct dirent *ent;
@@ -380,50 +423,111 @@ int main(int argc, char* argv[]) {
         while (!dirPath.empty() && dirPath.back() == '/') {
             dirPath.pop_back();
         }
+        // -o names the output directory here, as it does for hal_enc: every
+        // picture needs a file of its own, so a single name cannot be the answer.
+        std::string outDir;
+        if (cli.hasOutputFile()) {
+            outDir = cli.getOutputFile();
+            while (outDir.size() > 1 && outDir.back() == '/') {
+                outDir.pop_back();
+            }
+        }
+        if (!outDir.empty() && !EnsureDir(outDir)) {
+            return -1;
+        }
         if ((dir = opendir(dirPath.c_str())) != NULL) {
             while ((ent = readdir(dir)) != NULL) {
                 if (ent->d_type == DT_REG) { // Regular file
                     std::string inputFileName = dirPath + '/' + ent->d_name;
-                    size_t lastDot = inputFileName.find_last_of('.');
-                    if (lastDot != std::string::npos) {
-                        inputFileName = inputFileName.substr(0, lastDot);
-                    }
-                    files.emplace_back(inputFileName + "." + cli.getFormat());
+                    std::string stem = outDir.empty()
+                                           ? StripExt(inputFileName)
+                                           : outDir + '/' + StripExt(ent->d_name);
+                    files.emplace_back(stem + "." + outExt);
+                    srcs.emplace_back(inputFileName);
                 }
             }
             closedir(dir);
         }
     } else {
-        // getOutputFile() already carries the format extension when derived.
-        files.push_back(cli.getOutputFile());
+        srcs.push_back(input);
+        if (cli.hasOutputFile()) {
+            files.push_back(cli.getOutputFile());
+        } else {
+            // The same rule the directory walk uses, so the name the run prints
+            // is the file it creates -- for a BMP format that extension is
+            // "bmp", which is what the writer turns its argument into anyway.
+            files.push_back(StripExt(input) + "." + outExt);
+        }
+    }
+    if (files.empty()) {
+        // Reached by a directory that holds no regular file. The name list used
+        // to be indexed here regardless, which read the front of an empty
+        // vector; nothing is opened now, so nothing is created.
+        std::cerr << "no regular files under " << input << std::endl;
+        return -1;
+    }
+    {
+        // An output that is one of the inputs gets truncated by the first write,
+        // and the run then decodes an empty file and still reports success --
+        // measured: `hal_dec -i s.h264 -f h264` zeroed s.h264, printed "Decode
+        // total frames: 0" and exited 0. Compared by device and inode, so a
+        // symlink or a `./` prefix counts as the file it points at.
+        std::set<std::pair<dev_t, ino_t>> inputs;
+        for (size_t i = 0; i < srcs.size(); i++) {
+            struct stat st;
+            if (stat(srcs[i].c_str(), &st) == 0) {
+                inputs.insert(std::make_pair(st.st_dev, st.st_ino));
+            }
+        }
+        for (size_t i = 0; i < files.size(); i++) {
+            struct stat st;
+            if (stat(files[i].c_str(), &st) != 0) {
+                continue;
+            }
+            if (inputs.count(std::make_pair(st.st_dev, st.st_ino)) != 0) {
+                std::cerr << files[i] << " is one of the inputs; refusing to "
+                          << "write over it (pass -o, or a --format that does not "
+                          << "name an input file)" << std::endl;
+                return -1;
+            }
+        }
     }
 
     for (auto p : files) {
         std::cout << p << std::endl;
     }
-    int fidx = 0;
+    // The name picture `index` goes to. `files` holds one entry per input file,
+    // which is one per picture for a batch of stills but not for a video stream
+    // in a single file: there the list ends after its first entry while the
+    // pictures keep coming, and the old code indexed past it -- on `hal_dec -i
+    // cars.h264 -f bgr` that read the second entry of a one-element list, so the
+    // picture was written to a garbage name (a hidden `./.bmp` in the cwd when
+    // the bytes happened to parse) instead of crashing. Past the end the last
+    // name is numbered, so every picture still lands in a file of its own.
+    auto pictureName = [&files](size_t index) -> std::string {
+        if (index < files.size()) {
+            return files[index];
+        }
+        const std::string& last = files.back();
+        return StripExt(last) + "_" + std::to_string(index + 1) + ExtOf(last);
+    };
+
     // libc++ gives a filebuf 4096 bytes, which copies every multi-megabyte frame
-    // out through that hole a thousand at a time. Measured on an M5 with an
-    // incompressible payload, 622 MB of 3 MiB writes through one held stream takes
-    // 462.9 ms at the default and 46.3 ms with a 4 MiB buffer -- 1.34 GB/s against
-    // 13.4 GB/s, and the SSD is not what separates them: a 3 MiB frame is 2.3 ms of
-    // user-time copying against 0.2 ms. A 1080p NV12 frame is exactly that 3 MiB.
-    // The curve is flat from 1 MiB upward and drifts back the other way by 16 MiB,
-    // so 4 MiB sits in the middle of the plateau. The buffer has to outlive the
-    // stream, so it is declared before it.
-    std::vector<char> out_buf(4u << 20);
+    // out through that hole a thousand at a time (see kIoBufBytes). The buffer
+    // has to outlive the stream, so it is declared before it, and each file gets
+    // a freshly buffered stream rather than a reopened one.
+    std::vector<char> out_buf(kIoBufBytes);
+    // Nothing opens here. The default output name is derived from the input's,
+    // so a stream opened before the input is read truncates the very file the run
+    // is about to decode; the raw output opens at the first frame that needs it.
     std::ofstream fpout;
-    fpout.rdbuf()->pubsetbuf(out_buf.data(),
-                             static_cast<std::streamsize>(out_buf.size()));
-    fpout.open(files[fidx++], std::ios::out|std::ios::binary);
-    if (!fpout) {
-        std::cerr << "unable to open output file" << std::endl;
-        return -1;
-    }
+    bool outOpen = false;
+    size_t outIndex = 0;
+    size_t pictures = 0;
 
     int total_frames = 0;
     bool printedBayer = false;
-    auto writeFrame = [&](halcodec::CodecFrame& frame) {
+    auto writeFrame = [&](halcodec::CodecFrame& frame) -> bool {
         // Device-resident frames (e.g. NvMedia zero-copy) must be materialized
         // to host memory before the file/BMP writers can touch the pixels.
         if (!halcodec::DownloadToHost(frame)) {
@@ -449,22 +553,84 @@ int main(int argc, char* argv[]) {
                       << " white=" << static_cast<int>(frame.bayer.whiteLevel)
                       << std::endl;
         }
-        if (cli.getFormat() == "y" || cli.getFormat() == "bgr"
-            || cli.getFormat() == "rgb" || cli.getFormat() == "rgbi"
-            || cli.getFormat() == "bgri") {
-            BMPWriter writer(files[fidx++], cli.getFormat());
+        if (IsBmpFormat(cli.getFormat())) {
+            // BMPWriter reads the picture the way --format describes it: one
+            // plane of width*height bytes for y, three for rgb/bgr, and rows at
+            // the picture's own width. That is only what the decoder delivers
+            // when it honored the request, and CodecParams::outputFormat reaches
+            // exactly one backend -- NVJPEG/layers/nvjpegdecoder.cc. VideoToolbox
+            // ignores it and answers in the layout the stream carries, so an
+            // NV12 frame handed over here is read 1.5x past its end (measured as
+            // a heap-buffer-overflow at bmp_write.h:104 on a 320x240 frame).
+            const bool interleaved =
+                cli.getFormat() == "rgbi" || cli.getFormat() == "bgri";
+            const halcodec::PixelFormat want =
+                cli.getFormat() == "y"
+                    ? halcodec::PixelFormat::GRAY
+                    : (cli.getFormat() == "rgb" ? halcodec::PixelFormat::RGB
+                                                : halcodec::PixelFormat::BGR);
+            const size_t w = static_cast<size_t>(frame.width);
+            const size_t h = static_cast<size_t>(frame.height);
+            const size_t planes = cli.getFormat() == "y" ? 1 : 3;
+            std::string why;
+            if (interleaved) {
+                why = "no backend delivers interleaved 24-bit pixels: the HAL "
+                      "format table has no name for it, so -f " + cli.getFormat() +
+                      " reaches the decoder as planar RGB/BGR and this writer "
+                      "would read it interleaved. Use -f rgb or -f bgr.";
+            } else if (frame.format != want) {
+                why = "--format " + cli.getFormat() + " asks for " +
+                      PixelFormatName(want) + " pixels, and the " + dec->getName() +
+                      " decoder delivered " + PixelFormatName(frame.format) +
+                      ". Only nvjpeg converts on request; the pixels here are the "
+                      "layout the stream carries, and a BMP writer would read "
+                      "past them.";
+            } else {
+                for (size_t p = 0; p < planes; p++) {
+                    if (frame.strides[p] != 0 && frame.strides[p] != w) {
+                        why = "--format " + cli.getFormat() + " writes BMP rows at " +
+                              std::to_string(w) + " bytes, but plane " +
+                              std::to_string(p) + " has a row stride of " +
+                              std::to_string(frame.strides[p]) + ".";
+                        break;
+                    }
+                }
+            }
+            if (!why.empty()) {
+                std::cerr << why << std::endl;
+                return false;
+            }
+            if (frame.size < w * h * planes) {
+                std::cerr << "--format " << cli.getFormat() << " reads "
+                          << w * h * planes << " bytes of pixels, and the frame "
+                          << "reports " << frame.size << std::endl;
+                return false;
+            }
+            BMPWriter writer(pictureName(pictures), cli.getFormat());
             writer.writeBMP(frame.data, frame.width, frame.height,
                             cli.getFormat() == "y" ? 1 : 3);
         } else {
-            fpout.write(reinterpret_cast<const char*>(frame.data), frame.size);
-            if (dec->getName() == "nvjpeg" && fidx < files.size()) {
-                fpout.close();
-                fpout.open(files[fidx++], std::ios::out|std::ios::binary);
+            // nvjpeg answers with one still per input file, so every picture of
+            // its own needs a file; the other backends decode a stream into one.
+            if (!outOpen || (dec->getName() == "nvjpeg" && outIndex != pictures)) {
+                fpout = OpenBuffered<std::ofstream>(
+                    pictureName(pictures),
+                    std::ios::out | std::ios::binary, out_buf);
+                if (!fpout) {
+                    std::cerr << "unable to open output file: "
+                              << pictureName(pictures) << std::endl;
+                    return false;
+                }
+                outOpen = true;
+                outIndex = pictures;
             }
+            fpout.write(reinterpret_cast<const char*>(frame.data), frame.size);
         }
+        pictures++;
         if (frame.release) {
             frame.release();
         }
+        return true;
     };
 
     if (dec->isAsync()) {
@@ -512,13 +678,17 @@ int main(int argc, char* argv[]) {
             // GetFrame() calls cannot block.
             while (ready-- > 0 && dec->GetFrame(frame)) {
                 total_frames++;
-                writeFrame(frame);
+                if (!writeFrame(frame)) {
+                    return -1;
+                }
             }
         }
         dec->SignalInputComplete();
         while (dec->GetFrame(frame)) {
             total_frames++;
-            writeFrame(frame);
+            if (!writeFrame(frame)) {
+                return -1;
+            }
         }
     } else {
         // Synchronous backends (nvdec, nvjpeg): pull a batch of frames and
@@ -533,12 +703,16 @@ int main(int argc, char* argv[]) {
                 if (!dec->GetFrame(frame)) {
                     break;
                 }
-                writeFrame(frame);
+                if (!writeFrame(frame)) {
+                    return -1;
+                }
             }
         } while (n_dec > 0);
     }
 
-    if (dec->getName() != "nvjpeg") {
+    // Flushing the buffered tail is what makes the last frame land, so this is
+    // not left to the destructor.
+    if (outOpen) {
         fpout.close();
     }
     dec->Finalize();
