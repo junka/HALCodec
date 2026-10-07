@@ -20,7 +20,7 @@ public:
                 ("help,h", "Show help message")
                 ("input,i", po::value<std::vector<std::string>>(&inputFiles_),
                  "Input file (may be repeated for multi-stream apps)")
-                ("output,o", po::value<std::string>(&outputFile_), "Output file (optional, defaults to input file name with format extension)")
+                ("output,o", po::value<std::string>(&outputFile_), "Output file; hal_enc with a directory input uses it as the output directory (defaults to the input name with the codec's extension)")
                 ("backend,b", po::value<std::string>(&backend_), "Backend name (vtbox/nvdec/nvjpeg/nvenc/amfdec/qsvdec/nvmedia); defaults per application")
                 ("encoder,B", po::value<std::string>(&encoderBackend_), "Encoder backend for apps that chain two backends (e.g. hal_transcode -b nvdec -B nvenc); defaults per application")
                 ("gpu", po::value<int>(&gpuIndex_)->default_value(0), "GPU index")
@@ -91,7 +91,8 @@ public:
             po::notify(vm);
 
             // If output is not provided, derive it from input
-            if (!vm.count("output") && !inputFiles_.empty()) {
+            outputExplicit_ = vm.count("output") != 0;
+            if (!outputExplicit_ && !inputFiles_.empty()) {
                 std::string inputFileName = inputFiles_.front();
                 size_t lastDot = inputFileName.find_last_of('.');
                 if (lastDot != std::string::npos) {
@@ -113,6 +114,10 @@ public:
     }
     const std::vector<std::string>& getInputFiles() const { return inputFiles_; }
     const std::string& getOutputFile() const { return outputFile_; }
+    // Whether -o was actually given. Apps whose default output name is derived
+    // per input (hal_enc in directory mode) need to tell "not set" apart from
+    // the value parse() filled in for them.
+    bool hasOutputFile() const { return outputExplicit_; }
     const std::string& getBackend() const { return backend_; }
     const std::string& getEncoderBackend() const { return encoderBackend_; }
     int getGpuIndex() const { return gpuIndex_; }
@@ -163,6 +168,7 @@ public:
 private:
     std::vector<std::string> inputFiles_;
     std::string outputFile_;
+    bool outputExplicit_ = false;
     std::string backend_;
     std::string encoderBackend_;
     int gpuIndex_;

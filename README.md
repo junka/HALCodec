@@ -150,10 +150,10 @@ Common options (from `app/parse_cli.h`):
 |--------|---------|
 | `-h, --help` | show the full option list and exit |
 | `-i, --input <file\|dir>` | input path |
-| `-o, --output <file>` | output path (defaults to `<input without ext>.<format>`) |
+| `-o, --output <file\|dir>` | output path; with a directory input `hal_enc` takes it as the output directory. Defaults to `<input without ext>` plus the extension the app writes: `.format` for `hal_dec`, the codec's for `hal_enc` |
 | `-b, --backend <name>` | backend name, e.g. `vtbox` / `nvdec` / `nvjpeg` / `nvenc` |
 | `--gpu <idx>` | device ordinal (default `0`) |
-| `-f, --format <ext>` | output extension (default `yuv`) |
+| `-f, --format <ext>` | raw pixel layout of the frames (default `yuv`); also the output extension for `hal_dec`, whose output is raw. `hal_enc` names its outputs by `--codec` instead |
 | `-c, --codec <name>` | stream codec (default `h264`; the vtbox/vtenc backend also answers for `hevc`, `av1`, `jpeg`, `prores`) |
 
 Exit codes — `hal_dec`: `0` success, `2` missing/invalid input, `255` decoder
@@ -177,22 +177,18 @@ Notes:
   sets (`vtbox`); other backends ignore it.
 - **Output naming**: for a single file, output is `-o` or
   `<input without ext>.<format>`. For a directory, every regular file maps to
-  `<name without ext>.<format>` in the same directory. Directory input is only
+  `<name without ext>.<format>` in the same directory. `--format` is the right
+  source for that extension on this side: a decoder's output is raw pixels, and
+  the layout asked for is exactly what the files hold. Directory input is only
   meaningful for backend decoders that walk the path themselves (e.g. `nvjpeg`
   on Linux); `vtbox` requires a single file, since its parameter sets come from
-  one Annex-B stream.
-  Note the collision this creates for `hal_enc`: `--format` names the *raw*
-  layout, so `-f nv12` on a directory of `.nv12` files maps each input onto
-  itself. Each input is now read whole before the output named after it is
-  opened, and the directory is scanned only once, so nothing is dropped or
-  re-ingested -- N files give N codestreams, each in the file its own frame was
-  named after -- but the raw frames are replaced by what was encoded from them,
-  and `hal_enc` says so on stderr first. Point `-f` at an extension the inputs
-  do not carry, or encode a copy, to keep both. (It used to be worse: the first
-  output was opened before any input was read, so the first-listed input was
-  truncated to 0 bytes, 3 files yielded 2 pictures, every later picture landed
-  one name off, and the last output was left empty.
-  `tests/vtenc_jpeg_collision.cmake` holds that shape down.)
+  one Annex-B stream. `hal_enc` names its outputs by codec instead, because its
+  `--format` describes what it reads -- see its section.
+  **This side still has the hazard `hal_enc` just lost**: a directory walk here
+  opens the first output name before decoding starts (`hal_dec.cc:418`), so
+  `-f` matching the inputs' extension truncates one of them, and the name list
+  is consumed one entry per *decoded frame* by the BMP and `nvjpeg` paths, which
+  walks off the end when the frames outnumber the files. Neither is fixed.
 - **Decode loop**: synchronous backends are driven by `PullFrames()` (feeds
   input, then each returned frame is written via `GetFrame()` and released with
   `frame.release()`). Async backends (`vtbox`, `isAsync() == true`) are fed
@@ -215,8 +211,9 @@ Notes:
 
 ```sh
 cd build
-./app/hal_enc -i raw_320x240.yuv -f yuv -o out.h264     # single raw stream
-./app/hal_enc -i images/ -b nvjpegenc -f rgb            # one frame per file
+./app/hal_enc -i raw_320x240.yuv -f yuv -o out.h264        # single raw stream
+./app/hal_enc -i frames/ -b vtenc --codec jpeg -f nv12     # frames/*.jpg
+./app/hal_enc -i frames/ -b vtenc --codec jpeg -f nv12 -o encoded/
 ```
 
 Purpose: the encoder-side counterpart of `hal_dec`, demonstrating the
@@ -227,6 +224,28 @@ Purpose: the encoder-side counterpart of `hal_dec`, demonstrating the
 - directory inputs feed one file per `FillFrame()` call;
 - an empty marker frame ends the stream, letting the encoder flush trailing
   packets, drained with `GetFrame()` until it returns false.
+
+- **Output naming**: the default extension comes from `--codec`, not from
+  `--format`. `--format` describes the raw layout `hal_enc` reads, and reusing it
+  as the output extension handed every codestream the path of the frame it was
+  made from (`-f nv12` over a directory of `.nv12` files). Pictures keep being
+  named after their own input: `c0.nv12` with `--codec jpeg` writes `c0.jpg`,
+  with `--codec hevc` `c0.h265`. The mapping is h264 → `.h264`, hevc/h265 →
+  `.h265`, av1 → `.av1`, jpeg/mjpeg → `.jpg`, prores → `.prores`, anything else
+  → `.<codec>`. With a directory input `-o` names the **output directory**, which
+  is created if missing; with a single file it names the output file. So inputs
+  are never written, and an input only ends up replaced when `-o` points a
+  codestream at it or the inputs already carry the codec's own extension, which
+  `hal_enc` says on stderr before writing anything. The scan takes every regular
+  file in the directory, so re-running over one it has already written into
+  encodes those codestreams as frames -- use `-o` or clear the outputs.
+  `tests/vtenc_jpeg_naming.cmake` holds all of that down. A directory is one
+  stream for a video coder, so `--codec h264/hevc/...` over a directory writes
+  the first of those names and appends every picture to it; only an image coder
+  (`oneOutputFilePerFrame()`, e.g. JPEG) fills the whole list. (It used to be worse
+  than the collision: the first output was opened before any input was read, so
+  the first-listed input was truncated to 0 bytes, 3 files yielded 2 pictures,
+  every later picture landed one name off, and the last output was left empty.)
 
 Encoders consume frame data from the `CodecFrame` parameter (`nvenc` uploads
 it to the device, `nvjpegenc` uploads it as one image) instead of opening the
@@ -380,9 +399,10 @@ control outright: `AverageBitRate`, `Quality`, `MaxKeyFrameInterval` and
   back. `hal_enc`'s per-picture JPEG mode writes one file per picture, so it hit
   this on every picture: the same 1080p q90 frames take 254 ms with a fresh
   stream per picture and 532 ms with one reused, 2.56 against 5.38 ms/picture.
-  (That pair was measured while the output-naming collision above was still
-  eating a picture, so both arms wrote the same 99; the fixed directory path
-  now yields all 100 in 254 ms, 2.54 ms/picture.) On the single-stream encode
+  (That pair was measured while the output-naming collision `hal_enc`'s directory
+  mode has since lost was still eating a picture, so both arms wrote the same 99;
+  the fixed directory path now yields all 100 in 254 ms, 2.54 ms/picture.) On the
+  single-stream encode
   rows the same fix is worth
   6-12% where the run writes 47-123 MB (ProRes LT 403 to 429, 422 397 to 438,
   HQ 388 to 432, 4444 260 to 289, XQ 255 to 286 fps), 2.6% for ProRes Proxy at

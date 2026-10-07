@@ -48,6 +48,59 @@ struct RawImage {
     std::string outputPath;
 };
 
+// The default output extension comes from the codec rather than from --format.
+// --format describes the raw layout of the input, so an encoded picture named
+// after that extension lands on the frame it was made from -- a directory of
+// .nv12 frames fed to `-c jpeg -f nv12` used to overwrite its own inputs.
+std::string CodecStreamExt(const std::string& codec) {
+    // Only the names that differ from the codec string need a case: h264, av1,
+    // prores and vp9 already read as elementary-stream extensions.
+    if (codec == "hevc" || codec == "h265") return ".h265";
+    if (codec == "jpeg" || codec == "mjpeg") return ".jpg";
+    if (codec == "appleprores") return ".prores";
+    if (codec == "mpeg2") return ".mpg2";
+    return "." + codec;
+}
+
+// Everything up to the last dot, but only when that dot is inside the final
+// path component -- "in.put/f0" has no extension to strip.
+std::string StripExt(const std::string& path) {
+    size_t dot = path.find_last_of('.');
+    if (dot == std::string::npos) {
+        return path;
+    }
+    size_t slash = path.find_last_of('/');
+    if (slash != std::string::npos && dot < slash) {
+        return path;
+    }
+    return path.substr(0, dot);
+}
+
+// -o names a directory in directory mode, because each picture needs a file of
+// its own. Create it if it is missing so `-o out/` works on a clean tree.
+bool EnsureDir(const std::string& path) {
+    struct stat st;
+    if (stat(path.c_str(), &st) == 0) {
+        if (st.st_mode & S_IFDIR) {
+            return true;
+        }
+        std::cerr << "-o " << path << " is a file; with a directory input it "
+                  << "names the output directory" << std::endl;
+        return false;
+    }
+    size_t slash = path.find_last_of('/');
+    if (slash != std::string::npos && slash > 0) {
+        if (!EnsureDir(path.substr(0, slash))) {
+            return false;
+        }
+    }
+    if (mkdir(path.c_str(), 0755) != 0) {
+        std::cerr << "Cannot create output directory " << path << std::endl;
+        return false;
+    }
+    return true;
+}
+
 }  // namespace
 
 int main(int argc, char* argv[]) {
@@ -140,22 +193,36 @@ int main(int argc, char* argv[]) {
     // the outputs this run creates are regular files in the same directory, so a
     // codestream could be read back as raw pixels.
     std::vector<RawImage> images;
+    const std::string outExt = CodecStreamExt(params.codec);
+    // Where the default names go: alongside each input, or into -o when it names
+    // a directory. Resolved before the scan so a bad -o is reported before
+    // anything is read.
+    std::string outDir;
+    if (cli.hasOutputFile()) {
+        outDir = cli.getOutputFile();
+        while (outDir.size() > 1 && outDir.back() == '/') {
+            outDir.pop_back();
+        }
+    }
     if (info.st_mode & S_IFDIR) {
         DIR *dir;
         struct dirent *ent;
         while (!input.empty() && input.back() == '/') {
             input.pop_back();
         }
+        if (!outDir.empty() && !EnsureDir(outDir)) {
+            return -1;
+        }
         if ((dir = opendir(input.c_str())) != NULL) {
             while ((ent = readdir(dir)) != NULL) {
                 if (ent->d_type == DT_REG) { // Regular file
                     std::string inputFileName = input + '/' + ent->d_name;
-                    std::string outputFileName = inputFileName;
-                    size_t lastDot = outputFileName.find_last_of('.');
-                    if (lastDot != std::string::npos) {
-                        outputFileName = outputFileName.substr(0, lastDot);
-                    }
-                    outputFileName += "." + cli.getFormat();
+                    // Picture i keeps the name of the input it was made from, in
+                    // the output directory if one was asked for.
+                    std::string outputFileName =
+                        outDir.empty() ? StripExt(inputFileName)
+                                       : outDir + '/' + StripExt(ent->d_name);
+                    outputFileName += outExt;
                     images.push_back({std::move(inputFileName),
                                       std::move(outputFileName)});
                 }
@@ -163,24 +230,28 @@ int main(int argc, char* argv[]) {
             closedir(dir);
         }
     } else {
-        images.push_back({input, cli.getOutputFile()});
+        std::string outputFileName = cli.getOutputFile();
+        if (!cli.hasOutputFile()) {
+            // The same rule as directory mode: the input keeps its raw name and
+            // the codestream gets the codec's, so a single `-i f.nv12 -f nv12` no
+            // longer truncates the frame it is reading.
+            outputFileName = StripExt(input) + outExt;
+        }
+        images.push_back({input, std::move(outputFileName)});
     }
     if (images.empty()) {
         std::cerr << "No regular files to encode in " << input << std::endl;
         return -1;
     }
 
-    // --format names the raw layout, so when the inputs already carry that
-    // extension every picture is named after the frame it was made from: `-f
-    // nv12` over a directory of .nv12 files gives each output the path of its
-    // own input. Each input is read whole before its output is opened, so no
-    // picture is lost -- but the raw frames are replaced by codestreams, which
-    // is worth saying before any of them are written.
+    // Naming itself cannot collide any more, so reaching this point means it was
+    // asked for: -o pointed the codestream at an input, or the inputs already
+    // carry the codec's own extension. Worth saying before anything is written.
     for (const auto& im : images) {
         if (im.inputPath == im.outputPath) {
             std::cerr << "Note: " << im.outputPath
-                      << " is both an input and an output; the raw files are "
-                         "being replaced by their encoded pictures" << std::endl;
+                      << " is both an input and an output; it is being replaced "
+                         "by its encoded picture" << std::endl;
             break;
         }
     }

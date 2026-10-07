@@ -54,9 +54,10 @@ if(NOT out MATCHES "Encode total frames: ${IMAGES}")
     message(FATAL_ERROR "hal_enc did not encode ${IMAGES} images:\n${out}${err}")
 endif()
 
-# Directory inputs become "<basename>.<format>", so image i lands in f<i>.nv12.
+# Default output names take the codec's extension, so image i lands in f<i>.jpg
+# beside the .yuv frame it came from.
 foreach(i RANGE 0 ${LAST})
-    set(jpg "${JDIR}/f${i}.nv12")
+    set(jpg "${JDIR}/f${i}.jpg")
 
     file(SIZE ${jpg} size)
     if(NOT size GREATER 512)
@@ -146,12 +147,12 @@ foreach(q 10 95)
         message("SKIP vtenc.jpeg: quality sweep exited with ${rcq}\n${outq}${errq}")
         return()
     endif()
-    file(SIZE "${QDIR}/f0.nv12" qsize)
+    file(SIZE "${QDIR}/f0.jpg" qsize)
     if(NOT qsize GREATER 512)
         message(FATAL_ERROR "--quality ${q} produced a ${qsize}-byte image")
     endif()
     list(APPEND QSIZES ${qsize})
-    file(REMOVE "${QDIR}/f0.nv12")
+    file(REMOVE "${QDIR}/f0.jpg")
 endforeach()
 list(GET QSIZES 0 q10_size)
 list(GET QSIZES 1 q95_size)
