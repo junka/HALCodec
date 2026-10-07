@@ -196,6 +196,22 @@ if(FFMPEG_EXE AND EXISTS "${_cars_h264}")
                     -DWORKDIR=${CMAKE_CURRENT_BINARY_DIR}
                     -P ${CMAKE_CURRENT_SOURCE_DIR}/vtdec_jpeg.cmake)
 
+        # The decoder's own output names: one file per picture where a picture is
+        # a file, no output that is also an input, and no frame read as a layout
+        # the decoder was never asked to produce. This is the case that used to
+        # index past its name list (a crash on every BMP format) and truncate the
+        # stream it was about to decode. Needs ffprobe for the BMP headers and
+        # libx265 for the mono stream the grey writer can legitimately read.
+        if(FFPROBE_EXE)
+            add_test(NAME vtdec.output_naming
+                COMMAND ${CMAKE_COMMAND} -DHAL_DEC=${HAL_DEC_EXE}
+                        -DFFMPEG=${FFMPEG_EXE}
+                        -DFFPROBE=${FFPROBE_EXE}
+                        -DINPUT_NV12=${_cars_nv12}
+                        -DWORKDIR=${CMAKE_CURRENT_BINARY_DIR}
+                        -P ${CMAKE_CURRENT_SOURCE_DIR}/vtdec_output_naming.cmake)
+        endif()
+
         # ProRes arrives as a bare element stream (each picture states its own
         # length), and it decodes to 16-bit chroma at full plane height rather
         # than NV12 -- 4:2:2 as 'sv22', 4:4:4 as the interleaved 'sv44' -- so the
