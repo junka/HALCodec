@@ -126,6 +126,25 @@ set_target_properties(registry_test PROPERTIES CXX_STANDARD 17)
 add_test(NAME registry COMMAND registry_test)
 
 # ---------------------------------------------------------------------------
+# CLI surface: app/parse_cli.h is shared by every tool, and boost rejects a short
+# option two long ones claim only at parse time -- nothing fails to build. Scan
+# the letters each built app advertises and run `-c` on it. Self-discovering, so
+# it needs no backend, no ffmpeg and no sample material.
+# ---------------------------------------------------------------------------
+set(_cli_apps "")
+foreach(_tool hal_dec hal_enc hal_transcode hal_session hal_cam codecinfo)
+    find_program(_exe_${_tool} NAMES ${_tool} PATHS ${CMAKE_BINARY_DIR}/app NO_DEFAULT_PATH)
+    if(_exe_${_tool})
+        list(APPEND _cli_apps ${_exe_${_tool}})
+    endif()
+endforeach()
+if(_cli_apps)
+    add_test(NAME cli.options
+        COMMAND ${CMAKE_COMMAND} "-DAPPS=${_cli_apps}"
+                    -P ${CMAKE_CURRENT_SOURCE_DIR}/cli_options.cmake)
+endif()
+
+# ---------------------------------------------------------------------------
 # Integration: decode determinism (bundled cars_320x240.h264 → exactly 30
 # frames, two runs byte-identical). Skips when the vtbox backend cannot load.
 # ---------------------------------------------------------------------------

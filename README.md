@@ -154,6 +154,7 @@ Common options (from `app/parse_cli.h`):
 | `-b, --backend <name>` | backend name, e.g. `vtbox` / `nvdec` / `nvjpeg` / `nvenc` |
 | `--gpu <idx>` | device ordinal (default `0`) |
 | `-f, --format <ext>` | output extension (default `yuv`) |
+| `-c, --codec <name>` | stream codec (default `h264`; the vtbox/vtenc backend also answers for `hevc`, `av1`, `jpeg`, `prores`) |
 
 Exit codes — `hal_dec`: `0` success, `2` missing/invalid input, `255` decoder
 create/initialize failure; `hal_enc`: `0` success, `1` backend

@@ -27,7 +27,12 @@ public:
                 ("format,f", po::value<std::string>(&format_)->default_value("yuv"),
                  "Format: yuv(i420)/nv12/p010/p210/p016/yuv444/y(rgb gray)/bgr/bgri/rgbi/bgra/rgba/bmp")
                 ("codec,c", po::value<std::string>(&codec_)->default_value("h264"))
-                ("colorspace,c", po::value<std::string>(&cs_)->default_value("420"), "Color sapce: 420/444/410")
+                // Long form only on purpose: -c belongs to --codec, which every
+                // encoding app reads, and boost refuses a short option that
+                // matches two of them ("option '-c' is ambiguous").
+                ("colorspace", po::value<std::string>(&cs_)->default_value("420"),
+                 "Color space: 420/444/410. No application reads this yet; the "
+                 "raw input layout given by --format decides what is encoded.")
                 ("encode-config", po::value<std::string>(&encodeConfigFile_), "JSON encoder config file (overrides defaults; CLI items below override this)")
                 ("preset", po::value<std::string>(&preset_), "Encoder preset (NVENC p1..p7; QSV fast/balanced/slow/best)")
                 ("tuning", po::value<std::string>(&tuning_), "NVENC tuning info (hq/ll/ull/low_latency_p)")
