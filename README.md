@@ -176,19 +176,33 @@ Notes:
   This is required by backends that build a format description from parameter
   sets (`vtbox`); other backends ignore it.
 - **Output naming**: for a single file, output is `-o` or
-  `<input without ext>.<format>`. For a directory, every regular file maps to
-  `<name without ext>.<format>` in the same directory. `--format` is the right
-  source for that extension on this side: a decoder's output is raw pixels, and
-  the layout asked for is exactly what the files hold. Directory input is only
-  meaningful for backend decoders that walk the path themselves (e.g. `nvjpeg`
-  on Linux); `vtbox` requires a single file, since its parameter sets come from
-  one Annex-B stream. `hal_enc` names its outputs by codec instead, because its
-  `--format` describes what it reads -- see its section.
-  **This side still has the hazard `hal_enc` just lost**: a directory walk here
-  opens the first output name before decoding starts (`hal_dec.cc:418`), so
-  `-f` matching the inputs' extension truncates one of them, and the name list
-  is consumed one entry per *decoded frame* by the BMP and `nvjpeg` paths, which
-  walks off the end when the frames outnumber the files. Neither is fixed.
+  `<input without ext>.<ext>`, where `<ext>` is `bmp` when `--format` asks for a
+  BMP layout (`y`, `bgr`, `rgb`) and the `--format` string otherwise -- the name
+  says what the bytes are. For a directory, every regular file maps to
+  `<name without ext>.<ext>`; `-o` then names the output *directory* (created if
+  absent) instead of a file, the way it does for `hal_enc`. `--format` is the
+  right source for that extension on this side: a decoder's output is raw
+  pixels, and the layout asked for is exactly what the files hold. Directory
+  input is only meaningful for backend decoders that walk the path themselves
+  (e.g. `nvjpeg` on Linux); `vtbox` requires a single file, since its parameter
+  sets come from one Annex-B stream. `hal_enc` names its outputs by codec
+  instead, because its `--format` describes what it reads -- see its section.
+  The name list holds one entry per input *file*, and a stream can carry more
+  pictures than that, so names past the end number off the last one
+  (`out.bmp`, `out_2.bmp`, ...).
+  Two hazards used to live here and are now guards: the output stream is opened
+  at the first frame that needs it, never before the input has been read, and a
+  name that resolves to one of the inputs -- by device and inode, so a symlink
+  counts -- is refused with exit `-1` rather than truncated. `-f h264` on an
+  `.h264` input, and `-o` repeating `-i`, both land on that guard.
+- **`--format` is a request, not a promise**: it reaches the decoders through
+  `CodecParams::outputFormat`, and exactly one backend reads it (`nvjpeg`, for
+  `rgb`/`bgr`/`y`). `vtbox` answers in the layout the stream carries, so
+  `-f bgr` on a 4:2:0 stream gets a refusal naming the pixels it was handed
+  (`delivered NV12`) instead of a BMP writer reading three planes out of a
+  frame that holds one and a half. `-f rgbi`/`-f bgri` are refused outright: the
+  HAL format table has no name for interleaved 24-bit, so no backend can
+  deliver it.
 - **Decode loop**: synchronous backends are driven by `PullFrames()` (feeds
   input, then each returned frame is written via `GetFrame()` and released with
   `frame.release()`). Async backends (`vtbox`, `isAsync() == true`) are fed

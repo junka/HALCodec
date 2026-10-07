@@ -20,7 +20,7 @@ public:
                 ("help,h", "Show help message")
                 ("input,i", po::value<std::vector<std::string>>(&inputFiles_),
                  "Input file (may be repeated for multi-stream apps)")
-                ("output,o", po::value<std::string>(&outputFile_), "Output file; hal_enc with a directory input uses it as the output directory (defaults to the input name with the codec's extension)")
+                ("output,o", po::value<std::string>(&outputFile_), "Output file; with a directory input it names the output directory instead (created if it is absent). Defaults to the input's name plus the codec's extension for hal_enc, and plus --format's for the decoders (bmp for a BMP layout)")
                 ("backend,b", po::value<std::string>(&backend_), "Backend name (vtbox/nvdec/nvjpeg/nvenc/amfdec/qsvdec/nvmedia); defaults per application")
                 ("encoder,B", po::value<std::string>(&encoderBackend_), "Encoder backend for apps that chain two backends (e.g. hal_transcode -b nvdec -B nvenc); defaults per application")
                 ("gpu", po::value<int>(&gpuIndex_)->default_value(0), "GPU index")
