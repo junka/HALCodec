@@ -63,8 +63,21 @@ public:
         paddedsize = ((width * n_chan) + extrabytes) * height;
 
         // Headers...
+        // An 8-bit picture carries a 256-entry palette between the headers and
+        // the pixels, and both fields below have to move with it. The header
+        // struct's offset is the 24-bit value (54) and this used to leave it
+        // there: consumers then read the palette as the first 1024 pixels.
+        // Measured on a 320x240 grey frame -- every frame scored 11.7 dB against
+        // the picture it came from, the same score for all of them, which is what
+        // a shift looks like rather than wrong pixels. ffprobe calls the result
+        // bmp/pal8 either way (an 8-bit palettised BMP is what it is, and ffmpeg's
+        // own grey BMP reads the same), so the ramp below is what makes it grey.
+        const uint32_t palette_bytes =
+            format_ == "y" ? 256 * static_cast<uint32_t>(sizeof(struct BMPColor))
+                           : 0;
         BMPFileHeader file_header;
-        file_header.size = paddedsize + 54;
+        file_header.size = paddedsize + 54 + palette_bytes;
+        file_header.offset = 54 + palette_bytes;
 
         BMPInfoHeader info_header;
         info_header.width = width;
@@ -79,7 +92,10 @@ public:
         if (format_ == "y") {
             struct BMPColor palette[256];
             for (int i = 0; i < 256; i++) {
-                palette[i].r = palette[i].g = palette[i].b = palette[i].a = i;
+                palette[i].r = palette[i].g = palette[i].b = i;
+                // The fourth byte is reserved and must read as zero; putting the
+                // grey level in it hands a reader a ramp of opacities.
+                palette[i].a = 0;
             }
             file_.write(reinterpret_cast<const char*>(palette), 256 * sizeof(struct BMPColor));
         }
