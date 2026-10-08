@@ -289,39 +289,89 @@ public:
         }
 
         // Phase 2: decode loop.
+        // eosSignaled is left uninitialized (then assigned) rather than
+        // initialized in-line: the switch cases below goto out, and a C++
+        // goto cannot cross a non-trivial initialization. A bool is trivially
+        // destructible, but the rule still flags `bool x = false;` — using a
+        // plain declaration + later assignment keeps the goto legal.
+        bool eosSignaled;
+        eosSignaled = false;
         while (true) {
             mfxBitstream* bsPtr = nullptr;
-            {
-                std::unique_lock<std::mutex> lk(mu);
-                // Consume any data first; if none and not EOF, wait.
-                cvInput.wait(lk, [this] {
-                    return eof || workerError || bs.DataLength > 0;
-                });
-                if (workerError) goto out;
-                compactLocked();
-                if (bs.DataLength > 0) {
-                    bsPtr = &bs;
-                } else if (eof) {
-                    // Drain mode: pass the (now-empty) bitstream struct, not
-                    // nullptr. oneVPL's DecodeFrameAsync treats a non-null
-                    // bitstream with DataLength==0 as a drain query and will
-                    // emit buffered reorder frames on successive calls;
-                    // passing nullptr is not the documented drain contract and
-                    // drops the tail.
-                    bsPtr = &bs;
-                } else {
-                    continue;
-                }
+            // This lock spans the bitstream setup AND the DecodeFrameAsync
+            // call. FillInput() appends into bs (and may realloc bs.Data) under
+            // the same lock; if we released it before calling DecodeFrameAsync,
+            // FillInput could realloc the buffer out from under the decoder
+            // (bsPtr points at bs) or mutate bs.DataLength mid-parse. That race
+            // nondeterministically dropped frames on multi-chunk inputs: a
+            // 305131-byte stream fed in 256 KiB chunks lost 4/30 frames
+            // depending on whether the second chunk's append landed during a
+            // decode call. DecodeFrameAsync is asynchronous (it submits and
+            // returns, synchronizing later via drainPendingLocked), so holding
+            // the lock across it only blocks FillInput for the submit duration.
+            std::unique_lock<std::mutex> lk(mu);
+            // Consume any data first; if none and not EOF, wait.
+            cvInput.wait(lk, [this] {
+                return eof || workerError || bs.DataLength > 0;
+            });
+            if (workerError) goto out;
+            compactLocked();
+            if (bs.DataLength > 0) {
+                bsPtr = &bs;
+            } else if (eof) {
+                // Drain mode: pass the (now-empty) bitstream struct, not
+                // nullptr. oneVPL's DecodeFrameAsync treats a non-null
+                // bitstream with DataLength==0 as a drain query and will
+                // emit buffered reorder frames on successive calls;
+                // passing nullptr is not the documented drain contract and
+                // drops the tail.
+                bsPtr = &bs;
+            } else {
+                continue;
+            }
+            // Signal end-of-stream to the decoder exactly once, the moment
+            // eof is observed. The flag must be on the bitstream for BOTH
+            // the final data-carrying call (so the decoder knows no more
+            // input follows the bytes it has) and the empty drain calls.
+            // Setting it only inside the MORE_DATA branch left a window
+            // where the last data-carrying DecodeFrameAsync ran without
+            // EOS, and the decoder buffered reorder frames it then
+            // nondeterministically refused to flush.
+            if (eof && !eosSignaled) {
+                bs.DataFlag |= MFX_BITSTREAM_EOS;
+                eosSignaled = true;
             }
 
             mfxFrameSurface1* surfOut = nullptr;
             mfxSyncPoint syncp{};
-            mfxStatus sts = runtime.decodeFrameAsync(session, bsPtr, nullptr,
+            // Provision an output surface via MFXMemory_GetSurfaceForDecode
+            // (the oneVPL 2.x recommended decode pattern) rather than passing
+            // nullptr. With nullptr the decoder draws from its internal pool,
+            // which is sized to AsyncDepth + reorder depth; at end-of-stream
+            // that pool can be exhausted and the decoder stops emitting —
+            // dropping the last reorder frames (High-profile h264 lost 4/30
+            // here even with EOS + empty-bs drain, while ffmpeg's h264_qsv,
+            // which provisions surfaces, decoded all 30). Handing the decoder
+            // an explicit free surface per call gives it a buffer to write
+            // every drain frame into.
+            mfxFrameSurface1* workSurf = nullptr;
+            mfxStatus gs = runtime.getSurfaceForDecode(session, &workSurf);
+            mfxFrameSurface1* surfArg = (gs == MFX_ERR_NONE && workSurf)
+                ? workSurf : nullptr;
+            mfxStatus sts = runtime.decodeFrameAsync(session, bsPtr, surfArg,
                                                     &surfOut, &syncp);
+            // If GetSurface gave us a surface but DecodeFrameAsync did not take
+            // ownership of it (returned no output surface or an error), release
+            // our reference so the pool reclaims it.
+            if (workSurf && surfOut != workSurf) {
+                if (workSurf->FrameInterface) {
+                    workSurf->FrameInterface->Release(workSurf);
+                }
+            }
             switch (sts) {
-                case MFX_ERR_NONE: {
-                    // Track the surface for batched synchronization.
-                    std::lock_guard<std::mutex> lk(mu);
+                case MFX_ERR_NONE:
+                    // Track the surface for batched synchronization. lk is held
+                    // (spanning the decode call above).
                     pending.push_back({surfOut, syncp});
                     stats_.framesIn++;  // one frame submitted to hardware
                     stats_.pendingAsync = static_cast<int>(pending.size());
@@ -330,9 +380,7 @@ public:
                         drainPendingLocked();
                     }
                     break;
-                }
-                case MFX_ERR_MORE_DATA: {
-                    std::unique_lock<std::mutex> lk(mu);
+                case MFX_ERR_MORE_DATA:
                     if (!eof) {
                         // Need more input; loop back to wait.
                         break;
@@ -348,15 +396,15 @@ public:
                     // av1 10/15, vp9 14/15 — the loss scales with reorder
                     // depth). Loop until a drain call returns MORE_DATA with
                     // no surface, which is the true end.
-                    bool progressed = true;
+                    {
                     int drainIters = 0;
                     int emptyInARow = 0;
-                    // Mark the bitstream as end-of-stream so the decoder
-                    // flushes its reorder buffer. Without MFX_BITSTREAM_EOS,
-                    // libmfx-gen keeps the last N frames buffered waiting for
-                    // more data that never comes (h264/hevc lost their tail).
-                    // The flag is the documented drain signal.
-                    bs.DataFlag |= MFX_BITSTREAM_EOS;
+                    // MFX_BITSTREAM_EOS was set on bs the moment eof was
+                    // observed (top of the phase-2 loop), so these drain calls
+                    // carry the flag without re-setting it. Loop until two
+                    // consecutive surface-less calls: libmfx-gen returns
+                    // MFX_ERR_MORE_DATA between delayed reorder frames, so a
+                    // single empty call is not the true end.
                     while (emptyInARow < 2 && drainIters < 64) {
                         mfxFrameSurface1* drain = nullptr;
                         mfxSyncPoint drainSync{};
@@ -364,8 +412,22 @@ public:
                         // push the surface. Pass the empty bitstream struct
                         // (DataLength==0, EOS flag set) as the drain query.
                         lk.unlock();
+                        // Provision an output surface for the drain call too:
+                        // the decoder needs a free surface to write each
+                        // reorder-buffered frame into, and the internal pool
+                        // may be exhausted by the time we drain.
+                        mfxFrameSurface1* drainWork = nullptr;
+                        mfxStatus gsd = runtime.getSurfaceForDecode(
+                            session, &drainWork);
+                        mfxFrameSurface1* drainArg = (gsd == MFX_ERR_NONE
+                            && drainWork) ? drainWork : nullptr;
                         mfxStatus d = runtime.decodeFrameAsync(
-                            session, &bs, nullptr, &drain, &drainSync);
+                            session, &bs, drainArg, &drain, &drainSync);
+                        if (drainWork && drain != drainWork) {
+                            if (drainWork->FrameInterface) {
+                                drainWork->FrameInterface->Release(drainWork);
+                            }
+                        }
                         lk.lock();
                         drainIters++;
                         if (d == MFX_ERR_NONE && drain) {
@@ -392,8 +454,22 @@ public:
                     finished = true;
                     cvFrames.notify_all();
                     goto out;
-                }
+                    }
                 case MFX_ERR_MORE_SURFACE:
+                    // The decoder consumed the input it could and has decoded
+                    // frames ready, but needs another output surface to write
+                    // the next one. surfOut is null on this status. We simply
+                    // loop back: the next iteration re-provisions a surface via
+                    // GetSurfaceForDecode and re-calls DecodeFrameAsync with the
+                    // SAME bitstream (bs still holds any unconsumed bytes), so
+                    // the decoder retrieves the ready frame and continues
+                    // consuming. Do NOT call with a null bitstream here to
+                    // "drain ready frames": bs may still hold unconsumed data,
+                    // and a null bitstream signals "no more input", which made
+                    // the decoder flush prematurely on chunked inputs and drop
+                    // tail frames (h264 lost 4/30 when chunk 2 had not yet
+                    // arrived).
+                    break;
                 case MFX_WRN_DEVICE_BUSY:
                     break;
                 default:
@@ -403,14 +479,12 @@ public:
                         // Treat that as end-of-stream: flush what's pending and
                         // stop, instead of poisoning the worker and dropping the
                         // tail frames that are still in the pipeline.
-                        std::lock_guard<std::mutex> lk(mu);
                         drainPendingLocked();
                         finished = true;
                         cvFrames.notify_all();
                         goto out;
                     }
                     std::cerr << "QSVDecoder: DecodeFrameAsync error: " << sts << "\n";
-                    std::lock_guard<std::mutex> lk(mu);
                     workerError = true;
                     cvFrames.notify_all();
                     goto out;
