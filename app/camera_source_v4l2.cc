@@ -11,11 +11,13 @@
 #include <cerrno>
 #include <atomic>
 #include <chrono>
+#include <condition_variable>
 #include <cstdint>
 #include <cstring>
 #include <fcntl.h>
 #include <iostream>
 #include <memory>
+#include <mutex>
 #include <string>
 #include <thread>
 #include <vector>
@@ -88,19 +90,23 @@ bool V4l2Capture::open(const std::string& device, uint32_t fourcc,
                   << std::strerror(errno) << "\n";
         return false;
     }
+    // Every failure path below must release the fd and any mmap'd buffers
+    // already allocated; close() handles STREAMOFF (no-op before STREAMON) +
+    // munmap of populated buffers + closing the fd.
+    auto fail = [&]() { close(); return false; };
     // Check capabilities.
     v4l2_capability cap{};
     if (Xioctl(fd_, VIDIOC_QUERYCAP, &cap) < 0) {
         std::cerr << "hal_cam: VIDIOC_QUERYCAP failed\n";
-        return false;
+        return fail();
     }
     if (!(cap.capabilities & V4L2_CAP_VIDEO_CAPTURE)) {
         std::cerr << "hal_cam: " << device << " is not a video capture device\n";
-        return false;
+        return fail();
     }
     if (!(cap.capabilities & V4L2_CAP_STREAMING)) {
         std::cerr << "hal_cam: " << device << " does not support streaming\n";
-        return false;
+        return fail();
     }
     // Negotiate format.
     v4l2_format fmt{};
@@ -112,12 +118,12 @@ bool V4l2Capture::open(const std::string& device, uint32_t fourcc,
     if (Xioctl(fd_, VIDIOC_S_FMT, &fmt) < 0) {
         std::cerr << "hal_cam: VIDIOC_S_FMT failed: "
                   << std::strerror(errno) << "\n";
-        return false;
+        return fail();
     }
     if (fmt.fmt.pix.pixelformat != fourcc) {
         std::cerr << "hal_cam: device refused format "
                   << fourcc << " (got " << fmt.fmt.pix.pixelformat << ")\n";
-        return false;
+        return fail();
     }
     width_ = fmt.fmt.pix.width;
     height_ = fmt.fmt.pix.height;
@@ -137,11 +143,11 @@ bool V4l2Capture::open(const std::string& device, uint32_t fourcc,
     if (Xioctl(fd_, VIDIOC_REQBUFS, &req) < 0) {
         std::cerr << "hal_cam: VIDIOC_REQBUFS failed: "
                   << std::strerror(errno) << "\n";
-        return false;
+        return fail();
     }
     if (req.count < 2) {
         std::cerr << "hal_cam: insufficient buffers (" << req.count << ")\n";
-        return false;
+        return fail();
     }
     buffers_.resize(req.count);
     for (uint32_t i = 0; i < req.count; ++i) {
@@ -151,14 +157,14 @@ bool V4l2Capture::open(const std::string& device, uint32_t fourcc,
         buf.index = i;
         if (Xioctl(fd_, VIDIOC_QUERYBUF, &buf) < 0) {
             std::cerr << "hal_cam: VIDIOC_QUERYBUF " << i << " failed\n";
-            return false;
+            return fail();
         }
         buffers_[i].length = buf.length;
         buffers_[i].start = mmap(nullptr, buf.length, PROT_READ | PROT_WRITE,
                                  MAP_SHARED, fd_, buf.m.offset);
         if (buffers_[i].start == MAP_FAILED) {
             std::cerr << "hal_cam: mmap " << i << " failed\n";
-            return false;
+            return fail();
         }
     }
     // Queue all buffers and start streaming.
@@ -169,14 +175,14 @@ bool V4l2Capture::open(const std::string& device, uint32_t fourcc,
         buf.index = i;
         if (Xioctl(fd_, VIDIOC_QBUF, &buf) < 0) {
             std::cerr << "hal_cam: VIDIOC_QBUF " << i << " failed\n";
-            return false;
+            return fail();
         }
     }
     int type = V4L2_BUF_TYPE_VIDEO_CAPTURE;
     if (Xioctl(fd_, VIDIOC_STREAMON, &type) < 0) {
         std::cerr << "hal_cam: VIDIOC_STREAMON failed: "
                   << std::strerror(errno) << "\n";
-        return false;
+        return fail();
     }
     streaming_ = true;
     return true;
@@ -187,11 +193,19 @@ bool V4l2Capture::get(uint8_t*& data, size_t& size) {
     buf.type = V4L2_BUF_TYPE_VIDEO_CAPTURE;
     buf.memory = V4L2_MEMORY_MMAP;
     if (Xioctl(fd_, VIDIOC_DQBUF, &buf) < 0) {
-        std::cerr << "hal_cam: VIDIOC_DQBUF failed: "
-                  << std::strerror(errno) << "\n";
+        // EAGAIN (non-blocking, no frame ready) is the normal polling case —
+        // stay quiet so the Grab loop's 10 ms backoff isn't drowned in logs.
+        if (errno != EAGAIN) {
+            std::cerr << "hal_cam: VIDIOC_DQBUF failed: "
+                      << std::strerror(errno) << "\n";
+        }
         return false;
     }
-    if (buf.index >= buffers_.size()) return false;
+    if (buf.index >= buffers_.size()) {
+        // Defensive: requeue the dequeued buffer so the driver doesn't lose it.
+        Xioctl(fd_, VIDIOC_QBUF, &buf);
+        return false;
+    }
     current_ = buf.index;
     data = static_cast<uint8_t*>(buffers_[buf.index].start);
     size = buf.bytesused;
@@ -250,7 +264,13 @@ void ConvertYuyvToNv12(const uint8_t* src, uint8_t* dst,
 }
 
 // V4L2 CameraSource:Grab 内部完成 YUYV→NV12 转换,输出 host NV12 CodecFrame。
-// nv12Buf_ 归源所有,下次 Grab/Stop 前有效,故 release 留空。
+//
+// 缓冲池:异步 encoder(qsvenc)的 FillFrame 只是把 CodecFrame 入队,worker 线程
+// 之后才 memcpy 上传到 MFX surface 并在完成后触发 frame.release。若 Grab 复用单
+// 缓冲,下一帧的 YUYV→NV12 会覆盖 worker 仍在读取的内存 → 花屏。故每帧从池中取
+// 一个独立 NV12 缓冲,release 把它归还池;池大小限定在途帧数(异步背压)。同步
+// encoder(nvmedia)在 FillFrame 内即消费完毕,hal_cam 会在 FillFrame 返回后立即
+// 调 release 归还,池大小同样足够。
 class V4L2CameraSource : public halcodec::CameraSource {
 public:
     bool Open() override {
@@ -271,7 +291,20 @@ public:
         }
         w_ = cap_.width();
         h_ = cap_.height();
-        nv12Buf_.assign(static_cast<size_t>(w_) * h_ * 3 / 2, 0);
+        // NV12 chroma subsampling and the YUYV→NV12 converter both require
+        // even dimensions; reject odd w/h early instead of producing a
+        // misaligned NV12 buffer the encoder would reject or corrupt.
+        if ((w_ | h_) & 1) {
+            std::cerr << "hal_cam: odd dimensions " << w_ << "x" << h_
+                      << " not supported (need even w/h for NV12)\n";
+            return false;
+        }
+        // Allocate the conversion buffer pool.
+        const size_t nv12Size = static_cast<size_t>(w_) * h_ * 3 / 2;
+        poolStorage_.assign(kPoolSize, std::vector<uint8_t>(nv12Size));
+        freePool_.clear();
+        freePool_.reserve(kPoolSize);
+        for (auto& b : poolStorage_) freePool_.push_back(&b);
         return true;
     }
 
@@ -287,9 +320,9 @@ public:
         size_t frameSize = 0;
         while (!requestedStop_.load()) {
             if (!cap_.get(frameData, frameSize)) {
-                // 非阻塞 DQBUF 返回 EAGAIN 或设备错误:视为暂时无帧,等待后重试
-                // (old app 对 EAGAIN 直接 continue)。RequestStop 后由循环条件退出。
-                std::this_thread::sleep_for(std::chrono::milliseconds(10));
+                // EAGAIN(无帧就绪)或瞬时错误:短暂退避后重试,避免 100% CPU 空转。
+                // RequestStop 后由循环条件退出。
+                std::this_thread::sleep_for(std::chrono::milliseconds(5));
                 continue;
             }
             if (frameSize < static_cast<size_t>(w_) * h_ * 2) {
@@ -297,22 +330,43 @@ public:
                 cap_.release();
                 continue;
             }
-            ConvertYuyvToNv12(frameData, nv12Buf_.data(), w_, h_);
+            // 取一个空闲 NV12 缓冲;全部在途时阻塞(异步背压)。
+            std::vector<uint8_t>* nv12 = nullptr;
+            {
+                std::unique_lock<std::mutex> lk(poolMu_);
+                poolCv_.wait(lk, [&] { return !freePool_.empty(); });
+                nv12 = freePool_.back();
+                freePool_.pop_back();
+            }
+            ConvertYuyvToNv12(frameData, nv12->data(), w_, h_);
             cap_.release();
 
-            frame.data = nv12Buf_.data();
-            frame.size = nv12Buf_.size();
+            frame.data = nv12->data();
+            frame.size = nv12->size();
             frame.width = static_cast<int>(w_);
             frame.height = static_cast<int>(h_);
             frame.format = halcodec::PixelFormat::NV12;
             frame.locality = halcodec::FrameLocality::Host;
-            frame.release = nullptr;
+            // 归还缓冲:同步 encoder 由 hal_cam 在 FillFrame 后立即调;异步
+            // encoder(qsvenc)由 worker 在 memcpy 上传后调。poolStorage_ 生命周期
+            // 覆盖整个源(Stop 前 worker 必已 drain),捕获 &freePool_/互斥量安全。
+            frame.release = [this, nv12]() {
+                std::lock_guard<std::mutex> lk(poolMu_);
+                freePool_.push_back(nv12);
+                poolCv_.notify_one();
+            };
             return true;
         }
         return false;
     }
 
-    void Stop() override { cap_.close(); }
+    void Stop() override {
+        cap_.close();
+        // 等待并清空池:Grab 已不再运行,但异步 encoder 的 worker 可能仍持有最后
+        // 几帧的 release 回调。poolStorage_ 在此函数返回后析构,故这里无需也不能
+        // 主动 join worker —— hal_cam 在 Stop() 之前已 Finalize() 编码器(worker
+        // 已退出)。仅重置池状态即可。
+    }
 
     uint32_t width()  const override { return w_; }
     uint32_t height() const override { return h_; }
@@ -331,8 +385,14 @@ private:
     int captureFps_ = 30;
     uint32_t w_ = 0;
     uint32_t h_ = 0;
-    std::vector<uint8_t> nv12Buf_;
     std::atomic<bool> requestedStop_{false};
+
+    // NV12 转换缓冲池(每帧独立缓冲,避免异步 encoder worker 读旧帧)。
+    static constexpr size_t kPoolSize = 8;  // 在途帧上限(异步背压)
+    std::vector<std::vector<uint8_t>> poolStorage_;
+    std::vector<std::vector<uint8_t>*> freePool_;
+    std::mutex poolMu_;
+    std::condition_variable poolCv_;
 };
 
 } // namespace

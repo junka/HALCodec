@@ -109,16 +109,26 @@ void CaptureThread(CaptureUnit& c) {
             break;
         }
         frame.pts = pts++;
-        // 同步 encoder 的 FillFrame 返回即消费完毕;异步 encoder(vtenc/qsvenc)
-        // 在 FillFrame 内立即拷贝入内部缓冲,故填帧后调用 release 归还帧缓冲。
         if (!c.enc->FillFrame(frame)) {
             std::cerr << "hal_cam: cam " << c.camId << " FillFrame failed at frame "
                       << c.framesEncoded.load() << "\n";
             c.error = "FillFrame failed";
+            // The encoder did not accept the frame, so it will not fire the
+            // buffer's release — return it ourselves.
             if (frame.release) frame.release();
             break;
         }
-        if (frame.release) frame.release();
+        // Release the source frame buffer once the encoder has consumed it.
+        // Synchronous backends (nvmedia) consume the input inside FillFrame, so
+        // the buffer is safe to return immediately. Asynchronous backends
+        // (qsvenc/vtenc) only queue the CodecFrame in FillFrame and copy it
+        // later from their worker thread — they fire frame.release themselves
+        // after that upload (qsvencoder worker fires input.release after
+        // FillSurfaceFromFrame). Releasing here too would double-fire and, for
+        // a buffer returned to a pool, hand the same buffer to two producers.
+        if (!c.enc->isAsync()) {
+            if (frame.release) frame.release();
+        }
         c.framesEncoded.fetch_add(1);
         if (!c.enc->isAsync()) DrainPackets(c);
     }
