@@ -71,6 +71,24 @@ macro(dir_count out)
 endmacro()
 
 # ---------------------------------------------------------------------------
+# Preflight: every case below needs the vtbox backend. On a host without the
+# CUDA runtime (or libnvidia-encode) the backend .so fails to load and hal_dec
+# exits non-zero before decoding anything -- the comment at the top of this
+# file promises a skip in that case, so probe once up front rather than
+# reporting each case as a hard failure. Matches decode_determinism's skip.
+# ---------------------------------------------------------------------------
+execute_process(COMMAND ${HAL_DEC} -b vtbox -i ${INPUT_NV12} -f nv12
+                -o "${W}/_probe.nv12"
+                RESULT_VARIABLE probe_rc OUTPUT_VARIABLE probe_out
+                ERROR_VARIABLE probe_err)
+file(REMOVE "${W}/_probe.nv12")
+if(probe_rc EQUAL 137 OR probe_rc GREATER 0)
+    message("SKIP vtdec.output_naming: vtbox backend not available "
+            "(hal_dec rc=${probe_rc})\n${probe_err}")
+    return()
+endif()
+
+# ---------------------------------------------------------------------------
 # Material: a 3-frame 8-bit monochrome HEVC stream (for the grey BMP path) and a
 # 3-frame 4:2:0 one (for the refusal), both from the bundled NV12. Streams come
 # from libx265 rather than from hal_enc so the encoder cannot cover for the

@@ -37,7 +37,11 @@ foreach(app ${APPS})
     set(seen "")
     set(dups "")
     set(found 0)
-    while(TRUE)
+    # while(1) rather than while(TRUE): on CMake >= 3.28 with CMP0130 unset,
+    # the bare word TRUE is diagnosed as a non-boolean variable name and the
+    # loop body never runs, so the scan reports zero short options. 1 is
+    # always treated as true regardless of policy.
+    while(1)
         string(REGEX MATCH "-[A-Za-z] \\[ --" hit "${rest}")
         if(NOT hit)
             break()

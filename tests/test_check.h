@@ -4,6 +4,7 @@
 #include <cstdio>
 #include <sstream>
 #include <string>
+#include <type_traits>
 
 // Minimal assertion harness. The project has no test dependency and these
 // cases are plain functions over bitstreams, so failures are collected rather
@@ -27,13 +28,33 @@ inline bool check(bool ok, const char* file, int line, const std::string& what) 
     return ok;
 }
 
+// Detects whether T can be streamed to std::ostringstream. CHECK_EQ formats
+// both operands only for the failure message, but the template is instantiated
+// unconditionally at the call site, so a non-streamable type (e.g. a
+// unique_ptr compared against nullptr) must not hard-error the build — it
+// should fall back to a placeholder instead.
+template <class T, class = void>
+struct is_streamable : std::false_type {};
+
+template <class T>
+struct is_streamable<
+    T, std::void_t<decltype(std::declval<std::ostringstream&>() <<
+                            std::declval<const T&>())>> : std::true_type {};
+
 // Formats a value for the failure message only; the comparison itself is a
-// plain ==, so the types just need an ostream operator.
+// plain ==, so the types just need an ostream operator. When they don't have
+// one, report a placeholder so the assertion still compiles and the real
+// diagnostic is the expression text + the bool result.
 template <class T>
 std::string show(const T& v) {
-    std::ostringstream os;
-    os << v;
-    return os.str();
+    if constexpr (is_streamable<T>::value) {
+        std::ostringstream os;
+        os << v;
+        return os.str();
+    } else {
+        (void)v;
+        return "<non-streamable>";
+    }
 }
 
 template <class A, class B>
