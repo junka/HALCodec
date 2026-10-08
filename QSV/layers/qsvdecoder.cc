@@ -350,14 +350,14 @@ public:
                     // no surface, which is the true end.
                     bool progressed = true;
                     int drainIters = 0;
+                    int emptyInARow = 0;
                     // Mark the bitstream as end-of-stream so the decoder
                     // flushes its reorder buffer. Without MFX_BITSTREAM_EOS,
                     // libmfx-gen keeps the last N frames buffered waiting for
                     // more data that never comes (h264/hevc lost their tail).
                     // The flag is the documented drain signal.
                     bs.DataFlag |= MFX_BITSTREAM_EOS;
-                    while (progressed) {
-                        progressed = false;
+                    while (emptyInARow < 2 && drainIters < 64) {
                         mfxFrameSurface1* drain = nullptr;
                         mfxSyncPoint drainSync{};
                         // Release the lock for the async call; reacquire to
@@ -371,16 +371,22 @@ public:
                         if (d == MFX_ERR_NONE && drain) {
                             pending.push_back({drain, drainSync});
                             stats_.framesIn++;
-                            progressed = true;
+                            emptyInARow = 0;
                         } else if (drain) {
                             // Returned an error but allocated a surface; let
                             // drainPendingLocked Release it.
                             pending.push_back({drain, drainSync});
+                            emptyInARow = 0;
+                        } else {
+                            // No surface this call. The decoder can still emit
+                            // on a later drain call (it returns MORE_DATA
+                            // between delayed frames), so only stop after two
+                            // consecutive empty calls.
+                            emptyInARow++;
                         }
                         if (pending.size() >= 4) {
                             drainPendingLocked();
                         }
-                        if (drainIters > 64) break; // safety
                     }
                     drainPendingLocked();
                     finished = true;
