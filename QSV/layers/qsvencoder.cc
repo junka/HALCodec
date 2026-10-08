@@ -535,6 +535,14 @@ bool QSVEncoder::Initialize(const CodecParams& params) {
 
     mfxVideoParam& par = impl_->par;
     par.mfx.CodecId = mapCodec(params.codec);
+    if (par.mfx.CodecId == 0) {
+        std::cerr << "QSVEncoder: unsupported codec '" << params.codec
+                  << "' (qsvenc supports h264/hevc/av1/jpeg; vp9/mpeg2 encode "
+                  << "is not implemented on this hardware)" << std::endl;
+        delete impl_;
+        impl_ = nullptr;
+        return false;
+    }
     // Unified EncodeConfig overrides; sentinels fall back to the prior
     // hardcoded defaults (BALANCED / 8 Mbps / CBR / 30 fps).
     const auto& ec = params.encode;

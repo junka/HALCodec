@@ -255,12 +255,19 @@ private:
     MFXVideoENCODEGetStatFn encodeGetStat_ = nullptr;
 };
 
-// Maps the unified codec string to an libvpl codec id.
+// Maps the unified codec string to a libvpl codec id. Returns 0 for an
+// unrecognized codec so the caller can fail loudly rather than silently
+// encoding as H.264: the previous default-to-AVC fallback meant --codec vp9
+// (or mpeg2, or any typo) produced a valid H.264 stream written to a .vp9
+// file — byte-identical to --codec h264 — instead of erroring.
 inline mfxU32 mapCodec(const std::string& codec) {
-    if (codec == "hevc") return MFX_CODEC_HEVC;
-    if (codec == "av1") return MFX_CODEC_AV1;
-    if (codec == "jpeg") return MFX_CODEC_JPEG;
-    return MFX_CODEC_AVC; // default
+    if (codec == "h264" || codec == "avc")  return MFX_CODEC_AVC;
+    if (codec == "hevc" || codec == "h265") return MFX_CODEC_HEVC;
+    if (codec == "av1")  return MFX_CODEC_AV1;
+    if (codec == "jpeg" || codec == "mjpeg") return MFX_CODEC_JPEG;
+    if (codec == "vp9")  return MFX_CODEC_VP9;
+    if (codec == "mpeg2") return MFX_CODEC_MPEG2;
+    return 0; // unknown — caller must reject
 }
 
 } // namespace qsv

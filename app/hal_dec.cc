@@ -153,13 +153,15 @@ bool ExtractParameterSets(const uint8_t* data, size_t size,
     return true;
 }
 
-// IVF: the container AV1 test streams travel in (a 32-byte file header -- 'DKIF',
-// version, header length, fourcc, width, height, timebase, frame count -- then one
-// record per frame: a 4-byte little-endian payload size, an 8-byte presentation
-// counter, and the packet). It carries no codec description, so the first frame's
-// in-band sequence header is what a decoder has to open with.
+// IVF: the container AV1 and VP9 test streams travel in (a 32-byte file header
+// -- 'DKIF', version, header length, fourcc, width, height, timebase, frame
+// count -- then one record per frame: a 4-byte little-endian payload size, an
+// 8-byte presentation counter, and the packet). It carries no codec
+// description, so the first frame's in-band sequence header is what a decoder
+// has to open with.
 
-bool IsIvf(const uint8_t* data, size_t size, size_t* headerSize, bool* isAv1) {
+bool IsIvf(const uint8_t* data, size_t size, size_t* headerSize,
+           std::string* codec) {
     if (!data || size < 32 || memcmp(data, "DKIF", 4) != 0) {
         return false;
     }
@@ -167,7 +169,17 @@ bool IsIvf(const uint8_t* data, size_t size, size_t* headerSize, bool* isAv1) {
     // the file says they do.
     *headerSize = static_cast<size_t>(data[6]) |
                   (static_cast<size_t>(data[7]) << 8);
-    *isAv1 = memcmp(data + 8, "AV01", 4) == 0;
+    // The fourcc at offset 8 names the codec. AV01 -> av1, VP90 -> vp9; any
+    // other fourcc is still a valid IVF but one we don't decode, so leave the
+    // codec empty and let the caller fall through to the Annex-B/JPEG sniff.
+    const char* cc = reinterpret_cast<const char*>(data + 8);
+    if (memcmp(cc, "AV01", 4) == 0) {
+        *codec = "av1";
+    } else if (memcmp(cc, "VP90", 4) == 0) {
+        *codec = "vp9";
+    } else {
+        codec->clear();
+    }
     return *headerSize >= 32 && *headerSize <= size;
 }
 
@@ -363,16 +375,17 @@ int main(int argc, char* argv[]) {
     std::unique_ptr<IvfPayloadReader> ivf;
     if (ReadFile(cli.getInputFile(), &raw)) {
         size_t headerSize = 0;
-        bool isAv1 = false;
+        std::string ivfCodec;
         const uint8_t* packet = nullptr;
         size_t packetSize = 0;
-        if (IsIvf(raw.data(), raw.size(), &headerSize, &isAv1) && isAv1 &&
+        if (IsIvf(raw.data(), raw.size(), &headerSize, &ivfCodec) &&
+            !ivfCodec.empty() &&
             FirstIvfPacket(raw.data(), raw.size(), headerSize, &packet,
                            &packetSize)) {
-            // An IVF/AV01 input says which codec its bytes are, which the name
-            // has to carry because the frame records make the stream look like
-            // nothing to the Annex-B sniff below.
-            params.codec = "av1";
+            // An IVF/AV01 or VP90 input says which codec its bytes are, which
+            // the name has to carry because the frame records make the stream
+            // look like nothing to the Annex-B sniff below.
+            params.codec = ivfCodec;
             params.extradata.assign(packet, packet + packetSize);
             ivf.reset(new IvfPayloadReader(headerSize));
         } else if (IsProRes(raw.data(), raw.size())) {

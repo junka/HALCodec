@@ -26,7 +26,7 @@ public:
     }
 
     void showDecoderCapability() const override {
-        std::cout << "  hardware decode via libvpl: H.264/HEVC/VP9/AV1/JPEG "
+        std::cout << "  hardware decode via libvpl: H.264/HEVC/AV1/VP9/MPEG2/JPEG "
                      "(driver-dependent, negotiated at init)"
                   << std::endl;
     }
@@ -34,7 +34,8 @@ public:
     void showEncoderCapability() const override {
         QSVRuntime runtime;
         bool loaded = runtime.init();
-        std::cout << "  hardware encode via libvpl: H.264/HEVC/AV1 on Intel iGPU"
+        std::cout << "  hardware encode via libvpl: H.264/HEVC/AV1 on Intel iGPU "
+                     "(JPEG/VP9/MPEG2 encode are hardware-limited)"
                   << (loaded ? "" : " (libvpl not loadable on this host)")
                   << std::endl;
     }
