@@ -544,8 +544,38 @@ bool QSVEncoder::Initialize(const CodecParams& params) {
         return false;
     }
     // Unified EncodeConfig overrides; sentinels fall back to the prior
-    // hardcoded defaults (BALANCED / 8 Mbps / CBR / 30 fps).
+    // hardcoded defaults (BALANCED / 8 Mbps / CBR / 30 fps). Bound before the
+    // JPEG branch below so that branch (which skips the generic video-codec
+    // knobs) can read ec.quality without crossing an initializer.
     const auto& ec = params.encode;
+    // JPEG is I-frame-only and quality-driven, not rate-controlled: the generic
+    // TargetUsage/TargetKbps/RateControlMethod/GopRefDist fields below are video-
+    // codec knobs that the JPEG encoder rejects (MFX_ERR_INCOMPATIBLE_VIDEO_PARAM
+    // -16 at Query/Init). Its parameters live in the mfxInfoMFX JPEG union:
+    // Interleaved (1=a single interleaved scan, the normal case),
+    // Quality (1..100), and CodecProfile=MFX_PROFILE_JPEG_BASELINE. The input
+    // surface is still NV12, so JPEGColorFormat=YCbCr and ChromaFormat=420.
+    if (par.mfx.CodecId == MFX_CODEC_JPEG) {
+        par.mfx.CodecProfile = MFX_PROFILE_JPEG_BASELINE;
+        par.mfx.Interleaved = MFX_SCANTYPE_INTERLEAVED;
+        par.mfx.Quality = (ec.quality > 0 && ec.quality <= 100)
+            ? static_cast<mfxU16>(ec.quality) : 85;
+        par.mfx.JPEGColorFormat = MFX_JPEG_COLORFORMAT_YCbCr;
+        par.mfx.FrameInfo.FourCC = MFX_FOURCC_NV12;
+        par.mfx.FrameInfo.ChromaFormat = MFX_CHROMAFORMAT_YUV420;
+        par.mfx.FrameInfo.CropW = static_cast<mfxU16>(params.width);
+        par.mfx.FrameInfo.CropH = static_cast<mfxU16>(params.height);
+        par.mfx.FrameInfo.Width = Align16(params.width);
+        par.mfx.FrameInfo.Height = Align16(params.height);
+        par.mfx.FrameInfo.FrameRateExtN = ec.frameRateNum > 0
+            ? static_cast<mfxU16>(ec.frameRateNum) : 30;
+        par.mfx.FrameInfo.FrameRateExtD = ec.frameRateDen > 0
+            ? static_cast<mfxU16>(ec.frameRateDen) : 1;
+        par.mfx.FrameInfo.PicStruct = MFX_PICSTRUCT_PROGRESSIVE;
+        par.IOPattern = impl_->zeroCopy
+            ? MFX_IOPATTERN_IN_VIDEO_MEMORY
+            : MFX_IOPATTERN_IN_SYSTEM_MEMORY;
+    } else {
     par.mfx.TargetUsage = MFX_TARGETUSAGE_BALANCED;
     if (!ec.preset.empty()) {
         if (ec.preset == "fast" || ec.preset == "speed")
@@ -596,6 +626,7 @@ bool QSVEncoder::Initialize(const CodecParams& params) {
     par.IOPattern = impl_->zeroCopy
         ? MFX_IOPATTERN_IN_VIDEO_MEMORY
         : MFX_IOPATTERN_IN_SYSTEM_MEMORY;
+    }
 
     // Validate / clamp parameters against what the implementation supports.
     // MFX_WRN_INCOMPATIBLE_VIDEO_PARAM is benign: the encoder adjusts the

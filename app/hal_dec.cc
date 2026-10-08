@@ -169,14 +169,17 @@ bool IsIvf(const uint8_t* data, size_t size, size_t* headerSize,
     // the file says they do.
     *headerSize = static_cast<size_t>(data[6]) |
                   (static_cast<size_t>(data[7]) << 8);
-    // The fourcc at offset 8 names the codec. AV01 -> av1, VP90 -> vp9; any
-    // other fourcc is still a valid IVF but one we don't decode, so leave the
-    // codec empty and let the caller fall through to the Annex-B/JPEG sniff.
+    // The fourcc at offset 8 names the codec. AV01 -> av1, VP90 -> vp9,
+    // VP80 -> vp8; any other fourcc is still a valid IVF but one we don't
+    // decode, so leave the codec empty and let the caller fall through to the
+    // Annex-B/JPEG sniff.
     const char* cc = reinterpret_cast<const char*>(data + 8);
     if (memcmp(cc, "AV01", 4) == 0) {
         *codec = "av1";
     } else if (memcmp(cc, "VP90", 4) == 0) {
         *codec = "vp9";
+    } else if (memcmp(cc, "VP80", 4) == 0) {
+        *codec = "vp8";
     } else {
         codec->clear();
     }

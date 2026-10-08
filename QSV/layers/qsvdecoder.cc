@@ -671,7 +671,7 @@ bool QSVDecoder::Initialize(const CodecParams& params) {
     impl_->codecId = mapCodec(params.codec);
     if (impl_->codecId == 0) {
         std::cerr << "QSVDecoder: unsupported codec '" << params.codec
-                  << "' (qsvdec supports h264/hevc/av1/jpeg/vp9/mpeg2)"
+                  << "' (qsvdec supports h264/hevc/av1/jpeg/vp9/vp8/vc1/mpeg2)"
                   << std::endl;
         delete impl_;
         impl_ = nullptr;

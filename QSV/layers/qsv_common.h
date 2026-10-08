@@ -266,6 +266,8 @@ inline mfxU32 mapCodec(const std::string& codec) {
     if (codec == "av1")  return MFX_CODEC_AV1;
     if (codec == "jpeg" || codec == "mjpeg") return MFX_CODEC_JPEG;
     if (codec == "vp9")  return MFX_CODEC_VP9;
+    if (codec == "vp8")  return MFX_CODEC_VP8;
+    if (codec == "vc1")  return MFX_CODEC_VC1;
     if (codec == "mpeg2") return MFX_CODEC_MPEG2;
     return 0; // unknown — caller must reject
 }
