@@ -63,6 +63,19 @@ public:
             dlsym(handle_, "MFXVideoCORE_GetHandle"));
         setHandle_ = reinterpret_cast<MFXVideoCORESetHandleFn>(
             dlsym(handle_, "MFXVideoCORE_SetHandle"));
+        // Register an external frame allocator (the legacy mfxFrameAllocator
+        // path). Required for VP8/VP9 decode on libmfx-gen: without a
+        // registered allocator libmfx-gen takes the new-API FrameInterface
+        // surface path, and a MemId-only surface segfaults inside
+        // DecodeFrameAsync. With a registered allocator (GetHDL returns the
+        // VA surface id) libmfx-gen takes the legacy path — exactly ffmpeg's
+        // AVHWFramesContext recipe (hwcontext_qsv.c never sets FrameInterface;
+        // it registers an allocator + hands MemId-only surfaces). The
+        // allocator implementation itself is Linux-VAAPI-specific and lives
+        // in qsv_va_allocator.cc; SetFrameAllocator is a cross-platform oneVPL
+        // API exported by libvpl (LIBVPL_2.0) and any legacy impl.
+        setFrameAllocator_ = reinterpret_cast<MFXVideoCORESetFrameAllocatorFn>(
+            dlsym(handle_, "MFXVideoCORE_SetFrameAllocator"));
         decodeGetVideoParam_ = reinterpret_cast<MFXVideoDECODEGetVideoParamFn>(
             dlsym(handle_, "MFXVideoDECODE_GetVideoParam"));
         encodeInit_ = reinterpret_cast<MFXVideoENCODEInitFn>(dlsym(handle_, "MFXVideoENCODE_Init"));
@@ -172,6 +185,13 @@ public:
         if (!setHandle_) return MFX_ERR_UNSUPPORTED;
         return setHandle_(session, type, hdl);
     }
+    // Registers an external mfxFrameAllocator on the session. Returns
+    // MFX_ERR_UNSUPPORTED if the dispatcher lacks the symbol. Used by the
+    // VP8/VP9 decode VA-surface path (see qsv_va_allocator).
+    mfxStatus setFrameAllocator(mfxSession session, mfxFrameAllocator* alloc) const {
+        if (!setFrameAllocator_) return MFX_ERR_UNSUPPORTED;
+        return setFrameAllocator_(session, alloc);
+    }
     mfxStatus decodeGetVideoParam(mfxSession session, mfxVideoParam* par) const {
         return decodeGetVideoParam_(session, par);
     }
@@ -218,6 +238,7 @@ private:
     using MFXVideoCORESyncOperationFn = mfxStatus(MFX_CDECL*)(mfxSession, mfxSyncPoint, mfxU32);
     using MFXVideoCOREGetHandleFn = mfxStatus(MFX_CDECL*)(mfxSession, mfxU32, mfxHDL*);
     using MFXVideoCORESetHandleFn = mfxStatus(MFX_CDECL*)(mfxSession, mfxU32, mfxHDL);
+    using MFXVideoCORESetFrameAllocatorFn = mfxStatus(MFX_CDECL*)(mfxSession, mfxFrameAllocator*);
     using MFXVideoDECODEGetVideoParamFn = mfxStatus(MFX_CDECL*)(mfxSession, mfxVideoParam*);
     using MFXVideoENCODEInitFn = mfxStatus(MFX_CDECL*)(mfxSession, mfxVideoParam*);
     using MFXVideoENCODEQueryFn = mfxStatus(MFX_CDECL*)(mfxSession,
@@ -245,6 +266,7 @@ private:
     MFXVideoCORESyncOperationFn syncOperation_ = nullptr;
     MFXVideoCOREGetHandleFn getHandle_ = nullptr;
     MFXVideoCORESetHandleFn setHandle_ = nullptr;
+    MFXVideoCORESetFrameAllocatorFn setFrameAllocator_ = nullptr;
     MFXVideoDECODEGetVideoParamFn decodeGetVideoParam_ = nullptr;
     MFXVideoENCODEInitFn encodeInit_ = nullptr;
     MFXVideoENCODEQueryFn encodeQuery_ = nullptr;

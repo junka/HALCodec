@@ -11,6 +11,9 @@
 #include <thread>
 
 #include "qsv_common.h"
+#if defined(__linux__) && defined(QSV_HAS_VA)
+#include "qsv_va_allocator.h"
+#endif
 #include "metrics.h"
 #include "registry.h"
 
@@ -159,6 +162,30 @@ public:
     // ImportFrameSurface returns -4 on a VAAPI display mismatch).
     void* vaDisplay = nullptr;
 
+    // Per-packet feed for VP8/VP9: the worker consumes exactly one IVF packet
+    // per DecodeFrameAsync call (libmfx-gen's VP8/VP9 decoders reject bulk-fed
+    // multi-packet bitstreams). cvDrained gates FillInput so the worker sees
+    // one packet per iteration. Declared unconditionally (no platform guard)
+    // because the worker logic references it; only the VA allocator that makes
+    // VP8/VP9 actually decode is Linux+libva-gated.
+    bool perPacketFeed = false;
+    std::condition_variable cvDrained;
+    mfxU64 packetSeq = 0;
+    mfxU64 curPacketTs = 0;
+    bool newPacketArrived = true;
+
+#if defined(__linux__) && defined(QSV_HAS_VA)
+    // VP8/VP9 decode VA-surface allocator (Linux+libva only). libmfx-gen's
+    // VP8/VP9 P-frame reference handling rejects the new-API
+    // GetSurfaceForDecode internal pool with -14/-16; it requires real VA
+    // surfaces exposed via a registered mfxFrameAllocator (ffmpeg's
+    // AVHWFramesContext recipe). Nullptr/!ready() on non-Linux, libva-less
+    // builds, or init failure → the worker falls back to GetSurfaceForDecode
+    // (VP8/VP9 stay blocked, no crash; other codecs never use this).
+    std::unique_ptr<VaApiAllocator> vaAlloc;
+    bool vaAllocReady = false;
+#endif
+
     // Runtime observation counters (Layer 1). Registered into the process-wide
     // metrics registry at Initialize so snapshotStreams() can copy it out;
     // unregistered in ~Impl. The worker mutates counters under mu. The decoder
@@ -200,6 +227,17 @@ public:
 
     // Appends caller data into bs_, growing if needed. Caller holds mu.
     void appendLocked(const uint8_t* data, size_t size) {
+        // If the previous packet was fully consumed (DataLength==0) the
+        // decoder left DataOffset pointing past the consumed bytes. New data
+        // is written at bs.Data+DataLength (=+0), so a stale nonzero
+        // DataOffset would make compactLocked()'s memmove copy from the old
+        // offset and overwrite the freshly-appended bytes — feeding garbage
+        // (a stale keyframe tail) to the decoder on the next packet. Reset
+        // DataOffset to 0 whenever the buffer is empty; there's no
+        // unconsumed tail to preserve in that case.
+        if (bs.DataLength == 0) {
+            bs.DataOffset = 0;
+        }
         size_t need = bs.DataLength + size;
         if (need > bs.MaxLength) {
             // Grow the buffer to fit, preserving existing data.
@@ -214,6 +252,9 @@ public:
         }
         std::memcpy(bs.Data + bs.DataLength, data, size);
         bs.DataLength += static_cast<mfxU32>(size);
+        // Mark a fresh packet for the per-packet-feed worker so it advances
+        // the TimeStamp (a re-feed of the same packet must not).
+        newPacketArrived = true;
         // Layer-1 input counter: compressed bytes fed into the decoder.
         stats_.bytesIn += size;
     }
@@ -283,6 +324,55 @@ public:
                             vaDisplay = vhdl;
                         }
                     }
+#if defined(__linux__) && defined(QSV_HAS_VA)
+                    // VP8/VP9: switch to the VA-surface path. libmfx-gen's
+                    // VP8/VP9 P-frame reference handling rejects the
+                    // GetSurfaceForDecode internal pool (-14/-16); it needs
+                    // real VA surfaces via a registered mfxFrameAllocator
+                    // (ffmpeg's AVHWFramesContext recipe). Re-Init with
+                    // VIDEO_MEMORY + the VA allocator registered, so
+                    // libmfx-gen takes the legacy surface path
+                    // (IsExternalFrameAllocator()=true → m_redirect_to_vpl_path=false).
+                    if (perPacketFeed) {
+                        mfxHDL vhdl = nullptr;
+                        if (runtime.getHandle(session,
+                                MFX_HANDLE_VA_DISPLAY, &vhdl) == MFX_ERR_NONE
+                                && vhdl) {
+                            vaAlloc = std::make_unique<VaApiAllocator>();
+                            if (vaAlloc->init()) {
+                                mfxU16 aw = par.mfx.FrameInfo.Width;
+                                mfxU16 ah = par.mfx.FrameInfo.Height;
+                                if (vaAlloc->createPool(
+                                        reinterpret_cast<VADisplay>(vhdl),
+                                        aw, ah, 16, par.mfx.FrameInfo)
+                                    && runtime.setFrameAllocator(
+                                        session, vaAlloc->allocator())
+                                        == MFX_ERR_NONE) {
+                                    // Re-Init with VIDEO_MEMORY so decoded
+                                    // frames land in VA surfaces the allocator
+                                    // owns (not system memory).
+                                    runtime.decodeTerminate(session);
+                                    par.IOPattern = MFX_IOPATTERN_OUT_VIDEO_MEMORY;
+                                    sts = runtime.decodeInit(session, &par);
+                                    if (sts == MFX_ERR_NONE) {
+                                        vaAllocReady = true;
+                                        std::cerr << "QSVDecoder: VP8/VP9 VA-surface "
+                                                     "pool ready (" << aw << "x"
+                                                  << ah << ", 16 surfaces)\n";
+                                    } else {
+                                        std::cerr << "QSVDecoder: VA re-Init "
+                                                     "failed: " << sts << "\n";
+                                    }
+                                }
+                            }
+                        }
+                        if (!vaAllocReady) {
+                            std::cerr << "QSVDecoder: VA allocator unavailable — "
+                                         "VP8/VP9 P-frames will not decode\n";
+                            vaAlloc.reset();
+                        }
+                    }
+#endif
                     cvFrames.notify_all();
                 }
             }
@@ -341,6 +431,22 @@ public:
                 bs.DataFlag |= MFX_BITSTREAM_EOS;
                 eosSignaled = true;
             }
+#if defined(__linux__) && defined(QSV_HAS_VA)
+            // VP8/VP9 (perPacketFeed): present the bitstream as exactly one
+            // complete frame, the way ffmpeg's qsv_decode does (a fresh
+            // mfxBitstream per avpkt: DataLength=MaxLength=size, COMPLETE_FRAME).
+            // With the shared 4 MiB buffer libmfx-gen's VP8/VP9 decoders read
+            // past the packet boundary and reject even the keyframe.
+            if (perPacketFeed && bs.DataLength > 0) {
+                bs.MaxLength = bs.DataLength;
+                bs.DataFlag |= MFX_BITSTREAM_COMPLETE_FRAME;
+                if (newPacketArrived) {
+                    curPacketTs = packetSeq++;
+                    newPacketArrived = false;
+                }
+                bs.TimeStamp = curPacketTs;
+            }
+#endif
 
             mfxFrameSurface1* surfOut = nullptr;
             mfxSyncPoint syncp{};
@@ -355,9 +461,27 @@ public:
             // an explicit free surface per call gives it a buffer to write
             // every drain frame into.
             mfxFrameSurface1* workSurf = nullptr;
+#if defined(__linux__) && defined(QSV_HAS_VA)
+            // VP8/VP9 VA path: hand the decoder a VA-surface from our
+            // registered allocator's pool (real VA surface via Data.MemId,
+            // no FrameInterface — libmfx-gen takes the legacy path because
+            // the allocator is registered). GetSurfaceForDecode would give
+            // an internal-pool surface that libmfx-gen's VP8/VP9 P-frame
+            // reference handling rejects (-14/-16).
+            mfxFrameSurface1* vaWork = nullptr;
+            if (vaAllocReady) {
+                vaWork = vaAlloc->acquireSurface();
+            }
+            mfxFrameSurface1* surfArg = vaWork;
+            if (!surfArg) {
+                mfxStatus gs = runtime.getSurfaceForDecode(session, &workSurf);
+                surfArg = (gs == MFX_ERR_NONE && workSurf) ? workSurf : nullptr;
+            }
+#else
             mfxStatus gs = runtime.getSurfaceForDecode(session, &workSurf);
             mfxFrameSurface1* surfArg = (gs == MFX_ERR_NONE && workSurf)
                 ? workSurf : nullptr;
+#endif
             mfxStatus sts = runtime.decodeFrameAsync(session, bsPtr, surfArg,
                                                     &surfOut, &syncp);
             // If GetSurface gave us a surface but DecodeFrameAsync did not take
@@ -368,6 +492,22 @@ public:
                     workSurf->FrameInterface->Release(workSurf);
                 }
             }
+#if defined(__linux__) && defined(QSV_HAS_VA)
+            // VA path: if the decoder did NOT take the work surface (no output
+            // surface returned, or an error/non-NONE status), return it to the
+            // pool so the next iteration can reuse it. VP9's per-packet flow
+            // calls DecodeFrameAsync twice per frame: first returns
+            // MFX_ERR_MORE_SURFACE (surfOut=null, work surface unused — must be
+            // recycled), then returns MFX_ERR_NONE (surfOut==work, drained and
+            // recycled in drainPendingLockedKeepAlive). Without recycling on the
+            // MORE_SURFACE call every frame would leak one surface and exhaust
+            // the 16-surface pool within ~16 frames. VA surfaces have no
+            // FrameInterface, so we recycle via the allocator (not Release).
+            if (vaWork && (sts != MFX_ERR_NONE || surfOut != vaWork)) {
+                vaAlloc->releaseSurface(vaWork);
+            }
+            (void)workSurf;  // unused on the VA path (no GetSurfaceForDecode)
+#endif
             switch (sts) {
                 case MFX_ERR_NONE:
                     // Track the surface for batched synchronization. lk is held
@@ -375,10 +515,23 @@ public:
                     pending.push_back({surfOut, syncp});
                     stats_.framesIn++;  // one frame submitted to hardware
                     stats_.pendingAsync = static_cast<int>(pending.size());
+#if defined(__linux__) && defined(QSV_HAS_VA)
+                    // VP8/VP9 per-packet path: sync+copy this frame to host
+                    // immediately before pulling the next packet (the VA
+                    // surface is then free to be reused as a reference for
+                    // the next P-frame — but we keep N alive; see
+                    // drainPendingLockedKeepAlive).
+                    if (perPacketFeed) {
+                        drainPendingLockedKeepAlive();
+                    } else if (pending.size() >= 4) {
+                        drainPendingLocked();
+                    }
+#else
                     // Synchronize a batch when several are in flight.
                     if (pending.size() >= 4) {
                         drainPendingLocked();
                     }
+#endif
                     break;
                 case MFX_ERR_MORE_DATA:
                     if (!eof) {
@@ -489,6 +642,22 @@ public:
                     cvFrames.notify_all();
                     goto out;
             }
+#if defined(__linux__) && defined(QSV_HAS_VA)
+            // VP8/VP9 per-packet feed: unblock FillInput once the worker has
+            // consumed the current packet (bs.DataLength dropped to 0 — the
+            // decoder ate the bytes). If the packet was NOT consumed (MORE_DATA
+            // with bytes remaining, MORE_SURFACE, DEVICE_BUSY), keep FillInput
+            // blocked so the same packet is re-fed next iteration. On a fatal
+            // error, notify so FillInput does not deadlock on a dead packet.
+            if (perPacketFeed) {
+                if (bs.DataLength == 0
+                        || (sts != MFX_ERR_NONE && sts != MFX_ERR_MORE_DATA
+                            && sts != MFX_ERR_MORE_SURFACE
+                            && sts != MFX_WRN_DEVICE_BUSY)) {
+                    cvDrained.notify_one();
+                }
+            }
+#endif
         }
     out:
         {
@@ -560,6 +729,60 @@ public:
         stats_.pendingAsync = 0;
         cvFrames.notify_all();
     }
+
+#if defined(__linux__) && defined(QSV_HAS_VA)
+    // Per-packet-feed variant for the VP8/VP9 VA path. VA surfaces have no
+    // mfxFrameSurfaceInterface (they are MemId-only, tracked via the
+    // registered allocator's GetHDL), so drainPendingLocked's fi->Synchronize/
+    // Map path does not apply. Instead: sync via vaAlloc->copySurfaceToHost
+    // (vaSyncSurface + vaDeriveImage + vaMapBuffer), push the host frame, and
+    // KEEP the VA surface alive (do not return it to the pool) so libmfx-gen's
+    // P-frame reference stays resident. Surfaces are reclaimed when the pool
+    // is destroyed at teardown. Caller holds mu.
+    void drainPendingLockedKeepAlive() {
+        for (auto& p : pending) {
+            if (!p.surf) continue;
+            // The surface's Data.MemId is our mfxHDLPair*; .first is the
+            // VASurfaceID*. Recover the id to sync+copy via libva.
+            mfxHDLPair* pair = static_cast<mfxHDLPair*>(
+                p.surf->Data.MemId);
+            if (!pair || !pair->first) continue;
+            VASurfaceID sid = *static_cast<VASurfaceID*>(pair->first);
+            int w = p.surf->Info.CropW;
+            int h = p.surf->Info.CropH;
+            int stride = 0;
+            uint8_t* px = vaAlloc->copySurfaceToHost(sid, w, h, &stride);
+            if (!px) continue;
+            CodecFrame frame;
+            frame.width = w;
+            frame.height = h;
+            frame.format = PixelFormat::NV12;
+            frame.size = static_cast<size_t>(w) * h * 3 / 2;
+            frame.strides[0] = static_cast<size_t>(w);
+            frame.data = px;
+            auto owned = std::shared_ptr<uint8_t>(
+                static_cast<uint8_t*>(frame.data), std::free);
+            frame.release = [owned]() { /* freed when `owned` drops last ref */ };
+            stats_.framesOut++;
+            stats_.localityHost++;
+            stats_.bytesOut += frame.size;
+            frames.push(std::move(frame));
+            // Recycle the VA surface back to the pool. The decoder tracks the
+            // reference-frame lifetime internally (it IncreaseReference's the
+            // VASurfaceID on submit and DecreaseReference's when a frame drops
+            // out of the reference window — both go through the allocator's
+            // GetHDL, not our inUse flag). Our inUse bookkeeping only guards
+            // against handing the same slot to two concurrent DecodeFrameAsync
+            // calls, so once this frame is copied to host the slot is free to
+            // reuse. This keeps the 16-surface pool from exhausting on streams
+            // longer than the pool (VP9 25-frame, VP8 101-frame).
+            vaAlloc->releaseSurface(p.surf);
+        }
+        pending.clear();
+        stats_.pendingAsync = 0;
+        cvFrames.notify_all();
+    }
+#endif
 
     // Zero-copy drain: AddRef the decoded surface (keep it alive past the
     // runtime's internal reuse), Export it to an opaque refcounted
@@ -643,6 +866,13 @@ public:
         if (inited && session) {
             runtime.decodeTerminate(session);
         }
+#if defined(__linux__) && defined(QSV_HAS_VA)
+        // Destroy the VA surface pool after the session is terminated (the
+        // surfaces were backed by the session's VADisplay; safe to release
+        // once the decoder no longer references them). unique_ptr dtor calls
+        // VaApiAllocator::destroy (vaDestroySurfaces + dlclose).
+        vaAlloc.reset();
+#endif
         if (session) {
             runtime.close(session);
         }
@@ -677,6 +907,12 @@ bool QSVDecoder::Initialize(const CodecParams& params) {
         impl_ = nullptr;
         return false;
     }
+    // VP8/VP9 decode uses per-packet feed (one IVF packet per
+    // DecodeFrameAsync) — libmfx-gen's VP8/VP9 decoders reject bulk-fed
+    // multi-packet bitstreams. The VA-surface pool that unblocks P-frame
+    // decode is built later in the worker after decodeInit (Linux+libva).
+    impl_->perPacketFeed = (impl_->codecId == MFX_CODEC_VP9
+                            || impl_->codecId == MFX_CODEC_VP8);
     impl_->bs.MaxLength = kBitstreamBytes;
     impl_->bs.Data = static_cast<mfxU8*>(std::calloc(impl_->bs.MaxLength, 1));
     if (!impl_->bs.Data) {
@@ -728,7 +964,21 @@ int QSVDecoder::FillInput(const uint8_t* data, size_t size) {
         return 0;
     }
     {
-        std::lock_guard<std::mutex> lk(impl_->mu);
+        std::unique_lock<std::mutex> lk(impl_->mu);
+        // Per-packet feed (VP8/VP9): if the worker still has an unconsumed
+        // packet in bs, wait for it to drain before appending the next, so the
+        // worker sees exactly one packet per DecodeFrameAsync call. The worker
+        // signals cvDrained once the packet is consumed (bs.DataLength==0) or
+        // a fatal error is set.
+        if (impl_->perPacketFeed) {
+            impl_->cvDrained.wait(lk, [this] {
+                return impl_->bs.DataLength == 0 || impl_->workerError
+                       || impl_->finished;
+            });
+            if (impl_->workerError || impl_->finished) {
+                return 0;
+            }
+        }
         impl_->appendLocked(data, size);
     }
     impl_->cvInput.notify_one();
