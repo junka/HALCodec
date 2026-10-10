@@ -132,6 +132,37 @@ and the `qsvdec`/`qsvenc` data paths become exercisable. The build also needs
 the Intel Media Driver (iHD VA-API) and gmmlib at runtime; on Ubuntu these
 ship as `intel-media-va-driver` and `libigdgmm12`.
 
+### QSV codec status
+
+Measured on an Arrow Lake-P iGPU (Intel Core Ultra 7 255H, iHD driver,
+`libmfx-gen` 24.4.4), `hal_dec`/`hal_enc -b qsvdec`/`qsvenc`, ffmpeg-generated
+streams unless noted:
+
+| codec  | decode      | encode      |
+|--------|-------------|-------------|
+| h264   | 30/30 ✅     | 30/30 ✅     |
+| hevc   | 15/15 ✅     | 15/15 ✅     |
+| av1    | 13/13 ✅     | 13/13 ✅     |
+| jpeg   | 1/1 ✅       | 30/30 ✅     |
+| vp8    | 13/13 ✅     | —           |
+| vp9    | 25/25 ✅     | not impl.   |
+| vc1    | wired ✅     | —           |
+| mpeg2  | 14/15 (hw)   | not impl.   |
+
+Decode round-trips (`hal_enc`→`hal_dec`, same codec) are full-count and the
+zero-copy transcode path (`hal_transcode -z qsvdec:qsvenc`) passes 30/30 with
+0 host frames. VP8/VP9 decode output is byte-identical to ffmpeg's
+`vp8_qsv`/`vp9_qsv`.
+
+VP8/VP9 decode through `libmfx-gen` (not the legacy `libmfxhw64` path) needs an
+external frame allocator so libmfx-gen selects its legacy UMC surface path
+instead of the VPL FrameInterface path. `halcodec` registers one by `dlopen`ing
+`libva.so.2` at runtime — there is **no link dependency on libva**; the headers
+are pulled in only when CMake finds `va/va.h` (`QSV_HAS_VA`), and the whole
+allocator is compiled out on non-Linux or libva-less builds. VP9 4:4:4
+(Profile 1) is not supported by the current NV12 (YUV 4:2:0) VA surface pool;
+it would need a YUV 4:4:4 pool and matching FourCC.
+
 ## Command-line tools (`app/`)
 
 All three tools exercise only the unified interface plus the backend registry,
