@@ -57,6 +57,10 @@ private:
 
     NvMediaIEP* encoder_ = nullptr;
     NvMediaIEPType iepType_ = NVMEDIA_IMAGE_ENCODE_H264;
+    // The unified codec name ("h264"/"hevc"). Drives the per-codec init params
+    // struct, the SetConfiguration config struct, and the per-frame pic params
+    // struct — NvMediaIEP uses a distinct triple per codec.
+    std::string codec_ = "h264";
     NvMediaEncoderInstanceId instanceId_ = NVMEDIA_ENCODER_INSTANCE_0;
     NvSciBufModule bufModule_ = nullptr;
     NvSciSyncModule syncModule_ = nullptr;

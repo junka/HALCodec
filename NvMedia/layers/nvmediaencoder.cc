@@ -195,37 +195,24 @@ bool NvMediaEncoder::Initialize(const CodecParams& params) {
     width_ = (static_cast<uint32_t>(params.width) + 15U) & ~15U;
     height_ = (static_cast<uint32_t>(params.height) + 15U) & ~15U;
 
-    // Codec selection: only H.264 is wired up so far (hal_enc leaves
-    // params.codec empty, so this is the default path).
-    if (!params.codec.empty() && params.codec != "h264") {
-        std::cerr << "NvMediaEncoder: unsupported codec '" << params.codec
-                  << "' (only h264)" << std::endl;
+    // Codec selection: H.264 and HEVC are wired. The IEP runtime on this DRIVE
+    // build creates H.264 and HEVC encoders (AV1/VP9 fail at NvMediaIEPCreate
+    // despite the T234 SoC). hal_enc leaves params.codec empty, defaulting to
+    // h264; an explicit --codec hevc selects the HEVC path.
+    codec_ = params.codec.empty() ? "h264" : params.codec;
+    if (codec_ != "h264" && codec_ != "hevc") {
+        std::cerr << "NvMediaEncoder: unsupported codec '" << codec_
+                  << "' (h264 or hevc)" << std::endl;
         return false;
     }
-    iepType_ = NVMEDIA_IMAGE_ENCODE_H264;
+    iepType_ = (codec_ == "hevc") ? NVMEDIA_IMAGE_ENCODE_HEVC
+                                  : NVMEDIA_IMAGE_ENCODE_H264;
 
     NvMediaVersion version{};
     if (NvMediaIEPGetVersion(&version) != NVMEDIA_STATUS_OK) {
         std::cerr << "NvMediaEncoder: NvMediaIEPGetVersion failed" << std::endl;
         return false;
     }
-
-    // Init parameters mirror SetEncoderInitParamsH264() in image_encoder.c and
-    // the H264_HP_DEFAULT_PERF.cfg defaults: High profile, level 4.1, 4 ref
-    // frames. Rate control / GOP are configured separately via
-    // NvMediaIEPSetConfiguration in SetupSync() (FeedFrame requires it as a
-    // precondition).
-    NvMediaEncodeInitializeParamsH264 initParams;
-    std::memset(&initParams, 0, sizeof(initParams));
-    initParams.encodeHeight = height_;
-    initParams.encodeWidth = width_;
-    initParams.frameRateDen = frameRateDen_;
-    initParams.frameRateNum = frameRateNum_;
-    initParams.profile = NVMEDIA_ENCODE_PROFILE_HIGH;
-    initParams.level = NVMEDIA_ENCODE_LEVEL_H264_41;
-    initParams.maxNumRefFrames = 4;
-    initParams.useBFramesAsRef = false;
-    initParams.enableExtProfile = false;
 
     // Reconcile the input-surface attributes: IEP injects its internal
     // requirements, while we add the CPU-writable NV12 image description.
@@ -265,9 +252,43 @@ bool NvMediaEncoder::Initialize(const CodecParams& params) {
     // was observed to make FeedFrame return NVMEDIA_STATUS_ERROR (0x1) on this
     // DRIVE build even with an otherwise sample-matching config; the single
     // NvMediaIEPCreate call matches the verified-working sample binary.
-    encoder_ = NvMediaIEPCreate(
-        iepType_, &initParams, reconciled,
-        static_cast<uint8_t>(kMaxBuffering), instanceId_);
+    //
+    // Init parameters mirror SetEncoderInitParamsH264/H265 in image_encoder.c
+    // and the H264_HP_DEFAULT_PERF.cfg / H265_HP_DEFAULT_PERF.cfg defaults:
+    // H264 High profile L4.1, H265 Main profile L2.0 (60), 4 ref frames, no
+    // B-frames-as-ref. Rate control / GOP are configured separately via
+    // NvMediaIEPSetConfiguration in SetupSync() (FeedFrame requires it as a
+    // precondition).
+    if (codec_ == "hevc") {
+        NvMediaEncodeInitializeParamsH265 initParams;
+        std::memset(&initParams, 0, sizeof(initParams));
+        initParams.encodeWidth = width_;
+        initParams.encodeHeight = height_;
+        initParams.frameRateDen = frameRateDen_;
+        initParams.frameRateNum = frameRateNum_;
+        initParams.profile = NVMEDIA_ENCODE_H265_PROFILE_MAIN;
+        initParams.level = NVMEDIA_ENCODE_LEVEL_H265_2;  // 60, sample default
+        initParams.maxNumRefFrames = 4;
+        initParams.useBFramesAsRef = false;
+        encoder_ = NvMediaIEPCreate(
+            iepType_, &initParams, reconciled,
+            static_cast<uint8_t>(kMaxBuffering), instanceId_);
+    } else {
+        NvMediaEncodeInitializeParamsH264 initParams;
+        std::memset(&initParams, 0, sizeof(initParams));
+        initParams.encodeHeight = height_;
+        initParams.encodeWidth = width_;
+        initParams.frameRateDen = frameRateDen_;
+        initParams.frameRateNum = frameRateNum_;
+        initParams.profile = NVMEDIA_ENCODE_PROFILE_HIGH;
+        initParams.level = NVMEDIA_ENCODE_LEVEL_H264_41;
+        initParams.maxNumRefFrames = 4;
+        initParams.useBFramesAsRef = false;
+        initParams.enableExtProfile = false;
+        encoder_ = NvMediaIEPCreate(
+            iepType_, &initParams, reconciled,
+            static_cast<uint8_t>(kMaxBuffering), instanceId_);
+    }
     if (!encoder_) {
         std::cerr << "NvMediaEncoder: NvMediaIEPCreate failed" << std::endl;
         NvSciBufAttrListFree(reconciled);
@@ -469,28 +490,47 @@ bool NvMediaEncoder::SetupSync() {
     // suspected of making FeedFrame return NVMEDIA_STATUS_ERROR.
     rcParams_.params.cbr.vbvBufferSize = 0;
     rcParams_.params.cbr.vbvInitialDelay = 0;
-    NvMediaEncodeConfigH264 configH264;
-    std::memset(&configH264, 0, sizeof(configH264));
-    // Match the image_encoder H264_HP_DEFAULT_PERF.cfg: gopLength=0 and
-    // idrPeriod=0 (driver-selected defaults -- 0 is not INFINITE_GOPLENGTH,
-    // which is 0xFFFFFFFF). repeatSPSPPS=0 in the sample (SPS/PPS not
-    // repeated); encPreset=HP (0x10).
-    configH264.gopLength = 0;
-    configH264.idrPeriod = 0;
-    configH264.repeatSPSPPS = NVMEDIA_ENCODE_SPSPPS_REPEAT_DISABLED;
-    configH264.entropyCodingMode = NVMEDIA_ENCODE_H264_ENTROPY_CODING_MODE_CABAC;
-    configH264.encPreset = NVMEDIA_ENC_PRESET_HP;  // sample default (0x10)
-    configH264.rcParams = rcParams_;
-    // The image_encoder sample always attaches a (zeroed) VUI params struct
-    // pointer; mirror that to keep the config byte-identical to the working
-    // sample (configH264.h264VUIParameters is otherwise NULL here).
-    NvMediaEncodeConfigH264VUIParams vuiParams;
-    std::memset(&vuiParams, 0, sizeof(vuiParams));
-    configH264.h264VUIParameters = &vuiParams;
-    if (NvMediaIEPSetConfiguration(encoder_, &configH264) != NVMEDIA_STATUS_OK) {
-        std::cerr << "NvMediaEncoder: NvMediaIEPSetConfiguration failed"
-                  << std::endl;
-        return false;
+    // Configure per-codec. Both mirror their image_encoder *_HP_DEFAULT_PERF.cfg:
+    // gopLength=0 and idrPeriod=0 (driver-selected defaults — 0 is not
+    // INFINITE_GOPLENGTH, which is 0xFFFFFFFF), repeatSPSPPS=0 (SPS/PPS not
+    // repeated), encPreset=HP (0x10). H264 sets CABAC entropy; H265 has no
+    // such field. The sample always attaches a (zeroed) VUI params pointer,
+    // mirrored here to keep the config byte-identical to the working sample.
+    if (codec_ == "hevc") {
+        NvMediaEncodeConfigH265 configH265;
+        std::memset(&configH265, 0, sizeof(configH265));
+        configH265.gopLength = 0;
+        configH265.idrPeriod = 0;
+        configH265.repeatSPSPPS = NVMEDIA_ENCODE_SPSPPS_REPEAT_DISABLED;
+        configH265.encPreset = NVMEDIA_ENC_PRESET_HP;
+        configH265.rcParams = rcParams_;
+        NvMediaEncodeConfigH265VUIParams vuiParams;
+        std::memset(&vuiParams, 0, sizeof(vuiParams));
+        configH265.h265VUIParameters = &vuiParams;
+        if (NvMediaIEPSetConfiguration(encoder_, &configH265) !=
+            NVMEDIA_STATUS_OK) {
+            std::cerr << "NvMediaEncoder: NvMediaIEPSetConfiguration failed"
+                      << std::endl;
+            return false;
+        }
+    } else {
+        NvMediaEncodeConfigH264 configH264;
+        std::memset(&configH264, 0, sizeof(configH264));
+        configH264.gopLength = 0;
+        configH264.idrPeriod = 0;
+        configH264.repeatSPSPPS = NVMEDIA_ENCODE_SPSPPS_REPEAT_DISABLED;
+        configH264.entropyCodingMode = NVMEDIA_ENCODE_H264_ENTROPY_CODING_MODE_CABAC;
+        configH264.encPreset = NVMEDIA_ENC_PRESET_HP;  // sample default (0x10)
+        configH264.rcParams = rcParams_;
+        NvMediaEncodeConfigH264VUIParams vuiParams;
+        std::memset(&vuiParams, 0, sizeof(vuiParams));
+        configH264.h264VUIParameters = &vuiParams;
+        if (NvMediaIEPSetConfiguration(encoder_, &configH264) !=
+            NVMEDIA_STATUS_OK) {
+            std::cerr << "NvMediaEncoder: NvMediaIEPSetConfiguration failed"
+                      << std::endl;
+            return false;
+        }
     }
     return true;
 }
@@ -642,27 +682,45 @@ bool NvMediaEncoder::FillFrame(const CodecFrame& in) {
         return false;
     }
 
-    NvMediaEncodePicParamsH264 picParams;
-    std::memset(&picParams, 0, sizeof(picParams));
-    // Mirror SetEncodePicParamsH264: AUTOSELECT picture type, encodePicFlags
+    // Per-frame pic params. Both H264 and H265 pic-params share the same
+    // relevant layout (pictureType / encodePicFlags / rcParams), so the setup
+    // is identical across codecs — only the struct type differs. Mirror
+    // SetEncodePicParamsH264/H265: AUTOSELECT picture type, encodePicFlags
     // clear, and rcParams left ZERO. The sample's picParams.rcParams is in fact
     // all-zero at FeedFrame time (SetEncodeConfigRCParam dedups on rcSectionIndex
     // and skips re-population after the first call), and populating it here with
     // the CBR params made FeedFrame return NVMEDIA_STATUS_ERROR (0x1) on this
     // DRIVE build. Rate control is established by NvMediaIEPSetConfiguration,
     // not by the per-frame picParams.
-    picParams.pictureType = NVMEDIA_ENCODE_PIC_TYPE_AUTOSELECT;
-
-    NvMediaStatus status =
-        NvMediaIEPFeedFrame(encoder_, surface.buf, &picParams, instanceId_);
+    NvMediaStatus status;
+    if (codec_ == "hevc") {
+        NvMediaEncodePicParamsH265 picParams;
+        std::memset(&picParams, 0, sizeof(picParams));
+        picParams.pictureType = NVMEDIA_ENCODE_PIC_TYPE_AUTOSELECT;
+        status = NvMediaIEPFeedFrame(encoder_, surface.buf, &picParams, instanceId_);
+    } else {
+        NvMediaEncodePicParamsH264 picParams;
+        std::memset(&picParams, 0, sizeof(picParams));
+        picParams.pictureType = NVMEDIA_ENCODE_PIC_TYPE_AUTOSELECT;
+        status = NvMediaIEPFeedFrame(encoder_, surface.buf, &picParams, instanceId_);
+    }
     NvSciSyncFenceClear(&preFence);
     if (status == NVMEDIA_STATUS_INSUFFICIENT_BUFFERING) {
         // The encoder's output queue is full; drain it and retry submission.
         if (!Drain()) {
             return false;
         }
-        status =
-            NvMediaIEPFeedFrame(encoder_, surface.buf, &picParams, instanceId_);
+        if (codec_ == "hevc") {
+            NvMediaEncodePicParamsH265 picParams;
+            std::memset(&picParams, 0, sizeof(picParams));
+            picParams.pictureType = NVMEDIA_ENCODE_PIC_TYPE_AUTOSELECT;
+            status = NvMediaIEPFeedFrame(encoder_, surface.buf, &picParams, instanceId_);
+        } else {
+            NvMediaEncodePicParamsH264 picParams;
+            std::memset(&picParams, 0, sizeof(picParams));
+            picParams.pictureType = NVMEDIA_ENCODE_PIC_TYPE_AUTOSELECT;
+            status = NvMediaIEPFeedFrame(encoder_, surface.buf, &picParams, instanceId_);
+        }
     }
     if (status != NVMEDIA_STATUS_OK) {
         std::cerr << "NvMediaEncoder: NvMediaIEPFeedFrame failed: 0x"
@@ -741,17 +799,35 @@ bool NvMediaEncoder::FeedDeviceFrame(const CodecFrame& in) {
         surface.pending = false;
     }
 
-    NvMediaEncodePicParamsH264 picParams;
-    std::memset(&picParams, 0, sizeof(picParams));
-    picParams.pictureType = NVMEDIA_ENCODE_PIC_TYPE_AUTOSELECT;
-
-    NvMediaStatus status =
-        NvMediaIEPFeedFrame(encoder_, buf, &picParams, instanceId_);
-    if (status == NVMEDIA_STATUS_INSUFFICIENT_BUFFERING) {
-        if (!Drain()) {
-            return false;
-        }
+    NvMediaStatus status;
+    if (codec_ == "hevc") {
+        NvMediaEncodePicParamsH265 picParams;
+        std::memset(&picParams, 0, sizeof(picParams));
+        picParams.pictureType = NVMEDIA_ENCODE_PIC_TYPE_AUTOSELECT;
         status = NvMediaIEPFeedFrame(encoder_, buf, &picParams, instanceId_);
+        if (status == NVMEDIA_STATUS_INSUFFICIENT_BUFFERING) {
+            if (!Drain()) {
+                return false;
+            }
+            NvMediaEncodePicParamsH265 retry;
+            std::memset(&retry, 0, sizeof(retry));
+            retry.pictureType = NVMEDIA_ENCODE_PIC_TYPE_AUTOSELECT;
+            status = NvMediaIEPFeedFrame(encoder_, buf, &retry, instanceId_);
+        }
+    } else {
+        NvMediaEncodePicParamsH264 picParams;
+        std::memset(&picParams, 0, sizeof(picParams));
+        picParams.pictureType = NVMEDIA_ENCODE_PIC_TYPE_AUTOSELECT;
+        status = NvMediaIEPFeedFrame(encoder_, buf, &picParams, instanceId_);
+        if (status == NVMEDIA_STATUS_INSUFFICIENT_BUFFERING) {
+            if (!Drain()) {
+                return false;
+            }
+            NvMediaEncodePicParamsH264 retry;
+            std::memset(&retry, 0, sizeof(retry));
+            retry.pictureType = NVMEDIA_ENCODE_PIC_TYPE_AUTOSELECT;
+            status = NvMediaIEPFeedFrame(encoder_, buf, &retry, instanceId_);
+        }
     }
     if (status != NVMEDIA_STATUS_OK) {
         return false;
