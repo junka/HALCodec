@@ -82,7 +82,7 @@ tools/update_sdks.sh amf qsv         # update only the listed SDKs
 tools/update_sdks.sh -v 2.16.0 qsv   # pin a specific release tag (default: latest)
 tools/update_sdks.sh --check         # compare local vs upstream, download nothing
 tools/update_sdks.sh --force amf     # re-download even if already present
-tools/update_sdks.sh --prune amf     # also drop .gitignore'd big dirs (AMF Thirdparty)
+tools/update_sdks.sh --prune amf     # install AMF without the ~1.2 GB Thirdparty/ + .github/
 tools/update_sdks.sh --prune-old     # remove older version dirs of that SDK
 tools/update_sdks.sh --import video_codec_sdk_13.x.x.zip nvdec  # offline import
 ```
@@ -101,7 +101,11 @@ Notes:
   `-v <ver>` / `--import` for NVIDIA. Old directories can be swept with
   `--prune-old`.
 - `--prune` additionally removes the large dirs that `.gitignore` also
-  excludes (`AMF/AMF-*/Thirdparty`, CI metadata under `.github/`).
+  excludes (`AMF/AMF-*/Thirdparty`, CI metadata under `.github/`). The AMF
+  tarball's `Thirdparty/` alone is ~1.2 GB of prebuilt binaries for AMF's own
+  samples — nothing in this project reads it (the build only needs the headers
+  under `AMF/AMF-*/amf/public/include`), so fetch or update AMF with `--prune`,
+  or delete the directory afterwards to reclaim the disk.
 
 ### Building the QSV runtime
 
