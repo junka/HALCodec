@@ -24,23 +24,27 @@ public:
 
     void showDecoderCapability() const override {
         // The IDE header (nvmedia_ide.h) lists H264/HEVC/VC1/MPEG1/MPEG2/MPEG4/
-        // MJPEG/VP8/VP9/AV1, but the shipped libnvmedia_ide_parser runtime
-        // rejects every codec except H.264 and HEVC at NvMediaParserCreate
-        // ("Codec Not supported"). That rejection is a board/lib limit, not a
-        // framework one: NVIDIA's own nvm_ide_sci sample fails identically.
-        // Report what the runtime actually honors so codecinfo isn't misleading.
+        // MJPEG/VP8/VP9/AV1, but the nv118 system libnvmedia_ide_parser runtime
+        // (a reduced /usr/lib build) rejects every codec except H.264 and HEVC
+        // at NvMediaParserCreate ("Codec Not supported"). That rejection is a
+        // lib-version limit, not a hardware one: the same DRIVE-OS 7.0.3.0 SDK
+        // lib-target (full build) accepts all 11 codecs when loaded instead.
+        // Report what the deployed runtime lib actually honors so codecinfo
+        // isn't misleading.
         std::cout << "  NvMediaIDE hardware decode: H.264, HEVC (verified); "
                      "MPEG-1/2/4, VC-1, VP8, VP9, MJPEG, AV1 are in the header "
-                     "but rejected by the parser runtime on this DRIVE build"
+                     "but rejected by the deployed parser runtime on this "
+                     "DRIVE build (a full-build SDK lib unlocks them)"
                   << std::endl;
     }
 
     void showEncoderCapability() const override {
-        // NvMediaIEP creates H.264 and HEVC encoders on this board. AV1 and VP9
-        // have headers + sample configs but NvMediaIEPCreate fails at runtime
-        // (despite the T234-class SoC), so they are not advertised as working.
+        // NvMediaIEP creates H.264 and HEVC encoders on this board's deployed
+        // lib. AV1 has a header + sample config and is accepted by the full
+        // SDK lib build (not the reduced system one); VP9 encode fails in both.
         std::cout << "  NvMediaIEP hardware encode: H.264, HEVC (verified); "
-                     "AV1/VP9 in header but NvMediaIEPCreate fails on this build"
+                     "AV1 accepted only by the full-build SDK lib (not wired); "
+                     "VP9 fails at NvMediaIEPCreate on this build"
                   << std::endl;
     }
 };
