@@ -43,6 +43,7 @@ cudaVideoCodec codecFromName(const std::string& name) {
     if (name == "mpeg1") return cudaVideoCodec_MPEG1;
     if (name == "mpeg2") return cudaVideoCodec_MPEG2;
     if (name == "mpeg4") return cudaVideoCodec_MPEG4;
+    if (name == "vc1" || name == "wmv3") return cudaVideoCodec_VC1;
     if (name == "vp8")   return cudaVideoCodec_VP8;
     if (name == "vp9")   return cudaVideoCodec_VP9;
     return cudaVideoCodec_NumCodecs;

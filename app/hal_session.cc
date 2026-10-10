@@ -201,6 +201,7 @@ int main(int argc, char* argv[]) {
             || ext == "mjpg" || ext == "avi") return "mjpeg";
         if (ext == "mpg2" || ext == "m2v") return "mpeg2";
         if (ext == "mp4")  return "mpeg4";
+        if (ext == "vc1" || ext == "wmv" || ext == "wmv3") return "vc1";
         if (ext == "vp8")  return "vp8";
         if (ext == "vp9")  return "vp9";
         return "h264"; // default
