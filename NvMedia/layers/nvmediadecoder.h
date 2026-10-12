@@ -11,6 +11,7 @@
 #include "frame.h"
 
 #include "nvmedia_ide.h"
+#include "nvmedia_ijpd.h"
 #include "nvmedia_parser.h"
 #include "nvscibuf.h"
 #include "nvscisync.h"
@@ -79,6 +80,17 @@ private:
     // fully exhausted (EOF read + NvMediaParserFlush). Returns frames queued.
     int PumpNext();
 
+    // --- JPEG (IJPD) path ---
+    // JPEG is image-level: there is no NvMediaParser for it, and the IDE video
+    // decoder rejects MJPEG at NvMediaIDECreate. Decode goes through the
+    // dedicated IJPD image-JPEG engine: each JPEG (delimited by SOI FF D8 ...
+    // EOI FF D9) becomes one decoded NV12 frame. SetupJpegDecoder opens the
+    // NvSci modules + EOF sync object; DecodeJpeg renders one JPEG bitstream
+    // into a pooled PitchLinear YUV420 surface, reads it back via GetPixels,
+    // and enqueues a CodecFrame.
+    bool SetupJpegDecoder();
+    bool DecodeJpeg(const uint8_t* data, size_t size);
+
     // Feed one fread buffer to the parser. Annex-B streams (h264/hevc/mpeg2)
     // go in as a single raw chunk; IVF-wrapped VP9/AV1 are demuxed here and
     // each frame is fed as a complete-picture packet. Returns false on parse
@@ -106,6 +118,13 @@ private:
 
     NvMediaParser* parser_ = nullptr;
     NvMediaIDE* decoder_ = nullptr;
+    // IJPD (image JPEG decoder) handle + output surface pool. Used only when
+    // codec_ == NVMEDIA_VIDEO_CODEC_MJPEG; parser_/decoder_ stay null in that
+    // case (JPEG has no NvMediaParser, and IDE rejects MJPEG).
+    NvMediaIJPD* ijpd_ = nullptr;
+    NvSciBufObj ijpdOutBuf_ = nullptr;   // reusable YUV420 output surface
+    uint32_t ijpdMaxBits_ = 0;           // maxBitstreamBytes handed to IJPDCreate
+    bool ijpdReady_ = false;             // IJPD + sync plumbing initialized
 
     // NvSci modules/objects (created in SetupDecoder).
     NvSciBufModule bufModule_ = nullptr;
@@ -147,6 +166,12 @@ private:
     bool streamDone_ = false;  // input exhausted AND parser flushed AND queue empty
     bool finalized_ = false;
     bool error_ = false;
+
+    // JPEG (IJPD) accumulation state. The input file (a single .jpg or an
+    // MJPEG motion stream of concatenated JPEGs) is read in full then split
+    // into SOI(FF D8)..EOI(FF D9) segments; each segment is one decode call.
+    std::vector<uint8_t> jpegFileBuffer_;
+    std::deque<std::vector<uint8_t>> ijpdPending_;  // framed JPEGs awaiting decode
 
     // Decoded frames awaiting GetFrame().
     std::deque<CodecFrame> outQueue_;

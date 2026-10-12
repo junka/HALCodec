@@ -206,6 +206,27 @@ bool NvMediaDecoder::Initialize(const CodecParams& params) {
     }
     zeroCopy_ = params.zeroCopy;
 
+    // JPEG has no NvMediaParser and the IDE video decoder rejects MJPEG at
+    // NvMediaIDECreate. Route it to the dedicated IJPD image-JPEG engine,
+    // which decodes one JPEG bitstream at a time into a YUV420 surface.
+    if (codec_ == NVMEDIA_VIDEO_CODEC_MJPEG) {
+        if (params.inputs.empty()) {
+            std::cerr << "NvMediaDecoder: JPEG decode needs a file input"
+                      << std::endl;
+            return false;
+        }
+        inputFile_ = fopen(params.inputs[0].c_str(), "rb");
+        if (!inputFile_) {
+            std::cerr << "NvMediaDecoder: cannot open " << params.inputs[0]
+                      << std::endl;
+            return false;
+        }
+        // The whole file is buffered and split into JPEGs (SOI..EOI) in
+        // PumpNext; the 1 MiB chunk_ buffer is reused as the read buffer.
+        chunk_.resize(kFeedChunkSize);
+        return true;
+    }
+
     // With no input path the caller supplies the compressed bytes itself via
     // FillInput()/SignalInputComplete() (the same feed-mode contract NVDEC
     // uses, so a decode->encode chain can hand the same buffer to both).
@@ -882,6 +903,71 @@ int NvMediaDecoder::PullFrames() {
 }
 
 int NvMediaDecoder::PumpNext() {
+    // JPEG (IJPD) path: no parser. Read the whole file once, split it into
+    // SOI(FF D8)..EOI(FF D9) segments, and decode each as one frame.
+    if (codec_ == NVMEDIA_VIDEO_CODEC_MJPEG) {
+        if (jpegFileBuffer_.empty() && !inputEof_) {
+            // Slurp the entire input file (a .jpg is one image; an .mjpeg
+            // stream is many concatenated JPEGs).
+            std::fseek(inputFile_, 0, SEEK_END);
+            long sz = std::ftell(inputFile_);
+            std::fseek(inputFile_, 0, SEEK_SET);
+            if (sz <= 0) {
+                inputEof_ = true;
+                streamDone_ = true;
+                return 0;
+            }
+            jpegFileBuffer_.resize(sz);
+            if (std::fread(jpegFileBuffer_.data(), 1, sz, inputFile_) !=
+                static_cast<size_t>(sz)) {
+                std::cerr << "NvMediaDecoder: JPEG file read failed"
+                          << std::endl;
+                error_ = true;
+                return 0;
+            }
+            inputEof_ = true;
+            // Split into JPEG segments on SOI (FF D8) / EOI (FF D9).
+            const uint8_t* p = jpegFileBuffer_.data();
+            const size_t n = jpegFileBuffer_.size();
+            size_t i = 0;
+            while (i + 1 < n) {
+                if (p[i] != 0xFF || p[i + 1] != 0xD8) { ++i; continue; }
+                size_t start = i;
+                // Find the matching EOI.
+                size_t j = i + 2;
+                while (j + 1 < n) {
+                    if (p[j] == 0xFF && p[j + 1] == 0xD9) { j += 2; break; }
+                    ++j;
+                }
+                if (j + 1 >= n && !(p[j - 2] == 0xFF && p[j - 1] == 0xD9)) {
+                    // No EOI found; take the rest of the buffer.
+                    j = n;
+                }
+                ijpdPending_.emplace_back(p + start, p + j);
+                i = j;
+            }
+            if (ijpdPending_.empty()) {
+                std::cerr << "NvMediaDecoder: no JPEG SOI found in input"
+                          << std::endl;
+                error_ = true;
+                return 0;
+            }
+        }
+        // Decode every framed JPEG currently pending.
+        while (!ijpdPending_.empty() && !error_) {
+            auto pkt = std::move(ijpdPending_.front());
+            ijpdPending_.pop_front();
+            if (!DecodeJpeg(pkt.data(), pkt.size())) {
+                error_ = true;
+                return 0;
+            }
+        }
+        if (inputEof_ && ijpdPending_.empty()) {
+            streamDone_ = true;
+        }
+        return static_cast<int>(outQueue_.size());
+    }
+
     // Keep consuming the input stream until at least one frame is queued or
     // the stream is fully drained (input exhausted + parser flush sent).
     while (outQueue_.empty() && !streamDone_) {
@@ -996,8 +1082,9 @@ bool NvMediaDecoder::GetFrame(CodecFrame& out) {
     // In feed mode there is no file pump behind PullFrames, and NvMediaParserParse
     // only surfaces a frame once its data is complete. Drain whatever the last
     // parse produced, and once the caller has signaled EOF, flush the parser to
-    // release the frames still held in the DPB.
-    if (feedMode_) {
+    // release the frames still held in the DPB. JPEG (IJPD) has no parser and
+    // is never feed-mode, so this branch is skipped for it.
+    if (feedMode_ && codec_ != NVMEDIA_VIDEO_CODEC_MJPEG) {
         if (outQueue_.empty() && inputEof_ && !streamDone_ && !flushSent_) {
             NvMediaBitStreamPkt eos = {};
             eos.bEOS = 1;
@@ -1017,11 +1104,235 @@ bool NvMediaDecoder::GetFrame(CodecFrame& out) {
     return true;
 }
 
+// Fill a PitchLinear 3-plane Y8/U8/V8 YUV420 attribute list for the IJPD
+// output surface. IJPD requires PitchLinear (not BlockLinear), 8-bit, plane
+// base align 256.
+bool FillIJPDSurfaceAttrs(NvSciBufAttrList list, uint32_t w, uint32_t h) {
+    NvSciBufType bufType = NvSciBufType_Image;
+    NvSciBufAttrValAccessPerm access = NvSciBufAccessPerm_ReadWrite;
+    bool needCpuAccess = true;
+    NvSciBufAttrValImageLayoutType layout = NvSciBufImage_PitchLinearType;
+    uint32_t planeCount = 3;
+    NvSciBufAttrValColorFmt colorFormat[3] = {NvSciColor_Y8, NvSciColor_U8,
+                                              NvSciColor_V8};
+    NvSciBufAttrValColorStd colorStd[3] = {NvSciColorStd_REC601_ER,
+                                           NvSciColorStd_REC601_ER,
+                                           NvSciColorStd_REC601_ER};
+    uint32_t planeWidth[3] = {w, w >> 1, w >> 1};
+    uint32_t planeHeight[3] = {h, h >> 1, h >> 1};
+    uint32_t baseAddrAlign[3] = {kSurfaceAlign, kSurfaceAlign, kSurfaceAlign};
+    uint64_t padding[3] = {0, 0, 0};
+    bool vprFlag = false;
+    NvSciBufAttrValImageScanType scanType = NvSciBufScan_ProgressiveType;
+
+    NvSciBufAttrKeyValuePair attributes[] = {
+        {NvSciBufGeneralAttrKey_RequiredPerm, &access, sizeof(access)},
+        {NvSciBufGeneralAttrKey_Types, &bufType, sizeof(bufType)},
+        {NvSciBufGeneralAttrKey_NeedCpuAccess, &needCpuAccess,
+         sizeof(needCpuAccess)},
+        {NvSciBufGeneralAttrKey_EnableCpuCache, &needCpuAccess,
+         sizeof(needCpuAccess)},
+        {NvSciBufImageAttrKey_TopPadding, padding, planeCount * sizeof(padding[0])},
+        {NvSciBufImageAttrKey_BottomPadding, padding, planeCount * sizeof(padding[0])},
+        {NvSciBufImageAttrKey_LeftPadding, padding, planeCount * sizeof(padding[0])},
+        {NvSciBufImageAttrKey_RightPadding, padding, planeCount * sizeof(padding[0])},
+        {NvSciBufImageAttrKey_Layout, &layout, sizeof(layout)},
+        {NvSciBufImageAttrKey_PlaneCount, &planeCount, sizeof(planeCount)},
+        {NvSciBufImageAttrKey_PlaneColorFormat, colorFormat,
+         planeCount * sizeof(NvSciBufAttrValColorFmt)},
+        {NvSciBufImageAttrKey_PlaneColorStd, colorStd,
+         planeCount * sizeof(NvSciBufAttrValColorStd)},
+        {NvSciBufImageAttrKey_PlaneBaseAddrAlign, baseAddrAlign,
+         planeCount * sizeof(uint32_t)},
+        {NvSciBufImageAttrKey_PlaneWidth, planeWidth,
+         planeCount * sizeof(uint32_t)},
+        {NvSciBufImageAttrKey_PlaneHeight, planeHeight,
+         planeCount * sizeof(uint32_t)},
+        {NvSciBufImageAttrKey_VprFlag, &vprFlag, sizeof(vprFlag)},
+        {NvSciBufImageAttrKey_ScanType, &scanType, sizeof(scanType)},
+    };
+    return NvSciBufAttrListSetAttrs(
+               list, attributes, sizeof(attributes) / sizeof(attributes[0])) ==
+           NvSciError_Success;
+}
+
+bool NvMediaDecoder::SetupJpegDecoder() {
+    if (ijpdReady_) {
+        return true;
+    }
+    if (NvSciBufModuleOpen(&bufModule_) != NvSciError_Success || !bufModule_) {
+        std::cerr << "NvMediaDecoder: IJPD NvSciBufModuleOpen failed"
+                  << std::endl;
+        return false;
+    }
+    if (NvSciSyncModuleOpen(&syncModule_) != NvSciError_Success ||
+        !syncModule_) {
+        std::cerr << "NvMediaDecoder: IJPD NvSciSyncModuleOpen failed"
+                  << std::endl;
+        return false;
+    }
+    if (NvSciSyncCpuWaitContextAlloc(syncModule_, &cpuWaitContext_) !=
+            NvSciError_Success ||
+        !cpuWaitContext_) {
+        std::cerr << "NvMediaDecoder: IJPD CpuWaitContextAlloc failed"
+                  << std::endl;
+        return false;
+    }
+    // EOF sync object: IJPD signals EOF, CPU waits. (No pre-fence needed for
+    // file/host input — there is no upstream producer to gate on.)
+    NvSciSyncAttrList sigList = nullptr, cpuWaitList = nullptr;
+    NvSciSyncAttrListCreate(syncModule_, &sigList);
+    NvSciSyncAttrListCreate(syncModule_, &cpuWaitList);
+    NvMediaIJPDFillNvSciSyncAttrList(ijpd_, sigList, NVMEDIA_SIGNALER);
+    bool cpuAccess = true;
+    NvSciSyncAccessPerm waitPerm = NvSciSyncAccessPerm_WaitOnly;
+    NvSciSyncAttrKeyValuePair waiterAttrs[2] = {
+        {NvSciSyncAttrKey_NeedCpuAccess, &cpuAccess, sizeof(cpuAccess)},
+        {NvSciSyncAttrKey_RequiredPerm, &waitPerm, sizeof(waitPerm)}};
+    NvSciSyncAttrListSetAttrs(cpuWaitList, waiterAttrs, 2);
+    NvSciSyncAttrList unrec[2] = {sigList, cpuWaitList};
+    NvSciSyncAttrList rec = nullptr, conf = nullptr;
+    NvSciSyncAttrListReconcile(unrec, 2, &rec, &conf);
+    NvSciSyncObjAlloc(rec, &eofSyncObj_);
+    NvSciSyncAttrListFree(rec);
+    NvSciSyncAttrListFree(conf);
+    NvSciSyncAttrListFree(sigList);
+    NvSciSyncAttrListFree(cpuWaitList);
+    if (!eofSyncObj_) {
+        std::cerr << "NvMediaDecoder: IJPD eof sync alloc failed" << std::endl;
+        return false;
+    }
+    if (NvMediaIJPDRegisterNvSciSyncObj(ijpd_, NVMEDIA_EOFSYNCOBJ,
+                                        eofSyncObj_) != NVMEDIA_STATUS_OK ||
+        NvMediaIJPDSetNvSciSyncObjforEOF(ijpd_, eofSyncObj_) !=
+            NVMEDIA_STATUS_OK) {
+        std::cerr << "NvMediaDecoder: IJPD register/set sync objs failed"
+                  << std::endl;
+        return false;
+    }
+    ijpdReady_ = true;
+    return true;
+}
+
+bool NvMediaDecoder::DecodeJpeg(const uint8_t* data, size_t size) {
+    if (!data || size == 0) {
+        return false;
+    }
+    // Probe the stream for its coded dimensions (static — no decoder needed).
+    NVMEDIAJPEGDecInfo info;
+    std::memset(&info, 0, sizeof(info));
+    NvMediaBitstreamBuffer bsBuf;
+    std::memset(&bsBuf, 0, sizeof(bsBuf));
+    bsBuf.bitstream = const_cast<uint8_t*>(data);
+    bsBuf.bitstreamBytes = static_cast<uint32_t>(size);
+    bsBuf.bitstreamSize = static_cast<uint32_t>(size);
+    if (NvMediaIJPDGetInfo(&info, 1, &bsBuf) != NVMEDIA_STATUS_OK) {
+        std::cerr << "NvMediaDecoder: NvMediaIJPDGetInfo failed" << std::endl;
+        return false;
+    }
+    const uint16_t w = info.width;
+    const uint16_t h = info.height;
+    const uint16_t cw = (w + 15U) & ~15U;
+    const uint16_t ch = (h + 15U) & ~15U;
+
+    // Create (or resize) the IJPD decoder if the coded dimensions grew.
+    if (!ijpd_) {
+        ijpd_ = NvMediaIJPDCreate(cw, ch, static_cast<uint32_t>(size),
+                                  /*supportPartialAccel=*/info.partialAccel,
+                                  NVMEDIA_JPEG_INSTANCE_0);
+        if (!ijpd_) {
+            std::cerr << "NvMediaDecoder: NvMediaIJPDCreate failed" << std::endl;
+            return false;
+        }
+        if (!SetupJpegDecoder()) {
+            return false;
+        }
+    } else if (cw > codedWidth_ || ch > codedHeight_ ||
+               static_cast<uint32_t>(size) > ijpdMaxBits_) {
+        if (NvMediaIJPDResize(ijpd_, cw, ch,
+                              static_cast<uint32_t>(size)) != NVMEDIA_STATUS_OK) {
+            std::cerr << "NvMediaDecoder: NvMediaIJPDResize failed"
+                      << std::endl;
+            return false;
+        }
+    }
+    codedWidth_ = cw;
+    codedHeight_ = ch;
+    ijpdMaxBits_ = static_cast<uint32_t>(size);
+
+    // (Re)allocate the output surface if the coded size changed. IJPD's
+    // RegisterNvSciBufObj is documented "not supported, can be ignored", so
+    // the surface is fed directly to RenderYUV without registration.
+    if (!ijpdOutBuf_) {
+        NvSciBufAttrList attrList = nullptr, reconciled = nullptr, conflict = nullptr;
+        NvSciBufAttrListCreate(bufModule_, &attrList);
+        NvMediaIJPDFillNvSciBufAttrList(NVMEDIA_JPEG_INSTANCE_0, attrList);
+        FillIJPDSurfaceAttrs(attrList, cw, ch);
+        NvSciBufAttrList arr[1] = {attrList};
+        NvSciBufAttrListReconcile(arr, 1, &reconciled, &conflict);
+        NvSciBufObjAlloc(reconciled, &ijpdOutBuf_);
+        NvSciBufAttrListFree(attrList);
+        NvSciBufAttrListFree(reconciled);
+        NvSciBufAttrListFree(conflict);
+        if (!ijpdOutBuf_) {
+            std::cerr << "NvMediaDecoder: IJPD NvSciBufObjAlloc failed"
+                      << std::endl;
+            return false;
+        }
+    }
+
+    if (NvMediaIJPDRenderYUV(ijpd_, ijpdOutBuf_, /*downscaleLog2=*/0, 1,
+                             &bsBuf, NVMEDIA_IJPD_RENDER_FLAG_ROTATE_0,
+                             NVMEDIA_JPEG_INSTANCE_0) != NVMEDIA_STATUS_OK) {
+        std::cerr << "NvMediaDecoder: NvMediaIJPDRenderYUV failed"
+                  << std::endl;
+        return false;
+    }
+    NvSciSyncFence eofFence{};
+    if (NvMediaIJPDGetEOFNvSciSyncFence(ijpd_, eofSyncObj_, &eofFence) !=
+        NVMEDIA_STATUS_OK) {
+        std::cerr << "NvMediaDecoder: IJPD GetEOFNvSciSyncFence failed"
+                  << std::endl;
+        return false;
+    }
+    if (NvSciSyncFenceWait(&eofFence, cpuWaitContext_, kFenceWaitTimeoutUs) !=
+        NvSciError_Success) {
+        std::cerr << "NvMediaDecoder: IJPD EOF FenceWait failed" << std::endl;
+        return false;
+    }
+    NvSciSyncFenceClear(&eofFence);
+
+    // Read back the decoded YUV (3-plane planar via GetPixels, then repack to
+    // NV12 — same convention as the IDE host readout path). The PitchLinear
+    // IJPD surface is read with the same 3-plane GetPixels call that handles
+    // the BlockLinear IDE surface.
+    displayWidth_ = w;
+    displayHeight_ = h;
+    uint8_t* buffer = DetileNvSciBufToNV12(ijpdOutBuf_, cw, ch);
+    if (!buffer) {
+        std::cerr << "NvMediaDecoder: IJPD GetPixels/detile failed"
+                  << std::endl;
+        return false;
+    }
+    CodecFrame frame;
+    frame.data = buffer;
+    frame.size = static_cast<size_t>(w) * h * 3 / 2;
+    frame.width = static_cast<int>(w);
+    frame.height = static_cast<int>(h);
+    frame.format = PixelFormat::NV12;
+    frame.strides[0] = w;
+    frame.strides[1] = w;
+    frame.release = [buffer]() { std::free(buffer); };
+    outQueue_.push_back(std::move(frame));
+    return true;
+}
+
 void NvMediaDecoder::Finalize() {
     if (finalized_) {
         return;
     }
     finalized_ = true;
+
 
     if (parser_) {
         NvMediaParserDestroy(parser_);
@@ -1049,6 +1360,20 @@ void NvMediaDecoder::Finalize() {
         decoder_ = nullptr;
     }
     pool_.clear();
+
+    if (ijpd_) {
+        if (ijpdOutBuf_) {
+            NvSciBufObjFree(ijpdOutBuf_);
+            ijpdOutBuf_ = nullptr;
+        }
+        if (eofSyncObj_) {
+            NvMediaIJPDUnregisterNvSciSyncObj(ijpd_, eofSyncObj_);
+            NvSciSyncObjFree(eofSyncObj_);
+            eofSyncObj_ = nullptr;
+        }
+        NvMediaIJPDDestroy(ijpd_);
+        ijpd_ = nullptr;
+    }
 
     if (cpuWaitContext_) {
         NvSciSyncCpuWaitContextFree(cpuWaitContext_);
