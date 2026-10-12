@@ -105,21 +105,23 @@ NVIDIA / AMD / Intel / Apple / NVIDIA DRIVE 的硬件编解码，无需为每个
 | mpeg2 | 30/30 ✅（已验证，elementary）| — |
 | mpeg4 | 30/30 ✅（已验证，elementary）| — |
 | vc1   | 库接受，SP/MP framing gap | — |
-| jpeg  | IDE 不收 | IJPE 仅编码 |
+| jpeg  | IDE 不收（待 IJPD 接入）| 30/30 ✅（已验证，IJPE）|
 
-- **已验证**（h264/hevc/vp9/av1/vp8/mpeg2/mpeg4 解码，h264/hevc 编码）：数据通路完整 wire
+- **已验证**（h264/hevc/vp9/av1/vp8/mpeg2/mpeg4 解码，h264/hevc/jpeg 编码）：数据通路完整 wire
   并实测。HEVC 编码可经 NvMedia HEVC 解码 round-trip（30 帧 NV12），4Mbps CBR 下 PSNR
   ~51.8 dB。H.264 的 IDE→IEP 零拷贝路径已验证。VP9/AV1/VP8 解码需 IVF 输入（框架解容器后
   按帧喂 NvMediaParser 并置 `bCompletePicture=1`——这些 codec 无 start code，NvMediaParser
   无法从裸流自切分帧）；AV1 解码还需在 `UpdateReferenceFrames` 里把 `RefPics[8]` 的 pool
   槽指针翻译成 NvSciBufObj。MPEG-2/MPEG-4 elementary 流按 raw chunk 喂（VOS/sequence
-  start code），其 `forward/backward_reference` 同样做 pool 槽→NvSciBufObj 翻译。
+  start code），其 `forward/backward_reference` 同样做 pool 槽→NvSciBufObj 翻译。JPEG 编码
+  走专用 IJPE 图像引擎（IDE 不收 MJPEG），PitchLinear YUV420 输入，每帧一张独立 JPEG；
+  30 帧 → 30 个有效 JPEG（SOI/EOI 齐备，ffmpeg 解码 320×240 yuvj420p，luma PSNR ~31 dB @q75）。
 - **库接受，未 wire** ⚠️：完整版 SDK 库在 `NvMediaParserCreate` / `NvMediaIEPCreate`
   处接受该 codec（精简版系统库会以 "Codec Not supported" 拒绝），但框架未 wire。
   VC1 Simple/Main 已映射且库接受，但其裸帧流需 RCV sequence header / per-frame framing，
-  框架尚未产出，DecodePicture 未触发。JPEG 解码在 `NvMediaIDECreate` 失败（MJPEG 不走 IDE；
-  IJPE 仅编码）。AV1 编码未 wire（缺 init/config/pic-params 三元组）。可用
-  `NvMedia/probes/`（codec_probe、feed_probe、iep_probe）复现库版本差异。VP9 编码在两套库
+  框架尚未产出，DecodePicture 未触发。JPEG 解码在 `NvMediaIDECreate` 失败（MJPEG 不走 IDE），
+  待用专用 IJPD 图像解码引擎接入。AV1 编码未 wire（缺 init/config/pic-params 三元组）。可用
+  `NvMedia/probes/`（codec_probe、feed_probe、iep_probe、ijpe_probe）复现库版本差异。VP9 编码在两套库
   里都在 `NvMediaIEPCreate` 失败——是这块板子真实的硬件/库限制。
 - **部署注意**：框架部署默认加载**系统** `/usr/lib` 库，因此只能用 h264/hevc。要用
   库接受的 codec，需把 `NvMedia/lib-target/` 的完整 nv* 集合随部署带上、并放
@@ -356,9 +358,9 @@ lib-target (same DRIVE-OS version, in `NvMedia/lib-target/`) unlocks the rest.
 | mpeg2  | 30/30 ✅ (verified, elementary) | —             |
 | mpeg4  | 30/30 ✅ (verified, elementary) | —             |
 | vc1    | lib-accepted, SP/MP framing gap | —              |
-| jpeg   | not via IDE           | IJPE encode-only      |
+| jpeg   | not via IDE (IJPD pending) | 30/30 ✅ (verified, IJPE) |
 
-- **Verified** (h264/hevc/vp9/av1/vp8/mpeg2/mpeg4 decode, h264/hevc encode):
+- **Verified** (h264/hevc/vp9/av1/vp8/mpeg2/mpeg4 decode, h264/hevc/jpeg encode):
   full data paths wired and measured. HEVC encode round-trips through NvMedia
   HEVC decode (30 NV12 frames); PSNR ~51.8 dB vs the original at 4 Mbps CBR.
   Zero-copy IDE→IEP path verified for H.264. VP9/AV1/VP8 decode take IVF input
@@ -368,18 +370,21 @@ lib-target (same DRIVE-OS version, in `NvMedia/lib-target/`) unlocks the rest.
   needed the `RefPics[8]` pool-slot → NvSciBufObj fixup in
   `UpdateReferenceFrames`. MPEG-2/MPEG-4 elementary streams feed as raw chunks
   (VOS/sequence start codes); their `forward/backward_reference` surfaces get
-  the same pool-slot → NvSciBufObj fixup.
+  the same pool-slot → NvSciBufObj fixup. JPEG encode goes through the
+  dedicated IJPE image engine (IDE rejects MJPEG): PitchLinear YUV420 input,
+  one independent JPEG per frame; 30 frames → 30 valid JPEGs (SOI/EOI present,
+  ffmpeg decodes 320×240 yuvj420p, luma PSNR ~31 dB @q75).
 - **lib-accepted, not wired** ⚠️: the full-build SDK lib accepts the codec at
   `NvMediaParserCreate` / `NvMediaIEPCreate` (the reduced system lib rejects
   it with "Codec Not supported"), but the framework does not wire it.
   VC1 Simple/Main is mapped and the lib accepts it, but its raw frame stream
   needs an RCV sequence header / per-frame framing the framework does not yet
   produce, so DecodePicture is not reached. JPEG decode fails at
-  `NvMediaIDECreate` (MJPEG is not via IDE; IJPE is encode-only). AV1 encode is
-  not wired (no init/config/pic-params triple). Use `NvMedia/probes/`
-  (codec_probe, feed_probe, iep_probe) to reproduce the lib-version difference.
-  VP9 encode fails at `NvMediaIEPCreate` in both libs — a real hardware/lib
-  limit on this board.
+  `NvMediaIDECreate` (MJPEG is not via IDE) — pending IJPD image-decode wiring.
+  AV1 encode is not wired (no init/config/pic-params triple). Use
+  `NvMedia/probes/` (codec_probe, feed_probe, iep_probe, ijpe_probe) to
+  reproduce the lib-version difference. VP9 encode fails at
+  `NvMediaIEPCreate` in both libs — a real hardware/lib limit on this board.
 - **Deploy note**: the framework deploy loads the **system** `/usr/lib` libs
   by default, so it sees only h264/hevc. To use the lib-accepted codecs,
   ship the full `NvMedia/lib-target/` nv* set into the deploy dir and put it

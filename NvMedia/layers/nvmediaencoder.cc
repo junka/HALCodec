@@ -69,7 +69,61 @@ bool FillNV12SurfaceAttrs(NvSciBufAttrList list, uint32_t w, uint32_t h) {
            NvSciError_Success;
 }
 
-// Read back the plane geometry the reconciled surface actually received.
+// Fill the NvSciBuf attribute list for an 8-bit YUV420 planar input surface
+// for the IJPE image-JPEG encoder. IJPE requires PitchLinear (NOT BlockLinear
+// like IEP), YUV420 planar or semi-planar, 8-bit, 256-byte plane base align.
+// Uses a 3-plane Y8/U8/V8 planar description so the same 3-plane PutPixels
+// upload path as the IEP encoder works unchanged. Mirrors the layout the
+// image_jpeg_enc sample requests.
+bool FillIJPESurfaceAttrs(NvSciBufAttrList list, uint32_t w, uint32_t h) {
+    NvSciBufType bufType = NvSciBufType_Image;
+    NvSciBufAttrValAccessPerm access = NvSciBufAccessPerm_ReadWrite;
+    bool needCpuAccess = true;
+    NvSciBufAttrValImageLayoutType layout = NvSciBufImage_PitchLinearType;
+    uint32_t planeCount = 3;
+    NvSciBufAttrValColorFmt colorFormat[3] = {NvSciColor_Y8, NvSciColor_U8,
+                                              NvSciColor_V8};
+    NvSciBufAttrValColorStd colorStd[3] = {NvSciColorStd_REC601_ER,
+                                           NvSciColorStd_REC601_ER,
+                                           NvSciColorStd_REC601_ER};
+    uint32_t planeWidth[3] = {w, w >> 1, w >> 1};
+    uint32_t planeHeight[3] = {h, h >> 1, h >> 1};
+    uint32_t baseAddrAlign[3] = {kSurfaceAlign, kSurfaceAlign, kSurfaceAlign};
+    uint64_t padding[3] = {0, 0, 0};
+    bool vprFlag = false;
+    NvSciBufAttrValImageScanType scanType = NvSciBufScan_ProgressiveType;
+
+    NvSciBufAttrKeyValuePair attributes[] = {
+        {NvSciBufGeneralAttrKey_RequiredPerm, &access, sizeof(access)},
+        {NvSciBufGeneralAttrKey_Types, &bufType, sizeof(bufType)},
+        {NvSciBufGeneralAttrKey_NeedCpuAccess, &needCpuAccess,
+         sizeof(needCpuAccess)},
+        {NvSciBufGeneralAttrKey_EnableCpuCache, &needCpuAccess,
+         sizeof(needCpuAccess)},
+        {NvSciBufImageAttrKey_TopPadding, padding, planeCount * sizeof(padding[0])},
+        {NvSciBufImageAttrKey_BottomPadding, padding, planeCount * sizeof(padding[0])},
+        {NvSciBufImageAttrKey_LeftPadding, padding, planeCount * sizeof(padding[0])},
+        {NvSciBufImageAttrKey_RightPadding, padding, planeCount * sizeof(padding[0])},
+        {NvSciBufImageAttrKey_Layout, &layout, sizeof(layout)},
+        {NvSciBufImageAttrKey_PlaneCount, &planeCount, sizeof(planeCount)},
+        {NvSciBufImageAttrKey_PlaneColorFormat, colorFormat,
+         planeCount * sizeof(NvSciBufAttrValColorFmt)},
+        {NvSciBufImageAttrKey_PlaneColorStd, colorStd,
+         planeCount * sizeof(NvSciBufAttrValColorStd)},
+        {NvSciBufImageAttrKey_PlaneBaseAddrAlign, baseAddrAlign,
+         planeCount * sizeof(uint32_t)},
+        {NvSciBufImageAttrKey_PlaneWidth, planeWidth,
+         planeCount * sizeof(uint32_t)},
+        {NvSciBufImageAttrKey_PlaneHeight, planeHeight,
+         planeCount * sizeof(uint32_t)},
+        {NvSciBufImageAttrKey_VprFlag, &vprFlag, sizeof(vprFlag)},
+        {NvSciBufImageAttrKey_ScanType, &scanType, sizeof(scanType)},
+    };
+    return NvSciBufAttrListSetAttrs(
+               list, attributes, sizeof(attributes) / sizeof(attributes[0])) ==
+           NvSciError_Success;
+}
+
 //
 // IEP/NvSciBuf pad the allocated surface beyond the requested encode size: the
 // plane pitch gets rounded up to the allocator's alignment, so it is commonly
@@ -195,14 +249,28 @@ bool NvMediaEncoder::Initialize(const CodecParams& params) {
     width_ = (static_cast<uint32_t>(params.width) + 15U) & ~15U;
     height_ = (static_cast<uint32_t>(params.height) + 15U) & ~15U;
 
-    // Codec selection: H.264 and HEVC are wired. The IEP runtime on this DRIVE
-    // build creates H.264 and HEVC encoders (AV1/VP9 fail at NvMediaIEPCreate
-    // despite the T234 SoC). hal_enc leaves params.codec empty, defaulting to
-    // h264; an explicit --codec hevc selects the HEVC path.
+    // Codec selection: H.264 and HEVC are wired through IEP; JPEG is wired
+    // through the dedicated IJPE image-JPEG engine (the IDE path fails at
+    // NvMediaIDECreate for MJPEG, and IEP has no JPEG type). The IEP runtime on
+    // this DRIVE build creates H.264 and HEVC encoders (AV1/VP9 fail at
+    // NvMediaIEPCreate despite the T234 SoC). hal_enc leaves params.codec empty,
+    // defaulting to h264; an explicit --codec hevc selects the HEVC path, and
+    // --codec jpeg selects the IJPE path.
     codec_ = params.codec.empty() ? "h264" : params.codec;
+    if (codec_ == "jpeg" || codec_ == "mjpeg") {
+        codec_ = "jpeg";
+        if (params.encode.quality >= 1 && params.encode.quality <= 100) {
+            jpegQuality_ = static_cast<uint8_t>(params.encode.quality);
+        }
+        if (!SetupJpeg(params)) {
+            return false;
+        }
+        initialized_ = true;
+        return true;
+    }
     if (codec_ != "h264" && codec_ != "hevc") {
         std::cerr << "NvMediaEncoder: unsupported codec '" << codec_
-                  << "' (h264 or hevc)" << std::endl;
+                  << "' (h264, hevc, or jpeg)" << std::endl;
         return false;
     }
     iepType_ = (codec_ == "hevc") ? NVMEDIA_IMAGE_ENCODE_HEVC
@@ -540,6 +608,12 @@ bool NvMediaEncoder::FillFrame(const CodecFrame& in) {
         return false;
     }
 
+    // JPEG (IJPE) is a separate image-level path: no rate control / GOP / pic
+    // params, one surface -> one JPEG bitstream.
+    if (codec_ == "jpeg") {
+        return FillJpegFrame(in);
+    }
+
     // Zero-size HOST frame marks the end of the stream: drain the remaining
     // bitstream (trailing packets surface only after the last input settles).
     // A zero-copy device frame also reports size == 0 (its bytes are
@@ -850,6 +924,416 @@ bool NvMediaEncoder::FeedDeviceFrame(const CodecFrame& in) {
     return Drain();
 }
 
+bool NvMediaEncoder::SetupJpeg(const CodecParams& params) {
+    // IJPE takes 8-bit YUV420 planar input (3-plane Y8/U8/V8) on a PitchLinear
+    // surface. Coded dimensions are aligned up to 16 for parity with the IEP
+    // path (and so the host upload pitch is consistent).
+    width_ = (static_cast<uint32_t>(params.width) + 15U) & ~15U;
+    height_ = (static_cast<uint32_t>(params.height) + 15U) & ~15U;
+
+    NvMediaVersion version{};
+    if (NvMediaIJPEGetVersion(&version) != NVMEDIA_STATUS_OK) {
+        std::cerr << "NvMediaEncoder: NvMediaIJPEGetVersion failed" << std::endl;
+        return false;
+    }
+
+    // Reconcile the input-surface attributes: IJPE injects its engine
+    // requirements, we add the CPU-writable PitchLinear YUV420 description.
+    if (NvSciBufModuleOpen(&bufModule_) != NvSciError_Success || !bufModule_) {
+        std::cerr << "NvMediaEncoder: NvSciBufModuleOpen failed" << std::endl;
+        return false;
+    }
+    NvSciBufAttrList attrList = nullptr;
+    NvSciBufAttrList reconciled = nullptr;
+    NvSciBufAttrList conflict = nullptr;
+    if (NvSciBufAttrListCreate(bufModule_, &attrList) != NvSciError_Success ||
+        !attrList) {
+        std::cerr << "NvMediaEncoder: NvSciBufAttrListCreate failed"
+                  << std::endl;
+        return false;
+    }
+    if (NvMediaIJPEFillNvSciBufAttrList(jpegInstance_, attrList) !=
+            NVMEDIA_STATUS_OK ||
+        !FillIJPESurfaceAttrs(attrList, width_, height_)) {
+        std::cerr << "NvMediaEncoder: IJPE fill surface attrs failed"
+                  << std::endl;
+        NvSciBufAttrListFree(attrList);
+        return false;
+    }
+    NvSciBufAttrList attrArray[1] = {attrList};
+    if (NvSciBufAttrListReconcile(attrArray, 1, &reconciled, &conflict) !=
+        NvSciError_Success) {
+        std::cerr << "NvMediaEncoder: IJPE attr reconcile failed" << std::endl;
+        NvSciBufAttrListFree(attrList);
+        return false;
+    }
+    NvSciBufAttrListFree(attrList);
+
+    // Worst-case JPEG bitstream size: YUV420 bytes + header/DQT/DHT slack.
+    jpegMaxBits_ = width_ * height_ * 3U / 2U + 4096;
+    ijpe_ = NvMediaIJPECreate(reconciled,
+                              static_cast<uint8_t>(kMaxBuffering),
+                              jpegMaxBits_, jpegInstance_);
+    if (!ijpe_) {
+        std::cerr << "NvMediaEncoder: NvMediaIJPECreate failed" << std::endl;
+        NvSciBufAttrListFree(reconciled);
+        NvSciBufAttrListFree(conflict);
+        return false;
+    }
+
+    // Surface pool: allocate each input buffer and register it with IJPE
+    // (registration is optional but recommended for deterministic FeedFrame).
+    pool_.resize(kSurfacePoolSize);
+    for (uint32_t i = 0; i < kSurfacePoolSize; ++i) {
+        NvSciBufObj obj = nullptr;
+        if (NvSciBufObjAlloc(reconciled, &obj) != NvSciError_Success || !obj) {
+            std::cerr << "NvMediaEncoder: IJPE NvSciBufObjAlloc failed"
+                      << std::endl;
+            pool_.resize(i);
+            break;
+        }
+        if (NvMediaIJPERegisterNvSciBufObj(ijpe_, obj) != NVMEDIA_STATUS_OK) {
+            std::cerr << "NvMediaEncoder: NvMediaIJPERegisterNvSciBufObj failed"
+                      << std::endl;
+            NvSciBufObjFree(obj);
+            pool_.resize(i);
+            break;
+        }
+        pool_[i].buf = obj;
+    }
+    NvSciBufAttrListFree(reconciled);
+    NvSciBufAttrListFree(conflict);
+    if (pool_.empty()) {
+        std::cerr << "NvMediaEncoder: IJPE no input surface allocated"
+                  << std::endl;
+        return false;
+    }
+
+    if (!GetSurfacePlaneGeometry(pool_[0].buf, &surfaceLumaW_, &surfaceLumaH_,
+                                 planePitch_, planeHeight_, alignedHeight_)) {
+        std::cerr << "NvMediaEncoder: IJPE surface geometry unreadable, "
+                     "assuming " << width_ << "x" << height_ << " packed"
+                  << std::endl;
+        planePitch_[0] = width_;
+        planePitch_[1] = width_ >> 1;
+        planePitch_[2] = width_ >> 1;
+        planeHeight_[0] = height_;
+        planeHeight_[1] = height_ >> 1;
+        planeHeight_[2] = height_ >> 1;
+        alignedHeight_[0] = height_;
+        alignedHeight_[1] = height_ >> 1;
+        alignedHeight_[2] = height_ >> 1;
+    }
+
+    // CPU wait context + EOF/Pre sync objects (same 4-list pattern as IEP, but
+    // using the IJPE FillNvSciSyncAttrList entry points).
+    if (NvSciSyncModuleOpen(&syncModule_) != NvSciError_Success ||
+        !syncModule_) {
+        std::cerr << "NvMediaEncoder: NvSciSyncModuleOpen failed" << std::endl;
+        return false;
+    }
+    if (NvSciSyncCpuWaitContextAlloc(syncModule_, &cpuWaitContext_) !=
+            NvSciError_Success ||
+        !cpuWaitContext_) {
+        std::cerr << "NvMediaEncoder: NvSciSyncCpuWaitContextAlloc failed"
+                  << std::endl;
+        return false;
+    }
+
+    NvSciSyncAttrList ijpeSignalerList = nullptr;
+    NvSciSyncAttrList ijpeWaiterList = nullptr;
+    NvSciSyncAttrList cpuWaiterList = nullptr;
+    NvSciSyncAttrList cpuSignalerList = nullptr;
+    if (NvSciSyncAttrListCreate(syncModule_, &ijpeSignalerList) !=
+            NvSciError_Success ||
+        NvSciSyncAttrListCreate(syncModule_, &ijpeWaiterList) !=
+            NvSciError_Success ||
+        NvSciSyncAttrListCreate(syncModule_, &cpuWaiterList) !=
+            NvSciError_Success ||
+        NvSciSyncAttrListCreate(syncModule_, &cpuSignalerList) !=
+            NvSciError_Success) {
+        std::cerr << "NvMediaEncoder: IJPE NvSciSyncAttrListCreate failed"
+                  << std::endl;
+        return false;
+    }
+    if (NvMediaIJPEFillNvSciSyncAttrList(ijpe_, ijpeSignalerList,
+                                         NVMEDIA_SIGNALER) != NVMEDIA_STATUS_OK ||
+        NvMediaIJPEFillNvSciSyncAttrList(ijpe_, ijpeWaiterList,
+                                         NVMEDIA_WAITER) != NVMEDIA_STATUS_OK) {
+        std::cerr << "NvMediaEncoder: NvMediaIJPEFillNvSciSyncAttrList failed"
+                  << std::endl;
+        return false;
+    }
+    bool cpuAccess = true;
+    NvSciSyncAccessPerm waitPerm = NvSciSyncAccessPerm_WaitOnly;
+    NvSciSyncAttrKeyValuePair waiterAttrs[2] = {
+        {NvSciSyncAttrKey_NeedCpuAccess, &cpuAccess, sizeof(cpuAccess)},
+        {NvSciSyncAttrKey_RequiredPerm, &waitPerm, sizeof(waitPerm)},
+    };
+    if (NvSciSyncAttrListSetAttrs(cpuWaiterList, waiterAttrs, 2) !=
+        NvSciError_Success) {
+        std::cerr << "NvMediaEncoder: IJPE waiter SetAttrs failed" << std::endl;
+        return false;
+    }
+    NvSciSyncAccessPerm signalPerm = NvSciSyncAccessPerm_SignalOnly;
+    NvSciSyncAttrKeyValuePair signalerAttrs[2] = {
+        {NvSciSyncAttrKey_NeedCpuAccess, &cpuAccess, sizeof(cpuAccess)},
+        {NvSciSyncAttrKey_RequiredPerm, &signalPerm, sizeof(signalPerm)},
+    };
+    if (NvSciSyncAttrListSetAttrs(cpuSignalerList, signalerAttrs, 2) !=
+        NvSciError_Success) {
+        std::cerr << "NvMediaEncoder: IJPE signaler SetAttrs failed"
+                  << std::endl;
+        return false;
+    }
+
+    NvSciSyncAttrList unreconciled[2] = {nullptr, nullptr};
+    NvSciSyncAttrList syncReconciled = nullptr;
+    NvSciSyncAttrList syncConflict = nullptr;
+    unreconciled[0] = ijpeSignalerList;
+    unreconciled[1] = cpuWaiterList;
+    if (NvSciSyncAttrListReconcile(unreconciled, 2, &syncReconciled,
+                                   &syncConflict) != NvSciError_Success ||
+        NvSciSyncObjAlloc(syncReconciled, &eofSyncObj_) != NvSciError_Success ||
+        !eofSyncObj_) {
+        std::cerr << "NvMediaEncoder: IJPE eof sync alloc failed" << std::endl;
+        return false;
+    }
+    NvSciSyncAttrListFree(syncReconciled);
+    NvSciSyncAttrListFree(syncConflict);
+
+    unreconciled[0] = ijpeWaiterList;
+    unreconciled[1] = cpuSignalerList;
+    if (NvSciSyncAttrListReconcile(unreconciled, 2, &syncReconciled,
+                                   &syncConflict) != NvSciError_Success ||
+        NvSciSyncObjAlloc(syncReconciled, &preSyncObj_) != NvSciError_Success ||
+        !preSyncObj_) {
+        std::cerr << "NvMediaEncoder: IJPE pre sync alloc failed" << std::endl;
+        return false;
+    }
+    NvSciSyncAttrListFree(syncReconciled);
+    NvSciSyncAttrListFree(syncConflict);
+    NvSciSyncAttrListFree(ijpeSignalerList);
+    NvSciSyncAttrListFree(ijpeWaiterList);
+    NvSciSyncAttrListFree(cpuWaiterList);
+    NvSciSyncAttrListFree(cpuSignalerList);
+
+    if (NvMediaIJPERegisterNvSciSyncObj(ijpe_, NVMEDIA_EOFSYNCOBJ,
+                                        eofSyncObj_) != NVMEDIA_STATUS_OK ||
+        NvMediaIJPERegisterNvSciSyncObj(ijpe_, NVMEDIA_PRESYNCOBJ,
+                                        preSyncObj_) != NVMEDIA_STATUS_OK ||
+        NvMediaIJPESetNvSciSyncObjforEOF(ijpe_, eofSyncObj_) !=
+            NVMEDIA_STATUS_OK) {
+        std::cerr << "NvMediaEncoder: IJPE register/set sync objs failed"
+                  << std::endl;
+        return false;
+    }
+
+    // IJPE requires SetAttributes at least once before FeedFrame. The quality
+    // value is also passed to FeedFrame (which generates luma/chroma quant
+    // tables from it), but the precondition still needs a SetAttributes call.
+    // Use the QUALITY attribute so the encoder picks tables consistently.
+    NvMediaJPEncAttributes attrs;
+    std::memset(&attrs, 0, sizeof(attrs));
+    attrs.quality = jpegQuality_;
+    if (NvMediaIJPESetAttributes(
+            ijpe_, NVMEDIA_IMAGE_JPEG_ATTRIBUTE_QUALITY, &attrs) !=
+        NVMEDIA_STATUS_OK) {
+        std::cerr << "NvMediaEncoder: NvMediaIJPESetAttributes failed"
+                  << std::endl;
+        return false;
+    }
+
+    std::cout << "NvMediaEncoder: IJPE ready, surface " << width_ << "x"
+              << height_ << " (" << pool_.size() << " bufs), quality "
+              << static_cast<int>(jpegQuality_) << ", maxBits "
+              << jpegMaxBits_ << std::endl;
+    return true;
+}
+
+bool NvMediaEncoder::DrainJpeg() {
+    uint32_t bytesAvailable = 0;
+    NvMediaStatus s = NvMediaIJPEBitsAvailable(
+        ijpe_, &bytesAvailable, NVMEDIA_ENCODE_BLOCKING_TYPE_NEVER, 0);
+    if (s == NVMEDIA_STATUS_NONE_PENDING || s == NVMEDIA_STATUS_PENDING) {
+        return true;  // nothing ready to read back
+    }
+    if (s != NVMEDIA_STATUS_OK || bytesAvailable == 0) {
+        return true;
+    }
+
+    std::vector<uint8_t> storage(bytesAvailable);
+    uint32_t numBytes = 0;
+    s = NvMediaIJPEGetBits(ijpe_, &numBytes, storage.data(),
+                           NVMEDIA_JPEG_ENC_FLAG_NONE);
+    if (s == NVMEDIA_STATUS_NONE_PENDING) {
+        return true;
+    }
+    if (s != NVMEDIA_STATUS_OK || numBytes == 0) {
+        std::cerr << "NvMediaEncoder: NvMediaIJPEGetBits failed: 0x" << std::hex
+                  << s << std::dec << std::endl;
+        return false;
+    }
+
+    const uint32_t bytes = numBytes;
+    uint8_t* data = new uint8_t[bytes];
+    std::memcpy(data, storage.data(), bytes);
+    CodecFrame packet;
+    packet.data = data;
+    packet.size = bytes;
+    packet.width = static_cast<int>(width_);
+    packet.height = static_cast<int>(height_);
+    packet.format = PixelFormat::Unknown;  // encoded JPEG bitstream
+    packet.release = [data] { delete[] data; };
+    outQueue_.push_back(std::move(packet));
+    return true;
+}
+
+bool NvMediaEncoder::FillJpegFrame(const CodecFrame& in) {
+    // Zero-size HOST frame marks end of stream: drain remaining bitstream.
+    if (in.size == 0 && in.locality == FrameLocality::Host) {
+        eof_ = true;
+        for (uint32_t i = 0; i < kFlushDrainIterations; ++i) {
+            uint32_t bytesAvailable = 0;
+            NvMediaStatus s = NvMediaIJPEBitsAvailable(
+                ijpe_, &bytesAvailable, NVMEDIA_ENCODE_BLOCKING_TYPE_NEVER, 0);
+            if (s != NVMEDIA_STATUS_OK || bytesAvailable == 0) {
+                break;
+            }
+            if (!DrainJpeg()) {
+                return false;
+            }
+        }
+        return true;
+    }
+
+    if (in.format != PixelFormat::NV12 && in.format != PixelFormat::I420 &&
+        in.format != PixelFormat::Unknown) {
+        std::cerr << "NvMediaEncoder: IJPE unsupported input format (NV12/I420"
+                  << " only)" << std::endl;
+        return false;
+    }
+    const uint32_t w = static_cast<uint32_t>(in.width);
+    const uint32_t h = static_cast<uint32_t>(in.height);
+    if (w == 0 || h == 0 || w > width_ || h > height_) {
+        std::cerr << "NvMediaEncoder: IJPE bad frame dims " << in.width << "x"
+                  << in.height << std::endl;
+        return false;
+    }
+
+    if (in.locality != FrameLocality::Host) {
+        std::cerr << "NvMediaEncoder: IJPE host input only" << std::endl;
+        return false;
+    }
+
+    Surface& surface = pool_[nextSurface_];
+    nextSurface_ = (nextSurface_ + 1) % pool_.size();
+
+    if (surface.pending) {
+        if (NvSciSyncFenceWait(&surface.eofFence, cpuWaitContext_,
+                               kFenceWaitTimeoutUs) != NvSciError_Success) {
+            std::cerr << "NvMediaEncoder: IJPE FenceWait (reuse) failed"
+                      << std::endl;
+            return false;
+        }
+        NvSciSyncFenceClear(&surface.eofFence);
+        surface.pending = false;
+    }
+
+    // Pre-fence flow (same as IEP): generate -> insert -> signal -> upload.
+    NvSciSyncFence preFence{};
+    if (NvSciSyncObjGenerateFence(preSyncObj_, &preFence) != NvSciError_Success) {
+        std::cerr << "NvMediaEncoder: IJPE GenerateFence failed" << std::endl;
+        return false;
+    }
+    if (NvMediaIJPEInsertPreNvSciSyncFence(ijpe_, &preFence) !=
+        NVMEDIA_STATUS_OK) {
+        std::cerr << "NvMediaEncoder: NvMediaIJPEInsertPreNvSciSyncFence failed"
+                  << std::endl;
+        NvSciSyncFenceClear(&preFence);
+        return false;
+    }
+    NvSciError sigErr = NvSciSyncObjSignal(preSyncObj_);
+    if (sigErr != NvSciError_Success) {
+        std::cerr << "NvMediaEncoder: IJPE Signal failed: 0x" << std::hex
+                  << sigErr << std::dec << std::endl;
+    }
+
+    // 3-plane planar YUV420 upload (same convention as the IEP path: this DRIVE
+    // build's PutPixels rejects 2-plane semi-planar for a multi-plane surface).
+    const uint32_t cw = w >> 1;
+    const uint32_t ch = h >> 1;
+    const size_t yBytes = static_cast<size_t>(w) * h;
+    const size_t cBytes = static_cast<size_t>(cw) * ch;
+    std::vector<uint8_t> yPlane(yBytes, 0);
+    std::vector<uint8_t> uPlane(cBytes, 0);
+    std::vector<uint8_t> vPlane(cBytes, 0);
+    std::memcpy(yPlane.data(), in.data, yBytes);
+    if (in.format == PixelFormat::I420) {
+        std::memcpy(uPlane.data(), in.data + yBytes, cBytes);
+        std::memcpy(vPlane.data(), in.data + yBytes + cBytes, cBytes);
+    } else {
+        const uint8_t* srcUV = in.data + yBytes;
+        for (uint32_t r = 0; r < ch; ++r) {
+            const uint8_t* uvRow = srcUV + static_cast<size_t>(r) * w;
+            uint8_t* uRow = uPlane.data() + static_cast<size_t>(r) * cw;
+            uint8_t* vRow = vPlane.data() + static_cast<size_t>(r) * cw;
+            for (uint32_t c = 0; c < cw; ++c) {
+                uRow[c] = uvRow[2 * c];
+                vRow[c] = uvRow[2 * c + 1];
+            }
+        }
+    }
+
+    const void* srcPtrs[3] = {yPlane.data(), uPlane.data(), vPlane.data()};
+    const uint32_t srcSizes[3] = {static_cast<uint32_t>(yBytes),
+                                  static_cast<uint32_t>(cBytes),
+                                  static_cast<uint32_t>(cBytes)};
+    const uint32_t srcPitches[3] = {w, cw, cw};
+    NvSciError putErr = NvSciBufObjPutPixels(surface.buf, nullptr, srcPtrs,
+                                             srcSizes, srcPitches);
+    if (putErr != NvSciError_Success) {
+        std::cerr << "NvMediaEncoder: IJPE PutPixels failed: 0x" << std::hex
+                  << putErr << std::dec << std::endl;
+        NvSciSyncFenceClear(&preFence);
+        return false;
+    }
+
+    NvMediaStatus status = NvMediaIJPEFeedFrame(ijpe_, surface.buf,
+                                                jpegQuality_, jpegInstance_);
+    NvSciSyncFenceClear(&preFence);
+    if (status == NVMEDIA_STATUS_INSUFFICIENT_BUFFERING) {
+        if (!DrainJpeg()) {
+            return false;
+        }
+        status = NvMediaIJPEFeedFrame(ijpe_, surface.buf, jpegQuality_,
+                                      jpegInstance_);
+    }
+    if (status != NVMEDIA_STATUS_OK) {
+        std::cerr << "NvMediaEncoder: NvMediaIJPEFeedFrame failed: 0x"
+                  << std::hex << status << std::dec << std::endl;
+        return false;
+    }
+    ++frameIndex_;
+
+    if (NvMediaIJPEGetEOFNvSciSyncFence(ijpe_, eofSyncObj_,
+                                        &surface.eofFence) != NVMEDIA_STATUS_OK) {
+        std::cerr << "NvMediaEncoder: NvMediaIJPEGetEOFNvSciSyncFence failed"
+                  << std::endl;
+        return false;
+    }
+    surface.pending = true;
+    if (NvSciSyncFenceWait(&surface.eofFence, cpuWaitContext_,
+                           kFenceWaitTimeoutUs) != NvSciError_Success) {
+        std::cerr << "NvMediaEncoder: IJPE FenceWait (EOF) failed" << std::endl;
+        return false;
+    }
+    NvSciSyncFenceClear(&surface.eofFence);
+    surface.pending = false;
+
+    return DrainJpeg();
+}
+
 bool NvMediaEncoder::Drain() {
     uint32_t bytesAvailable = 0;
     NvMediaStatus s = NvMediaIEPBitsAvailable(
@@ -916,6 +1400,8 @@ void NvMediaEncoder::Finalize() {
         if (surface.buf) {
             if (encoder_) {
                 NvMediaIEPUnregisterNvSciBufObj(encoder_, surface.buf);
+            } else if (ijpe_) {
+                NvMediaIJPEUnregisterNvSciBufObj(ijpe_, surface.buf);
             }
             NvSciBufObjFree(surface.buf);
             surface.buf = nullptr;
@@ -945,6 +1431,20 @@ void NvMediaEncoder::Finalize() {
         }
         NvMediaIEPDestroy(encoder_);
         encoder_ = nullptr;
+    }
+    if (ijpe_) {
+        if (preSyncObj_) {
+            NvMediaIJPEUnregisterNvSciSyncObj(ijpe_, preSyncObj_);
+            NvSciSyncObjFree(preSyncObj_);
+            preSyncObj_ = nullptr;
+        }
+        if (eofSyncObj_) {
+            NvMediaIJPEUnregisterNvSciSyncObj(ijpe_, eofSyncObj_);
+            NvSciSyncObjFree(eofSyncObj_);
+            eofSyncObj_ = nullptr;
+        }
+        NvMediaIJPEDestroy(ijpe_);
+        ijpe_ = nullptr;
     }
     if (cpuWaitContext_) {
         NvSciSyncCpuWaitContextFree(cpuWaitContext_);

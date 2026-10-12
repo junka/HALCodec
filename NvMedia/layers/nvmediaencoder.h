@@ -11,6 +11,7 @@
 #include "frame.h"
 
 #include "nvmedia_iep.h"
+#include "nvmedia_ijpe.h"
 #include "nvmedia_common_encode.h"
 
 namespace halcodec {
@@ -45,6 +46,17 @@ private:
     bool SetupSync();
     bool Drain();
 
+    // --- JPEG (IJPE) path ---
+    // JPEG is image-level (no rate control / GOP / picture params): each fed
+    // surface becomes one independent JPEG bitstream. The NvSci plumbing mirrors
+    // the IEP path (reconcile IJPE's buf-attr list against a PitchLinear YUV420
+    // surface description, register EOF + Pre sync objs) but the per-frame call
+    // is NvMediaIJPEFeedFrame(buf, quality) + NvMediaIJPEGetBits.
+    bool SetupJpeg(const CodecParams& params);
+    bool FillJpegFrame(const CodecFrame& in);
+    bool DrainJpeg();
+
+
     // Zero-copy fast path: encode a caller-owned device frame directly. The
     // external NvSciBufObj (produced by e.g. the NvMedia zero-copy decoder) is
     // registered with IEP on first use and fed without the CPU stage buffer /
@@ -57,10 +69,18 @@ private:
 
     NvMediaIEP* encoder_ = nullptr;
     NvMediaIEPType iepType_ = NVMEDIA_IMAGE_ENCODE_H264;
-    // The unified codec name ("h264"/"hevc"). Drives the per-codec init params
-    // struct, the SetConfiguration config struct, and the per-frame pic params
-    // struct — NvMediaIEP uses a distinct triple per codec.
+    // The unified codec name ("h264"/"hevc"/"jpeg"). Drives the per-codec init
+    // params struct, the SetConfiguration config struct, and the per-frame pic
+    // params struct — NvMediaIEP uses a distinct triple per codec. "jpeg" routes
+    // to the IJPE image-JPEG engine instead of IEP.
     std::string codec_ = "h264";
+    // IJPE (image JPEG encoder) handle + instance. Used only when codec_ ==
+    // "jpeg"; encoder_ stays null in that case.
+    NvMediaIJPE* ijpe_ = nullptr;
+    NvMediaJPEGInstanceId jpegInstance_ = NVMEDIA_JPEG_INSTANCE_0;
+    uint8_t jpegQuality_ = 75;        // 1..100, passed to NvMediaIJPEFeedFrame
+    uint32_t jpegMaxBits_ = 0;        // maxBitstreamBytes handed to IJPECreate
+
     NvMediaEncoderInstanceId instanceId_ = NVMEDIA_ENCODER_INSTANCE_0;
     NvSciBufModule bufModule_ = nullptr;
     NvSciSyncModule syncModule_ = nullptr;

@@ -22,6 +22,8 @@ target_compile_definitions(nvmedia_layers PRIVATE
 # Full data-path library set, mirroring the sample link lines:
 #   ide:  -lnvscibuf -lnvscisync -lnvmedia_ide_parser -lnvmedia_ide_sci -lz -lm
 #   iep:  -lnvscibuf -lnvscisync -lnvmedia_iep_sci
+#   ijpe: -lnvscibuf -lnvscisync -lnvmedia_ijpe_sci   (image JPEG encode)
+#   ijpd: -lnvscibuf -lnvscisync -lnvmedia_ijpd_sci   (image JPEG decode)
 # Link by absolute path rather than -l + link_directories(): the latter is
 # directory-scoped and silently emits no -L when the path is not under a
 # CMAKE_FIND_ROOT_PATH (it breaks cross-compile). Absolute paths always work.
@@ -35,6 +37,8 @@ target_link_libraries(nvmedia_layers PUBLIC
         ${NVMEDIA_SDK_DIR}/lib-target/libnvmedia_ide_parser.so
         ${NVMEDIA_SDK_DIR}/lib-target/libnvmedia_ide_sci.so
         ${NVMEDIA_SDK_DIR}/lib-target/libnvmedia_iep_sci.so
+        ${NVMEDIA_SDK_DIR}/lib-target/libnvmedia_ijpe_sci.so
+        ${NVMEDIA_SDK_DIR}/lib-target/libnvmedia_ijpd_sci.so
         ${CMAKE_DL_LIBS}
         -lz
         -lm)
