@@ -131,6 +131,10 @@ int main(int argc, char** argv) {
         codec = NVMEDIA_VIDEO_CODEC_VP9;
     } else if (!std::strcmp(mode, "av1")) {
         codec = NVMEDIA_VIDEO_CODEC_AV1;
+    } else if (!std::strcmp(mode, "vp8")) {
+        codec = NVMEDIA_VIDEO_CODEC_VP8;
+    } else if (!std::strcmp(mode, "vc1")) {
+        codec = NVMEDIA_VIDEO_CODEC_VC1;
     } else if (!std::strcmp(mode, "raw")) {
         rawMode = true;
         if (argc < 4) {

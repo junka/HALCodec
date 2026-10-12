@@ -31,8 +31,17 @@ NvMediaVideoCodec MapCodec(const std::string& codec) {
     if (codec == "vp9") {
         return NVMEDIA_VIDEO_CODEC_VP9;
     }
+    if (codec == "vp8") {
+        return NVMEDIA_VIDEO_CODEC_VP8;
+    }
     if (codec == "mpeg2") {
         return NVMEDIA_VIDEO_CODEC_MPEG2;
+    }
+    if (codec == "mpeg4") {
+        return NVMEDIA_VIDEO_CODEC_MPEG4;
+    }
+    if (codec == "vc1") {
+        return NVMEDIA_VIDEO_CODEC_VC1;
     }
     return static_cast<NvMediaVideoCodec>(-1);
 }
@@ -217,7 +226,8 @@ bool NvMediaDecoder::Initialize(const CodecParams& params) {
     // For file mode this means demuxing an IVF container; for feed mode the
     // caller (hal_dec's IvfPayloadReader) already hands whole frames.
     feedCompletePicture_ = (codec_ == NVMEDIA_VIDEO_CODEC_VP9 ||
-                            codec_ == NVMEDIA_VIDEO_CODEC_AV1);
+                            codec_ == NVMEDIA_VIDEO_CODEC_AV1 ||
+                            codec_ == NVMEDIA_VIDEO_CODEC_VP8);
 
     NvMediaParserParams parserParams = {};
     parserParams.pClient =
@@ -583,6 +593,62 @@ void NvMediaDecoder::UpdateReferenceFrames(NvMediaParserPictureData* pd) {
             info->LastReference = refs[0] ? refs[0]->buf : nullptr;
             info->GoldenReference = refs[1] ? refs[1]->buf : nullptr;
             info->AltReference = refs[2] ? refs[2]->buf : nullptr;
+            break;
+        }
+        case NVMEDIA_VIDEO_CODEC_VP8: {
+            // VP8 mirrors VP9's three reference surfaces (Last/Golden/Alt) but
+            // carries no coded-dim fields, so only the pointer translation and
+            // pre-fence are needed.
+            NvMediaPictureInfoVP8* info =
+                reinterpret_cast<NvMediaPictureInfoVP8*>(
+                    &pd->CodecSpecificInfo.vp8);
+            Surface* refs[3] = {
+                reinterpret_cast<Surface*>(info->LastReference),
+                reinterpret_cast<Surface*>(info->GoldenReference),
+                reinterpret_cast<Surface*>(info->AltReference),
+            };
+            for (Surface* slot : refs) {
+                if (slot) {
+                    NvMediaIDEInsertPreNvSciSyncFence(decoder_, &slot->fence);
+                }
+            }
+            info->LastReference = refs[0] ? refs[0]->buf : nullptr;
+            info->GoldenReference = refs[1] ? refs[1]->buf : nullptr;
+            info->AltReference = refs[2] ? refs[2]->buf : nullptr;
+            break;
+        }
+        case NVMEDIA_VIDEO_CODEC_MPEG2: {
+            // MPEG-1/2 carry forward/backward reference surfaces that the
+            // renderer dereferences; translate them to NvSciBufObj + pre-fence.
+            NvMediaPictureInfoMPEG1Or2* info =
+                reinterpret_cast<NvMediaPictureInfoMPEG1Or2*>(
+                    &pd->CodecSpecificInfo.mpeg2);
+            Surface* fwd = reinterpret_cast<Surface*>(info->forward_reference);
+            Surface* bwd = reinterpret_cast<Surface*>(info->backward_reference);
+            if (fwd) {
+                NvMediaIDEInsertPreNvSciSyncFence(decoder_, &fwd->fence);
+                info->forward_reference = fwd->buf;
+            }
+            if (bwd) {
+                NvMediaIDEInsertPreNvSciSyncFence(decoder_, &bwd->fence);
+                info->backward_reference = bwd->buf;
+            }
+            break;
+        }
+        case NVMEDIA_VIDEO_CODEC_MPEG4: {
+            NvMediaPictureInfoMPEG4Part2* info =
+                reinterpret_cast<NvMediaPictureInfoMPEG4Part2*>(
+                    &pd->CodecSpecificInfo.mpeg4);
+            Surface* fwd = reinterpret_cast<Surface*>(info->forward_reference);
+            Surface* bwd = reinterpret_cast<Surface*>(info->backward_reference);
+            if (fwd) {
+                NvMediaIDEInsertPreNvSciSyncFence(decoder_, &fwd->fence);
+                info->forward_reference = fwd->buf;
+            }
+            if (bwd) {
+                NvMediaIDEInsertPreNvSciSyncFence(decoder_, &bwd->fence);
+                info->backward_reference = bwd->buf;
+            }
             break;
         }
         case NVMEDIA_VIDEO_CODEC_AV1: {
