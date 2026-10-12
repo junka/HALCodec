@@ -79,6 +79,12 @@ private:
     // fully exhausted (EOF read + NvMediaParserFlush). Returns frames queued.
     int PumpNext();
 
+    // Feed one fread buffer to the parser. Annex-B streams (h264/hevc/mpeg2)
+    // go in as a single raw chunk; IVF-wrapped VP9/AV1 are demuxed here and
+    // each frame is fed as a complete-picture packet. Returns false on parse
+    // error.
+    bool FeedFileChunk(const uint8_t* data, size_t size);
+
     bool SaveSurfaceAttrs(NvSciBufAttrList list, uint32_t w, uint32_t h);
 
     // Translate pool-slot pointers in the parser picture info into the
@@ -126,6 +132,16 @@ private:
     // the byte stream and pushes it through FillInput() (the NVDEC feed-mode
     // contract). No file is read and GetFrame() flushes the parser itself.
     bool feedMode_ = false;
+    // IVF container demuxer for file-mode VP9/AV1 input. NvMediaParser cannot
+    // self-split a raw VP9/AV1 frame stream (no start codes), so an IVF input
+    // is demuxed here and each frame is fed as its own packet with
+    // bCompletePicture=1. Annex-B inputs (h264/hevc/mpeg2) keep the raw
+    // chunk feed below. -1 = not sniffed yet, 0 = not IVF, >0 = header size.
+    int ivfHeaderSize_ = -1;
+    uint32_t ivfPayloadLeft_ = 0;       // bytes remaining in the current frame
+    uint8_t ivfRecord_[12];             // 4-byte LE size + 8-byte pts
+    uint32_t ivfRecordLen_ = 0;         // bytes filled into ivfRecord_
+    bool feedCompletePicture_ = false;  // set bCompletePicture (vp9/av1)
     bool inputEof_ = false;    // fread consumed the whole file (or caller EOF)
     bool flushSent_ = false;   // EOS packet + NvMediaParserFlush sent
     bool streamDone_ = false;  // input exhausted AND parser flushed AND queue empty

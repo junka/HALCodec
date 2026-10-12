@@ -211,6 +211,14 @@ bool NvMediaDecoder::Initialize(const CodecParams& params) {
         }
     }
 
+    // VP9/AV1 raw elementary streams carry no start codes, so NvMediaParser
+    // cannot split frames out of a continuous byte feed. Such inputs must be
+    // packetized (one frame per NvMediaParserParse call with bCompletePicture=1).
+    // For file mode this means demuxing an IVF container; for feed mode the
+    // caller (hal_dec's IvfPayloadReader) already hands whole frames.
+    feedCompletePicture_ = (codec_ == NVMEDIA_VIDEO_CODEC_VP9 ||
+                            codec_ == NVMEDIA_VIDEO_CODEC_AV1);
+
     NvMediaParserParams parserParams = {};
     parserParams.pClient =
         const_cast<NvMediaParserClientCb*>(GetParserCallbacks());
@@ -577,6 +585,25 @@ void NvMediaDecoder::UpdateReferenceFrames(NvMediaParserPictureData* pd) {
             info->AltReference = refs[2] ? refs[2]->buf : nullptr;
             break;
         }
+        case NVMEDIA_VIDEO_CODEC_AV1: {
+            // Same pool-slot -> NvSciBufObj translation as VP9: the parser
+            // carries NvMediaRefSurface* (our Surface*) in RefPics[8], and
+            // NvMediaIDEDecoderRender needs the real NvSciBufObj + a pre-fence
+            // on each referenced surface. Without this the renderer
+            // dereferences the raw slot pointer and aborts.
+            NvMediaPictureInfoAV1* info =
+                reinterpret_cast<NvMediaPictureInfoAV1*>(
+                    &pd->CodecSpecificInfo.av1);
+            for (uint32_t i = 0; i < 8; ++i) {
+                Surface* slot =
+                    reinterpret_cast<Surface*>(info->RefPics[i]);
+                if (slot) {
+                    NvMediaIDEInsertPreNvSciSyncFence(decoder_, &slot->fence);
+                    info->RefPics[i] = slot->buf;
+                }
+            }
+            break;
+        }
         default:
             break;
     }
@@ -762,6 +789,10 @@ int NvMediaDecoder::FillInput(const uint8_t* data, size_t size) {
     NvMediaBitStreamPkt packet = {};
     packet.pByteStream = data;
     packet.uDataLength = static_cast<uint32_t>(size);
+    // VP9/AV1 have no start codes: each FillInput span must be a whole frame
+    // (hal_dec's IvfPayloadReader guarantees this for IVF input), so tell the
+    // parser the packet is a complete picture.
+    packet.bCompletePicture = feedCompletePicture_ ? 1 : 0;
     if (NvMediaParserParse(parser_, &packet) != NVMEDIA_STATUS_OK) {
         error_ = true;
         return -1;
@@ -799,16 +830,11 @@ int NvMediaDecoder::PumpNext() {
                                     inputFile_);
             if (got == 0) {
                 inputEof_ = true;
-            } else {
-                NvMediaBitStreamPkt packet = {};
-                packet.pByteStream = chunk_.data();
-                packet.uDataLength = static_cast<uint32_t>(got);
-                if (NvMediaParserParse(parser_, &packet) != NVMEDIA_STATUS_OK) {
-                    std::cerr << "NvMediaDecoder: NvMediaParserParse failed"
-                              << std::endl;
-                    error_ = true;
-                    return 0;
-                }
+            } else if (!FeedFileChunk(chunk_.data(), got)) {
+                std::cerr << "NvMediaDecoder: NvMediaParserParse failed"
+                          << std::endl;
+                error_ = true;
+                return 0;
             }
             continue;
         }
@@ -824,6 +850,80 @@ int NvMediaDecoder::PumpNext() {
         streamDone_ = true;
     }
     return static_cast<int>(outQueue_.size());
+}
+
+// Feed one read buffer of file input to the parser. For Annex-B streams
+// (h264/hevc/mpeg2) the whole chunk goes in as one packet — the parser splits
+// on start codes. For IVF-wrapped VP9/AV1 the container is demuxed here and
+// each frame is fed as its own packet with bCompletePicture=1, because those
+// codecs carry no frame boundary the parser can recover from a raw byte feed.
+// Returns false on a parse error.
+bool NvMediaDecoder::FeedFileChunk(const uint8_t* data, size_t size) {
+    // Sniff IVF once on the first chunk (DKIF signature + declared header
+    // length). A non-IVF input leaves ivfHeaderSize_ at 0 and falls through to
+    // the raw chunk feed.
+    if (ivfHeaderSize_ < 0) {
+        ivfHeaderSize_ = 0;
+        if (size >= 32 && std::memcmp(data, "DKIF", 4) == 0) {
+            const int hs = static_cast<int>(data[6]) |
+                           (static_cast<int>(data[7]) << 8);
+            if (hs >= 32 && hs <= static_cast<int>(size)) {
+                ivfHeaderSize_ = hs;
+            }
+        }
+    }
+
+    if (ivfHeaderSize_ == 0) {
+        // Raw Annex-B / elementary: feed the whole chunk at once.
+        NvMediaBitStreamPkt packet = {};
+        packet.pByteStream = data;
+        packet.uDataLength = static_cast<uint32_t>(size);
+        return NvMediaParserParse(parser_, &packet) == NVMEDIA_STATUS_OK;
+    }
+
+    // IVF demux: skip the file header on the first chunk, then walk frame
+    // records (12-byte: 4-byte LE payload size + 8-byte pts) feeding each
+    // frame payload as one complete-picture packet. Both header and records
+    // can straddle read boundaries, which the carried state is for.
+    size_t pos = 0;
+    if (ivfHeaderSize_ > 0) {
+        const int drop = ivfHeaderSize_ < static_cast<int>(size)
+                             ? ivfHeaderSize_
+                             : static_cast<int>(size);
+        ivfHeaderSize_ -= drop;
+        pos = static_cast<size_t>(drop);
+    }
+    while (pos < size) {
+        if (ivfPayloadLeft_ == 0) {
+            // Accumulate the 12-byte frame record.
+            while (pos < size && ivfRecordLen_ < sizeof(ivfRecord_)) {
+                ivfRecord_[ivfRecordLen_++] = data[pos++];
+            }
+            if (ivfRecordLen_ < sizeof(ivfRecord_)) {
+                return true;  // record straddles the next read
+            }
+            ivfPayloadLeft_ = static_cast<uint32_t>(ivfRecord_[0]) |
+                (static_cast<uint32_t>(ivfRecord_[1]) << 8) |
+                (static_cast<uint32_t>(ivfRecord_[2]) << 16) |
+                (static_cast<uint32_t>(ivfRecord_[3]) << 24);
+            ivfRecordLen_ = 0;
+            if (ivfPayloadLeft_ == 0) {
+                continue;
+            }
+        }
+        const size_t n = ivfPayloadLeft_ < size - pos ? ivfPayloadLeft_
+                                                      : size - pos;
+        NvMediaBitStreamPkt packet = {};
+        packet.pByteStream = data + pos;
+        packet.uDataLength = static_cast<uint32_t>(n);
+        packet.bCompletePicture = 1;
+        if (NvMediaParserParse(parser_, &packet) != NVMEDIA_STATUS_OK) {
+            return false;
+        }
+        pos += n;
+        ivfPayloadLeft_ -= static_cast<uint32_t>(n);
+    }
+    return true;
 }
 
 bool NvMediaDecoder::GetFrame(CodecFrame& out) {
