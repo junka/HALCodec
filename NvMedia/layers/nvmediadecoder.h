@@ -97,6 +97,16 @@ private:
     // error.
     bool FeedFileChunk(const uint8_t* data, size_t size);
 
+    // VC1 Simple/Main has no start codes and no in-band sequence header, so
+    // NvMediaParser cannot recover frames from a raw byte feed and cannot
+    // self-detect the sequence. An RCV container supplies both: the sequence
+    // header is parsed out of the file header and handed to NvMediaParserCreate
+    // via pExternalSeqInfo, and the per-frame length-prefixed records are fed
+    // as discrete complete-picture packets. Mirrors videodemo.c
+    // StreamVC1SimpleProfile + ParseRCVHeader. Returns false on a malformed
+    // header; `consumed` is the header byte count to skip before frame records.
+    bool ParseRcvHeader(const uint8_t* data, size_t size, size_t& consumed);
+
     bool SaveSurfaceAttrs(NvSciBufAttrList list, uint32_t w, uint32_t h);
 
     // Translate pool-slot pointers in the parser picture info into the
@@ -161,6 +171,18 @@ private:
     uint8_t ivfRecord_[12];             // 4-byte LE size + 8-byte pts
     uint32_t ivfRecordLen_ = 0;         // bytes filled into ivfRecord_
     bool feedCompletePicture_ = false;  // set bCompletePicture (vp9/av1)
+    // VC1 SP/MP RCV container demuxer. -1 = not sniffed yet, 0 = not RCV,
+    // >0 = file-header byte count (already skipped before frame records).
+    int rcvHeaderSize_ = -1;
+    uint32_t rcvFrameLeft_ = 0;       // payload bytes remaining in current frame
+    bool rcvFrameHeaderRead_ = false; // 8-byte (size+pts) record parsed for cur frame
+    uint8_t rcvRecord_[8];            // 4-byte LE size + 4-byte LE pts
+    uint32_t rcvRecordLen_ = 0;       // bytes filled into rcvRecord_
+    bool rcvSkippedFrame_ = false;    // frameSize==0 → feed a 1-byte 0x00
+    // External SeqInfo built from the RCV header; kept alive for the parser's
+    // lifetime because pExternalSeqInfo is a non-owning pointer read at create.
+    NvMediaParserSeqInfo rcvSeqInfo_{};
+    bool rcvExternalSeq_ = false;
     bool inputEof_ = false;    // fread consumed the whole file (or caller EOF)
     bool flushSent_ = false;   // EOS packet + NvMediaParserFlush sent
     bool streamDone_ = false;  // input exhausted AND parser flushed AND queue empty

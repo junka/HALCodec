@@ -241,6 +241,52 @@ bool NvMediaDecoder::Initialize(const CodecParams& params) {
         }
     }
 
+    // VC1 Simple/Main has no start codes and no in-band sequence header, so
+    // NvMediaParser cannot self-split a raw byte feed nor self-detect the
+    // sequence. An RCV container carries both the out-of-band sequence header
+    // (handed to NvMediaParserCreate via pExternalSeqInfo) and length-prefixed
+    // per-frame records. File mode parses the RCV header here and creates the
+    // parser with the external SeqInfo; feed mode is not supported for VC1
+    // (the caller would have to supply the SeqInfo separately).
+    if (codec_ == NVMEDIA_VIDEO_CODEC_VC1) {
+        if (feedMode_) {
+            std::cerr << "NvMediaDecoder: VC1 SP/MP needs an .rcv file input "
+                         "(no feed-mode SeqInfo)" << std::endl;
+            return false;
+        }
+        // The RCV header is small (≤ ~44 bytes for SP/MP); read a buffer that
+        // always covers it plus the first frame record.
+        uint8_t hdr[256];
+        size_t got = std::fread(hdr, 1, sizeof(hdr), inputFile_);
+        size_t consumed = 0;
+        if (got < 8 || !ParseRcvHeader(hdr, got, consumed)) {
+            std::cerr << "NvMediaDecoder: VC1 input is not a valid RCV file "
+                         "(SP/MP needs .rcv; Advanced start-code streams are "
+                         "not supported)" << std::endl;
+            return false;
+        }
+        // Reposition the file just past the RCV header so PumpNext's fread
+        // loop reads frame records.
+        std::fseek(inputFile_, static_cast<long>(consumed), SEEK_SET);
+        feedCompletePicture_ = true;
+        NvMediaParserParams parserParams = {};
+        parserParams.pClient =
+            const_cast<NvMediaParserClientCb*>(GetParserCallbacks());
+        parserParams.pClientCtx = this;
+        parserParams.uReferenceClockRate = 0;
+        parserParams.uErrorThreshold = 50;
+        parserParams.eCodec = codec_;
+        parserParams.pExternalSeqInfo = &rcvSeqInfo_;
+        parser_ = NvMediaParserCreate(&parserParams);
+        if (!parser_) {
+            std::cerr << "NvMediaDecoder: NvMediaParserCreate(VC1) failed"
+                      << std::endl;
+            return false;
+        }
+        chunk_.resize(kFeedChunkSize);
+        return true;
+    }
+
     // VP9/AV1 raw elementary streams carry no start codes, so NvMediaParser
     // cannot split frames out of a continuous byte feed. Such inputs must be
     // packetized (one frame per NvMediaParserParse call with bCompletePicture=1).
@@ -672,6 +718,30 @@ void NvMediaDecoder::UpdateReferenceFrames(NvMediaParserPictureData* pd) {
             }
             break;
         }
+        case NVMEDIA_VIDEO_CODEC_VC1: {
+            // VC1 carries forward/backward references (P/B frames) plus a
+            // range_mapped surface; translate all three pool-slot pointers to
+            // NvSciBufObj and pre-fence the motion refs. range_mapped takes no
+            // fence (mirrors videodemo.c UpdateNvMediaSurfacePictureInfoVC1).
+            NvMediaPictureInfoVC1* info =
+                reinterpret_cast<NvMediaPictureInfoVC1*>(
+                    &pd->CodecSpecificInfo.vc1);
+            Surface* fwd = reinterpret_cast<Surface*>(info->forward_reference);
+            Surface* bwd = reinterpret_cast<Surface*>(info->backward_reference);
+            Surface* rm = reinterpret_cast<Surface*>(info->range_mapped);
+            if (fwd) {
+                NvMediaIDEInsertPreNvSciSyncFence(decoder_, &fwd->fence);
+                info->forward_reference = fwd->buf;
+            }
+            if (bwd) {
+                NvMediaIDEInsertPreNvSciSyncFence(decoder_, &bwd->fence);
+                info->backward_reference = bwd->buf;
+            }
+            if (rm) {
+                info->range_mapped = rm->buf;
+            }
+            break;
+        }
         case NVMEDIA_VIDEO_CODEC_AV1: {
             // Same pool-slot -> NvSciBufObj translation as VP9: the parser
             // carries NvMediaRefSurface* (our Surface*) in RefPics[8], and
@@ -1004,6 +1074,111 @@ int NvMediaDecoder::PumpNext() {
     return static_cast<int>(outQueue_.size());
 }
 
+// Parse a VC1 Simple/Main RCV file header (the format NVIDIA's videodemo.c
+// ParseRCVHeader consumes) into rcvSeqInfo_, so NvMediaParserCreate can be
+// given the sequence header out-of-band via pExternalSeqInfo. VC1 SP/MP raw
+// frame bitstreams carry no start codes and no in-band sequence header, so
+// the parser cannot self-detect the sequence — RCV supplies both. Sets
+// rcvHeaderSize_ and rcvExternalSeq_ on success. `consumed` reports the header
+// byte count to skip before the per-frame records begin.
+bool NvMediaDecoder::ParseRcvHeader(const uint8_t* data, size_t size,
+                                    size_t& consumed) {
+    rcvHeaderSize_ = 0;  // default: not RCV
+    if (size < 20) {
+        return false;
+    }
+    // 3-byte LE numFrames, 1-byte type (0x85 V1, 0xC5 V2 extended).
+    uint32_t numFrames = static_cast<uint32_t>(data[0]) |
+        (static_cast<uint32_t>(data[1]) << 8) |
+        (static_cast<uint32_t>(data[2]) << 16);
+    if (numFrames == 0) {
+        return false;
+    }
+    uint8_t type = data[3];
+    constexpr uint8_t kRcvVc1Type = 0x85;
+    constexpr uint8_t kRcvV2Mask = 0x40;
+    if ((type & ~kRcvV2Mask) != kRcvVc1Type) {
+        return false;
+    }
+    size_t cur = 4;
+    // 4-byte LE cbSeqHdr (SP/MP is 4; the sequence header is the ASF extradata).
+    uint32_t cbSeqHdr = static_cast<uint32_t>(data[cur]) |
+        (static_cast<uint32_t>(data[cur + 1]) << 8) |
+        (static_cast<uint32_t>(data[cur + 2]) << 16) |
+        (static_cast<uint32_t>(data[cur + 3]) << 24);
+    cur += 4;
+    if (cbSeqHdr == 0 || cbSeqHdr > 32 || cur + cbSeqHdr > size) {
+        return false;
+    }
+    // VC1 profile lives in the top 2 bits of the sequence header's first byte.
+    uint8_t profile = data[cur] >> 6;
+    if (profile >= 2) {
+        // High profile RCV is not supported (Advanced needs the elementary
+        // stream path, not RCV).
+        std::cerr << "NvMediaDecoder: RCV is VC1 Advanced (profile " << profile
+                  << "); only Simple/Main supported" << std::endl;
+        return false;
+    }
+    std::memset(&rcvSeqInfo_, 0, sizeof(rcvSeqInfo_));
+    rcvSeqInfo_.eCodec = NVMEDIA_VIDEO_CODEC_VC1;
+    rcvSeqInfo_.bProgSeq = true;
+    rcvSeqInfo_.uSequenceHeaderSize = cbSeqHdr;
+    std::memcpy(rcvSeqInfo_.SequenceHeaderData, data + cur, cbSeqHdr);
+    cur += cbSeqHdr;
+    // STRUCT_A: 4-byte LE height, 4-byte LE width, 4-byte 0x0000000C sentinel.
+    if (cur + 12 > size) {
+        return false;
+    }
+    auto rd32 = [&](size_t off) {
+        return static_cast<uint32_t>(data[off]) |
+            (static_cast<uint32_t>(data[off + 1]) << 8) |
+            (static_cast<uint32_t>(data[off + 2]) << 16) |
+            (static_cast<uint32_t>(data[off + 3]) << 24);
+    };
+    uint32_t height = rd32(cur);
+    uint32_t width = rd32(cur + 4);
+    uint32_t sentinel = rd32(cur + 8);
+    cur += 12;
+    if (sentinel != 0x0000000C || height <= 31 || height > 2048 - 32 ||
+        width <= 15 || width > 4096 - 16) {
+        return false;
+    }
+    // STRUCT_B: 4-byte (level<<29 | cbr<<28 | hrd), 4-byte bitrate, 4-byte fps.
+    if (cur + 12 > size) {
+        return false;
+    }
+    uint32_t structB = rd32(cur);
+    uint32_t level = structB >> 29;
+    if (level > 0x4) {
+        return false;
+    }
+    uint32_t bitrate = rd32(cur + 4);
+    uint32_t fps = rd32(cur + 8);
+    cur += 12;
+
+    rcvSeqInfo_.uDisplayWidth = static_cast<uint16_t>(width);
+    rcvSeqInfo_.uDisplayHeight = static_cast<uint16_t>(height);
+    rcvSeqInfo_.uCodedWidth =
+        static_cast<uint16_t>((width + 15) & ~15U);
+    rcvSeqInfo_.uCodedHeight =
+        static_cast<uint16_t>((height + 15) & ~15U);
+    rcvSeqInfo_.eChromaFormat = NvMediaParserChromaFormat_420;  // 4:2:0
+    rcvSeqInfo_.uBitrate = bitrate;
+    rcvSeqInfo_.fFrameRate = (fps && fps != 0xFFFFFFFF) ? static_cast<float>(fps)
+                                                        : 0.0;
+    rcvSeqInfo_.uDARWidth = static_cast<uint16_t>(width);
+    rcvSeqInfo_.uDARHeight = static_cast<uint16_t>(height);
+    rcvSeqInfo_.eVideoFormat = NvMVideoFormat_Unspecified;
+    rcvSeqInfo_.eColorPrimaries = NvMColorPrimaries_Unspecified;
+    rcvSeqInfo_.eTransferCharacteristics = NvMTransferCharacteristics_Unspecified;
+    rcvSeqInfo_.eMatrixCoefficients = NvMMatrixCoeffs_Unspecified;
+
+    rcvHeaderSize_ = static_cast<int>(cur);
+    rcvExternalSeq_ = true;
+    consumed = cur;
+    return true;
+}
+
 // Feed one read buffer of file input to the parser. For Annex-B streams
 // (h264/hevc/mpeg2) the whole chunk goes in as one packet — the parser splits
 // on start codes. For IVF-wrapped VP9/AV1 the container is demuxed here and
@@ -1011,6 +1186,64 @@ int NvMediaDecoder::PumpNext() {
 // codecs carry no frame boundary the parser can recover from a raw byte feed.
 // Returns false on a parse error.
 bool NvMediaDecoder::FeedFileChunk(const uint8_t* data, size_t size) {
+    // VC1 SP/MP RCV demux: the file header was parsed in Initialize and the
+    // file repositioned past it, so `data` here is a stream of frame records
+    // (4-byte LE size + 4-byte LE pts + payload). Feed each frame as its own
+    // complete-picture packet — VC1 has no start codes the parser can split.
+    // A frameSize of 0 is a skipped P-frame: feed a single 0x00 byte (per
+    // videodemo.c StreamVC1SimpleProfile).
+    if (codec_ == NVMEDIA_VIDEO_CODEC_VC1 && rcvHeaderSize_ > 0) {
+        size_t pos = 0;
+        while (pos < size) {
+            if (!rcvFrameHeaderRead_) {
+                // Accumulate the 8-byte frame record.
+                while (pos < size && rcvRecordLen_ < sizeof(rcvRecord_)) {
+                    rcvRecord_[rcvRecordLen_++] = data[pos++];
+                }
+                if (rcvRecordLen_ < sizeof(rcvRecord_)) {
+                    return true;  // record straddles the next read
+                }
+                uint32_t frameSize = static_cast<uint32_t>(rcvRecord_[0]) |
+                    (static_cast<uint32_t>(rcvRecord_[1]) << 8) |
+                    (static_cast<uint32_t>(rcvRecord_[2]) << 16);
+                // pts (rcvRecord_[4..7]) is not consumed — the parser stamps
+                // its own PTS from the default frame rate.
+                rcvRecordLen_ = 0;
+                rcvFrameHeaderRead_ = true;
+                if (frameSize == 0) {
+                    // Skipped P-frame: the decoder wants a single 0x00 byte.
+                    rcvFrameLeft_ = 1;
+                    rcvSkippedFrame_ = true;
+                } else {
+                    rcvFrameLeft_ = frameSize & 0x00FFFFFF;
+                    rcvSkippedFrame_ = false;
+                }
+            }
+            if (rcvFrameLeft_ == 0) {
+                rcvFrameHeaderRead_ = false;
+                continue;
+            }
+            const size_t n = rcvFrameLeft_ < size - pos ? rcvFrameLeft_
+                                                        : size - pos;
+            uint8_t zero = 0;
+            NvMediaBitStreamPkt packet = {};
+            packet.pByteStream = rcvSkippedFrame_ ? &zero : data + pos;
+            packet.uDataLength = static_cast<uint32_t>(n);
+            packet.bCompletePicture = 1;
+            if (NvMediaParserParse(parser_, &packet) != NVMEDIA_STATUS_OK) {
+                return false;
+            }
+            if (!rcvSkippedFrame_) {
+                pos += n;
+            }
+            rcvFrameLeft_ -= static_cast<uint32_t>(n);
+            if (rcvFrameLeft_ == 0) {
+                rcvFrameHeaderRead_ = false;
+            }
+        }
+        return true;
+    }
+
     // Sniff IVF once on the first chunk (DKIF signature + declared header
     // length). A non-IVF input leaves ivfHeaderSize_ at 0 and falls through to
     // the raw chunk feed.

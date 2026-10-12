@@ -104,24 +104,32 @@ NVIDIA / AMD / Intel / Apple / NVIDIA DRIVE 的硬件编解码，无需为每个
 | vp8   | 30/30 ✅（已验证，IVF）| — |
 | mpeg2 | 30/30 ✅（已验证，elementary）| — |
 | mpeg4 | 30/30 ✅（已验证，elementary）| — |
-| vc1   | 库接受，SP/MP framing gap | — |
+| vc1   | 2677/2677 ✅（已验证，RCV）| — |
 | jpeg  | 30/30 ✅（已验证，IJPD）| 30/30 ✅（已验证，IJPE）|
 
-- **已验证**（h264/hevc/vp9/av1/vp8/mpeg2/mpeg4/jpeg 解码，h264/hevc/jpeg 编码）：数据通路完整 wire
+- **已验证**（h264/hevc/vp9/av1/vp8/mpeg2/mpeg4/vc1/jpeg 解码，h264/hevc/jpeg 编码）：数据通路完整 wire
   并实测。HEVC 编码可经 NvMedia HEVC 解码 round-trip（30 帧 NV12），4Mbps CBR 下 PSNR
   ~51.8 dB。H.264 的 IDE→IEP 零拷贝路径已验证。VP9/AV1/VP8 解码需 IVF 输入（框架解容器后
   按帧喂 NvMediaParser 并置 `bCompletePicture=1`——这些 codec 无 start code，NvMediaParser
   无法从裸流自切分帧）；AV1 解码还需在 `UpdateReferenceFrames` 里把 `RefPics[8]` 的 pool
   槽指针翻译成 NvSciBufObj。MPEG-2/MPEG-4 elementary 流按 raw chunk 喂（VOS/sequence
-  start code），其 `forward/backward_reference` 同样做 pool 槽→NvSciBufObj 翻译。JPEG 走专用
-  IJPE/IJPD 图像引擎（IDE 不收 MJPEG），PitchLinear YUV420；编码每帧一张独立 JPEG（30 帧 →
-  30 个有效 JPEG，ffmpeg 解码 320×240 yuvj420p，luma PSNR ~31 dB @q75），解码支持单张 .jpg 与
-  多帧 MJPEG 流（SOI/EOI 分帧），IJPE→IJPD round-trip luma PSNR ~46 dB。
+  start code），其 `forward/backward_reference` 同样做 pool 槽→NvSciBufObj 翻译。VC1
+  Simple/Main 无 start code 且无带内 sequence header，NvMediaParser 无法自检序列——需 RCV
+  容器：框架在 `Initialize` 解析 RCV 文件头、把 sequence header 经
+  `pExternalSeqInfo` 带外喂给 `NvMediaParserCreate`，再按 4 字节长度前缀的 per-frame 记录
+  逐帧喂 `bCompletePicture=1`；`UpdateReferenceFrames` 把 VC1 的
+  `forward/backward_reference` + `range_mapped` pool 槽翻译成 NvSciBufObj（前两者插
+  pre-fence，range_mapped 不插——对齐 videodemo.c）。2677 帧 NV12 输出，luma 与 NVIDIA
+  `nvm_ide_sci` 示例逐字节一致（RCV 由 WMV3/ASF 源转换而来：`tools/wmv3_to_rcv.py`）。
+  JPEG 走专用 IJPE/IJPD 图像引擎（IDE 不收 MJPEG），PitchLinear YUV420；编码每帧一张独立 JPEG
+  （30 帧 → 30 个有效 JPEG，ffmpeg 解码 320×240 yuvj420p，luma PSNR ~31 dB @q75），解码支持
+  单张 .jpg 与多帧 MJPEG 流（SOI/EOI 分帧），IJPE→IJPD round-trip luma PSNR ~46 dB。
 - **库接受，未 wire** ⚠️：完整版 SDK 库在 `NvMediaParserCreate` / `NvMediaIEPCreate`
   处接受该 codec（精简版系统库会以 "Codec Not supported" 拒绝），但框架未 wire。
-  VC1 Simple/Main 已映射且库接受，但其裸帧流需 RCV sequence header / per-frame framing，
-  框架尚未产出，DecodePicture 未触发。AV1 编码未 wire（缺 init/config/pic-params 三元组）。可用
-  `NvMedia/probes/`（codec_probe、feed_probe、iep_probe、ijpe_probe、ijpd_probe）复现库版本差异。VP9 编码在两套库
+  AV1 编码未 wire（缺 init/config/pic-params 三元组）。VC1 Advanced（start code 00 00 01 0D）
+  走 elementary 流路径，未 wire（无编码器/样片；SP/MP 已覆盖）。可用
+  `NvMedia/probes/`（codec_probe、feed_probe、iep_probe、ijpe_probe、ijpd_probe、vc1_probe）复现
+  库版本差异与 RCV/外部 SeqInfo 路径。VP9 编码在两套库
   里都在 `NvMediaIEPCreate` 失败——是这块板子真实的硬件/库限制。
 - **部署注意**：框架部署默认加载**系统** `/usr/lib` 库，因此只能用 h264/hevc。要用
   库接受的 codec，需把 `NvMedia/lib-target/` 的完整 nv* 集合随部署带上、并放
@@ -357,10 +365,10 @@ lib-target (same DRIVE-OS version, in `NvMedia/lib-target/`) unlocks the rest.
 | vp8    | 30/30 ✅ (verified, IVF) | —                   |
 | mpeg2  | 30/30 ✅ (verified, elementary) | —             |
 | mpeg4  | 30/30 ✅ (verified, elementary) | —             |
-| vc1    | lib-accepted, SP/MP framing gap | —              |
+| vc1    | 2677/2677 ✅ (verified, RCV) | —              |
 | jpeg   | 30/30 ✅ (verified, IJPD) | 30/30 ✅ (verified, IJPE) |
 
-- **Verified** (h264/hevc/vp9/av1/vp8/mpeg2/mpeg4/jpeg decode, h264/hevc/jpeg
+- **Verified** (h264/hevc/vp9/av1/vp8/mpeg2/mpeg4/vc1/jpeg decode, h264/hevc/jpeg
   encode): full data paths wired and measured. HEVC encode round-trips through
   NvMedia HEVC decode (30 NV12 frames); PSNR ~51.8 dB vs the original at
   4 Mbps CBR. Zero-copy IDE→IEP path verified for H.264. VP9/AV1/VP8 decode
@@ -370,7 +378,17 @@ lib-target (same DRIVE-OS version, in `NvMedia/lib-target/`) unlocks the rest.
   additionally needed the `RefPics[8]` pool-slot → NvSciBufObj fixup in
   `UpdateReferenceFrames`. MPEG-2/MPEG-4 elementary streams feed as raw chunks
   (VOS/sequence start codes); their `forward/backward_reference` surfaces get
-  the same pool-slot → NvSciBufObj fixup. JPEG goes through the dedicated
+  the same pool-slot → NvSciBufObj fixup. VC1 Simple/Main has no start codes
+  and no in-band sequence header, so NvMediaParser cannot self-detect the
+  sequence — it needs an RCV container: `Initialize` parses the RCV file header
+  and hands the sequence header to `NvMediaParserCreate` out-of-band via
+  `pExternalSeqInfo`, then `FeedFileChunk` walks the length-prefixed per-frame
+  records feeding each as a `bCompletePicture=1` packet;
+  `UpdateReferenceFrames` translates VC1's `forward/backward_reference` +
+  `range_mapped` pool-slot pointers to NvSciBufObj (pre-fence on the motion
+  refs, none on range_mapped — mirrors videodemo.c). 2677 NV12 frames out,
+  luma byte-identical to NVIDIA's `nvm_ide_sci` sample (RCV built from a
+  WMV3/ASF source via `tools/wmv3_to_rcv.py`). JPEG goes through the dedicated
   IJPE/IJPD image engines (IDE rejects MJPEG), PitchLinear YUV420; encode
   emits one independent JPEG per frame (30 frames → 30 valid JPEGs, ffmpeg
   decodes 320×240 yuvj420p, luma PSNR ~31 dB @q75), decode handles both a
@@ -379,13 +397,12 @@ lib-target (same DRIVE-OS version, in `NvMedia/lib-target/`) unlocks the rest.
 - **lib-accepted, not wired** ⚠️: the full-build SDK lib accepts the codec at
   `NvMediaParserCreate` / `NvMediaIEPCreate` (the reduced system lib rejects
   it with "Codec Not supported"), but the framework does not wire it.
-  VC1 Simple/Main is mapped and the lib accepts it, but its raw frame stream
-  needs an RCV sequence header / per-frame framing the framework does not yet
-  produce, so DecodePicture is not reached. AV1 encode is not wired (no
-  init/config/pic-params triple). Use `NvMedia/probes/` (codec_probe,
-  feed_probe, iep_probe, ijpe_probe, ijpd_probe) to reproduce the lib-version
-  difference. VP9 encode fails at `NvMediaIEPCreate` in both libs — a real
-  hardware/lib limit on this board.
+  AV1 encode is not wired (no init/config/pic-params triple). VC1 Advanced
+  (start code 00 00 01 0D) would use the elementary-stream path; not wired (no
+  encoder/sample; SP/MP via RCV is covered). Use `NvMedia/probes/` (codec_probe,
+  feed_probe, iep_probe, ijpe_probe, ijpd_probe, vc1_probe) to reproduce the
+  lib-version difference and the RCV/external-SeqInfo path. VP9 encode fails
+  at `NvMediaIEPCreate` in both libs — a real hardware/lib limit on this board.
 - **Deploy note**: the framework deploy loads the **system** `/usr/lib` libs
   by default, so it sees only h264/hevc. To use the lib-accepted codecs,
   ship the full `NvMedia/lib-target/` nv* set into the deploy dir and put it
