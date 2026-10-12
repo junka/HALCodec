@@ -1,5 +1,5 @@
 /*
- * SPDX-FileCopyrightText: Copyright (c) 2021-2022 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+ * SPDX-FileCopyrightText: Copyright (c) 2021-2024 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
  * SPDX-License-Identifier: LicenseRef-NvidiaProprietary
  *
  * NVIDIA CORPORATION, its affiliates and licensors retain all intellectual
@@ -44,8 +44,10 @@ typedef enum  {
     NVMEDIA_JPEG_INSTANCE_0 = 0,
     /** @brief Specifies NVJPG HW instance ID 1 */
     NVMEDIA_JPEG_INSTANCE_1,
-    /** @brief Specifies NVJPG HW instance ID AUTO */
-    NVMEDIA_JPEG_INSTANCE_AUTO
+    /** @brief Specifies NVJPG HW instance ID 2 */
+    NVMEDIA_JPEG_INSTANCE_2,
+    /** @brief Specifies NVJPG HW instance ID 3 */
+    NVMEDIA_JPEG_INSTANCE_3
 } NvMediaJPEGInstanceId;
 
 /**

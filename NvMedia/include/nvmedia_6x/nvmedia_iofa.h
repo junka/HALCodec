@@ -1,5 +1,5 @@
 /*
- * SPDX-FileCopyrightText: Copyright (c) 2021-2023 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+ * SPDX-FileCopyrightText: Copyright (c) 2021-2025 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
  * SPDX-License-Identifier: LicenseRef-NvidiaProprietary
  *
  * NVIDIA CORPORATION, its affiliates and licensors retain all intellectual
@@ -29,6 +29,7 @@ extern "C" {
 #include "nvmedia_core.h"
 #include "nvscisync.h"
 #include "nvscibuf.h"
+#include "nvmedia_common_video.h"
 
 /**
  * \defgroup 6x_image_ofa_api Image Optical Flow Accelerator (IOFA)
@@ -41,16 +42,22 @@ extern "C" {
  */
 
 /** @brief Major version number. */
-#define NVMEDIA_IOFA_VERSION_MAJOR            1
+#define NVMEDIA_IOFA_VERSION_MAJOR            2
 /** @brief Minor version number. */
-#define NVMEDIA_IOFA_VERSION_MINOR            3
+#define NVMEDIA_IOFA_VERSION_MINOR            2
 /** @brief Patch version number. */
 #define NVMEDIA_IOFA_VERSION_PATCH            0
 
 /** @brief Maximum number of Pyramid level supported in Pyramid OF mode. */
-#define NVMEDIA_IOFA_MAX_PYD_LEVEL            5U
+#define NVMEDIA_IOFA_MAX_PYD_LEVEL            7U
 /** @brief Maximum number of Region of Interest supported on IOFA. */
 #define NVMEDIA_IOFA_MAX_ROI_SUPPORTED        32U
+/** @brief Number of constant hints supported */
+#define NVMEDIA_IOFA_MAX_CONST_HINTS          2U
+/** @brief Number of external hints supported */
+#define NVMEDIA_IOFA_MAX_EXTERNAL_HINTS       2U
+/** @brief Number of spatial hints supported */
+#define NVMEDIA_IOFA_MAX_SPATIAL_HINTS        9U
 
 /**
  * Specifies the maximum number of times NvMediaIOFAInsertPreNvSciSyncFence()
@@ -68,7 +75,6 @@ typedef enum
     /** IOFA pyramid optical flow mode */
     NVMEDIA_IOFA_MODE_PYDOF  = 1U,
     /** OFA epipolar optical flow mode */
-    /** Epipolar OF support will be added in next release */
     NVMEDIA_IOFA_MODE_EPIOF  = 2U,
 } NvMediaIofaMode;
 
@@ -111,6 +117,7 @@ typedef enum
      *  \n @ref NvMediaIOFAProcessFrame API accept @ref pydHintSurface only in NVMEDIA_IOFA_PYD_LEVEL_MODE.
      *  \n otherwise @ref pydHintSurface is ignored by IOFA driver.
      *  \n    %pydHintSurface[lvl] = filter(%outSurface[lvl+1],....)
+     *  \n This mode is applicable for Orin OFA only. Deprecated after Orin OFA.
      */
     NVMEDIA_IOFA_PYD_LEVEL_MODE = 1U,
 } NvMediaIofaPydMode;
@@ -146,6 +153,20 @@ typedef enum
     NVMEDIA_IOFA_PRESET_HQ = 0U,
     /** High Performance Preset */
     NVMEDIA_IOFA_PRESET_HP = 1U,
+#if !defined(NV_IS_SAFETY) || (!NV_IS_SAFETY)
+    /** Following presets are supported with NVMEDIA_OFA_MODE_PYDSGM mode only */
+    /** OFSDK slow preset */
+    NVMEDIA_IOFA_PRESET_OFSDK_SLOW = 2U,
+    /** OFSDK medium preset */
+    NVMEDIA_IOFA_PRESET_OFSDK_MEDIUM = 3U,
+    /** OFSDK fast preset */
+    NVMEDIA_IOFA_PRESET_OFSDK_FAST = 4U,
+    /** Following presets are enabled temporarily for perf comparison and regression testing */
+    /** High Quality Legacy Preset */
+    NVMEDIA_IOFA_PRESET_HQ_LEGACY = 5U,
+    /** High Performance Legacy Preset */
+    NVMEDIA_IOFA_PRESET_HP_LEGACY = 6U,
+#endif
 } NvMediaIofaPreset;
 
 /**
@@ -306,8 +327,24 @@ typedef struct
      * \n One of the value from @ref NvMediaIofaEpiSearchRange
      */
     NvMediaIofaEpiSearchRange epiSearchRange;
-
+    /* OFA device Id
+     * \n this is index of selected OFA device
+     * \n Valid range is 0 to OFA Device list size-1
+     */
+    uint8_t                   ofaDeviceId;
 } NvMediaIofaInitParams;
+
+/**
+ * @brief Enum to identify Configurable parameters supported by IOFA Driver
+ */
+typedef enum {
+    /** IOFA SGM parameters, @ref NvMediaIofaSGMParams */
+    SGM_PARAM,
+    /** IOFA WMF parameters, @ref NvMediaIofaSGMParams */
+    WMF_PARAM,
+    /** IOFA HINT parameters, @ref NvMediaIofaHINTParams */
+    HINT_PARAM
+} NvMediaIOFAParamType;
 
 /**
  * @brief Holds SGM parameters
@@ -337,7 +374,40 @@ typedef struct
      *  \n The valid range of variable is from 1 to 3.
      */
     uint8_t     numPasses[NVMEDIA_IOFA_MAX_PYD_LEVEL];
+    /** SGM diagonal P1 penalty value */
+    uint8_t     diagP1[NVMEDIA_IOFA_MAX_PYD_LEVEL];
+    /** SGM diagonal P2 penalty value */
+    uint8_t     diagP2[NVMEDIA_IOFA_MAX_PYD_LEVEL];
 } NvMediaIofaSGMParams;
+
+/**
+ * @brief Holds WMF parameters
+ */
+typedef struct
+{
+    /** Weighted median filter enable parameter */
+    uint8_t  enableWM[NVMEDIA_IOFA_MAX_PYD_LEVEL];
+    /** Weighted median filter kernel size
+      * 0: Disable median    3: 3x3    5: 5x5
+      * Allows per pyramid level control
+      */
+    uint8_t  kernelSizeWM[NVMEDIA_IOFA_MAX_PYD_LEVEL];
+    /** Guide image for weighted median filter
+      * 0: Disable Guide image 1: Use input image as guide image
+      */
+    uint8_t  filterGuideWM[NVMEDIA_IOFA_MAX_PYD_LEVEL];
+} NvMediaIofaWMFParams;
+
+/**
+ * @brief Holds HINT parameters
+ */
+typedef struct
+{
+    /** Spatial hint enable parameter */
+    uint8_t  spatialHintEnable[NVMEDIA_IOFA_MAX_PYD_LEVEL];
+    /** Maximun number of hints to evaluate per grid. */
+    uint8_t  maxHintsPerGrid[NVMEDIA_IOFA_MAX_PYD_LEVEL];
+} NvMediaIofaHINTParams;
 
 /**
  * @brief Holds pointers to NvMedia bufObjs containing input and output surfaces.
@@ -415,7 +485,40 @@ typedef struct
      * \inputrange A valid NvSciBufObj
      */
     NvSciBufObj costSurface[NVMEDIA_IOFA_MAX_PYD_LEVEL];
+    /** extHintSurface
+     * \n <b> Pyramid Optical Flow Processing: </b> Array of pointers to NvSciBufObj containing pyd ext hint surface
+     * \n for max number of ext Hints @ref NVMEDIA_IOFA_MAX_EXTERNAL_HINTS
+     * \n <b> Stereo Disparity Processing: </b> Not Applicable
+     * \n <b> Epipolar Optical Flow Processing: </b> Not Applicable
+     * \n Frame is allocated through a call to @ref NvSciBufObjCreate API.
+     * \n Non-NULL - valid pointer address.
+     */
+    NvSciBufObj extHintSurface[NVMEDIA_IOFA_MAX_EXTERNAL_HINTS];
 } NvMediaIofaBufArray;
+
+/**
+ * @brief Parameters related to const hint.
+ */
+typedef struct
+{
+    uint8_t pydConstHintEnable[NVMEDIA_IOFA_MAX_CONST_HINTS];
+    /* S10.5 Format */
+    int16_t pydConstHintMvx[NVMEDIA_IOFA_MAX_CONST_HINTS];
+    /* S10.5 Format */
+    int16_t pydConstHintMvy[NVMEDIA_IOFA_MAX_CONST_HINTS];
+    /* Array of weight of Const Hints */
+    int8_t  pydConstHintWeight[NVMEDIA_IOFA_MAX_CONST_HINTS];
+} NvMediaIofaConstHintParams;
+
+/**
+ * @brief Parameters related to external hint surface.
+ */
+typedef struct
+{
+    /* Array of weight of External Hints */
+    int8_t  pydExtHintWeight[NVMEDIA_IOFA_MAX_EXTERNAL_HINTS];
+} NvMediaIofaExtHintParams;
+
 
 /**
  * @brief Parameters related to input pyramid hint surface.
@@ -450,7 +553,7 @@ typedef struct
      * \n If enabled, stereo disparity is estimated for right view w.r.t. left view
      */
     bool                    rightDispMap;
-    /** Current level to process in Pyd SGM LEVEL Mode
+    /** Current level to process in Pyd SGM LEVEL Mode. Applicable only for Orin OFA.
      *  \n valid range of values is between 0 to ofaPydLevel-1.
      */
     uint8_t                 currentPydLevel;
@@ -461,6 +564,10 @@ typedef struct
     bool                     noopMode;
     /** Pyramid hints parameters */
     NvMediaIofaPydHintParams pydHintParams;
+    /** Pyramid Const Hints Parameters */
+    NvMediaIofaConstHintParams pydConstHintParams;
+    /** Pyramid External Hints Parameters */
+    NvMediaIofaExtHintParams pydExtHintParams;
 } NvMediaIofaProcessParams;
 
 /**
@@ -717,13 +824,14 @@ NvMediaIOFADestroy (
  *      \inputrange A valid NvSciBufObj
 
  * @return ::NvMediaStatus, the completion status of operation:
- * - ::NVMEDIA_STATUS_OK if successful.
+ * - ::NVMEDIA_STATUS_OK in the following cases:
+            - If successful.
+ *          - User registers same bufObj multiple times (does not reduce the slots available).
  * - ::NVMEDIA_STATUS_BAD_PARAMETER if ofa, bufObj or accessMode is invalid.
  * - ::NVMEDIA_STATUS_INVALID_STATE  The function was called in incorrect system state.
  * - ::NVMEDIA_STATUS_ERROR in following cases:
  *          - User registers more than 192 bufObjs.
  *          - User registers same bufObj with more than one accessModes.
- *          - User registers same bufObj multiple times.
  *
  **/
 NvMediaStatus
@@ -787,6 +895,89 @@ NvMediaStatus
 NvMediaIOFAUnregisterNvSciBufObj (
     const NvMediaIofa *ofaPubl,
     NvSciBufObj       bufObj
+);
+
+
+/**
+ * @brief Get the given paramtype configuration parameters being used
+ *
+ * @pre NvMediaIOFAInit()
+ * @post params of given paramtype are returned in structure pParams
+ *
+ * @usage
+ * - Allowed context for the API call
+ *   - Interrupt handler: No
+ *   - Signal handler: No
+ *   - Thread-safe: Yes, with the following conditions
+ *     - Every thread should be invoked with relevant NvMediaIofa object.
+ *   - Re-entrant: No
+ *   - Async/Sync: Sync
+ * - Required privileges: None
+ * - API group
+ *   - Init: No
+ *   - Runtime: Yes
+ *   - De-Init: No
+ *
+ * @param[in] ofaPubl
+ *      Pointer to the @ref NvMediaIofa object to use.
+ *      Non-NULL - valid pointer address
+ * @param[in] param type of configurable parameters
+ *      One of param types provided in @ref NvMediaIOFAParamType
+ * @param[out] pParams
+ *      A pointer to a structure that specifies given paramtype parameters.
+ *
+ * @return The completion status of the operation:
+ * - ::NVMEDIA_STATUS_OK if the function call is successful.
+ * - ::NVMEDIA_STATUS_BAD_PARAMETER if any of the input parameters are invalid.
+ * - ::NVMEDIA_STATUS_ERROR if there is an internal error in processing.
+ */
+
+NvMediaStatus
+NvMediaIOFAGetConfigParams (
+    const NvMediaIofa    *ofaPubl,
+    NvMediaIOFAParamType paramType,
+    void                 *pParams
+);
+
+/**
+ * @brief Set the given paramtype configuration parameters to be used
+ *
+ * @pre NvMediaIOFAInit()
+ * @post params of given paramtype are set in IOFA driver and will be used for next frame processing.
+ *
+ * @usage
+ * - Allowed context for the API call
+ *   - Interrupt handler: No
+ *   - Signal handler: No
+ *   - Thread-safe: Yes, with the following conditions
+ *     - Every thread should be invoked with relevant NvMediaIofa object.
+ *   - Re-entrant: No
+ *   - Async/Sync: Sync
+ * - Required privileges: None
+ * - API group
+ *   - Init: No
+ *   - Runtime: Yes
+ *   - De-Init: No
+ *
+ * @param[in] ofaPubl
+ *      Pointer to the @ref NvMediaIofa object to use.
+ *      Non-NULL - valid pointer address
+ * @param[in] param type of configurable parameters
+ *      One of param types provided in @ref NvMediaIOFAParamType
+ * @param[in] pParams
+ *      A pointer to a structure that specifies given paramtype parameters.
+ *
+ * @return The completion status of the operation:
+ * - ::NVMEDIA_STATUS_OK if the function call is successful.
+ * - ::NVMEDIA_STATUS_BAD_PARAMETER if any of the input parameters are invalid.
+ * - ::NVMEDIA_STATUS_ERROR if there is an internal error in processing.
+ */
+
+NvMediaStatus
+NvMediaIOFASetConfigParams (
+    const NvMediaIofa    *ofaPubl,
+    NvMediaIOFAParamType paramType,
+    const void           *pParams
 );
 
 /**
@@ -1320,6 +1511,38 @@ NvMediaIOFAGetEOFNvSciSyncFence (
     NvSciSyncFence    *eofnvscisyncfence
 );
 
+/**
+ * @brief Query OFA devices present
+ *
+ * @pre  NvMediaIOFAGetVersion()
+ * @post NvMediaIOFACreate()
+ *
+ * @usage
+ * - Allowed context for the API call
+ *   - Interrupt handler: No
+ *   - Signal handler: No
+ *   - Thread-safe: Yes
+ *   - Re-entrant: No
+ *   - Async/Sync: Sync
+ * - Required privileges: None
+ * - API group
+ *   - Init: Yes
+ *   - Runtime: No
+ *   - De-Init: No
+ *
+ * @param[in] deviceList
+ *      A pointer to the @ref NvMediaIofaDeviceList to populate device size and info
+ *      Non-NULL - valid pointer address
+ *
+ * @return The completion status of the operation:
+ * - ::NVMEDIA_STATUS_OK if the call is successful.
+ * - ::NVMEDIA_STATUS_ERROR if there is an internal error in processing.
+ */
+NvMediaStatus
+NvMediaIOFAQueryDevices(
+    NvMediaDeviceList *deviceList
+);
+
 /*
  * \defgroup 6x_history_nvmedia_iofa History
  * Provides change history for the NvMedia IOFA API.
@@ -1329,8 +1552,26 @@ NvMediaIOFAGetEOFNvSciSyncFence (
  * <b> Version 1.0 </b> September 28, 2021
  * - Initial release
  *
- * <b> Version 1.1 </b> April 10, 2023
+ * <b> Version 1.1 </b> December 20, 2021
+ * - OFA Driver Refactoring
+ *
+ * <b> Version 1.2 </b> April 10, 2023
  * - Removed API NvMediaIOFAGetProfileData
+ *
+ * <b> Version 1.3 </b> April 22, 2023
+ * - Add epiSearchRange in NvMediaIofaInitParams
+ *
+ * <b> Version 1.4 </b> February 19, 2024
+ * - Change NVMEDIA_IOFA_MAX_PYD_LEVEL to 7
+ *
+ * <b> Version 2.0 </b> March 18,2024
+ * - Add support for NvMediaIOFAQueryDevices API
+ *
+ * <b> Version 2.1 </b> May 16,2024
+ * - Add new OFA HW features
+ *
+ * <b> Version 2.2 </b> November 04, 2024
+ * - Add new preset for optical flow (not available on safety build)
  */
 
 /** @} */
@@ -1339,4 +1580,3 @@ NvMediaIOFAGetEOFNvSciSyncFence (
 #endif
 
 #endif // NVMEDIA_IOFA_H
-

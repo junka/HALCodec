@@ -1,5 +1,5 @@
 /*
- * SPDX-FileCopyrightText: Copyright (c) 2021-2023 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+ * SPDX-FileCopyrightText: Copyright (c) 2021-2024 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
  * SPDX-License-Identifier: LicenseRef-NvidiaProprietary
  *
  * NVIDIA CORPORATION, its affiliates and licensors retain all intellectual
@@ -30,8 +30,10 @@ extern "C" {
 #include "nvmedia_core.h"
 #include "nvscibuf.h"
 #include "nvscisync.h"
-#include "nvmedia_common_encode_decode.h"
 #include "nvmedia_common_encode.h"
+#include "nvmedia_common_video.h"
+#include "nvmedia_common_encode_decode.h"
+
 /**
  * @defgroup 6x_image_jpeg_encode_api Image JPEG Encoder
  *
@@ -45,7 +47,7 @@ extern "C" {
 /** @brief Major Version number */
 #define NVMEDIA_IJPE_VERSION_MAJOR   2
 /** @brief Minor Version number */
-#define NVMEDIA_IJPE_VERSION_MINOR   0
+#define NVMEDIA_IJPE_VERSION_MINOR   1
 /** @brief Patch Version number */
 #define NVMEDIA_IJPE_VERSION_PATCH   0
 
@@ -238,7 +240,6 @@ NvMediaIJPEGetVersion(
  *      \inputrange The following instances are supported:
  *      - ::NVMEDIA_JPEG_INSTANCE_0
  *      - ::NVMEDIA_JPEG_INSTANCE_1     [Supported only on T23X]
- *      - ::NVMEDIA_JPEG_INSTANCE_AUTO  [Supported only on T23X]
  * @retval NvMediaIJPE The new image JPEG encoder device's handle
  * or \c NULL if unsuccessful.
  */
@@ -288,7 +289,6 @@ NvMediaIJPECreate(
  *      \inputrange The following instances are supported:
  *      - ::NVMEDIA_JPEG_INSTANCE_0
  *      - ::NVMEDIA_JPEG_INSTANCE_1     [Supported only on T23X]
- *      - ::NVMEDIA_JPEG_INSTANCE_AUTO  [Supported only on T23X]
  * @retval NvMediaIJPE The new image JPEG encoder device's handle
  * or \c NULL if unsuccessful.
  */
@@ -365,7 +365,6 @@ void NvMediaIJPEDestroy(NvMediaIJPE *encoder);
  *      \inputrange The following instances are supported:
  *      - ::NVMEDIA_JPEG_INSTANCE_0
  *      - ::NVMEDIA_JPEG_INSTANCE_1     [Supported only on T23X]
- *      - ::NVMEDIA_JPEG_INSTANCE_AUTO  [Supported only on T23X]
  * @return ::NvMediaStatus The completion status of the operation.
  * Possible values are:
  * - ::NVMEDIA_STATUS_OK if successful.
@@ -426,8 +425,7 @@ NvMediaIJPEFeedFrame(
  *      \inputrange The following instances are supported:
  *      - ::NVMEDIA_JPEG_INSTANCE_0
  *      - ::NVMEDIA_JPEG_INSTANCE_1     [Supported only on T23X]
- *      - ::NVMEDIA_JPEG_INSTANCE_AUTO  [Supported only on T23X]
- * @return ::NvMediaStatus The completion status of the operation.
+  * @return ::NvMediaStatus The completion status of the operation.
  * Possible values are:
  * - ::NVMEDIA_STATUS_OK if successful.
  * - ::NVMEDIA_STATUS_INSUFFICIENT_BUFFERING
@@ -492,7 +490,6 @@ NvMediaIJPEFeedFrameQuant(
  *      \inputrange The following instances are supported:
  *      - ::NVMEDIA_JPEG_INSTANCE_0
  *      - ::NVMEDIA_JPEG_INSTANCE_1     [Supported only on T23X]
- *      - ::NVMEDIA_JPEG_INSTANCE_AUTO  [Supported only on T23X]
  * @return ::NvMediaStatus The completion status of the operation.
  * Possible values are:
  * - ::NVMEDIA_STATUS_OK if successful.
@@ -829,7 +826,6 @@ NvMediaIJPEUnregisterNvSciBufObj(
  *      \inputrange The following instances are supported:
  *      - ::NVMEDIA_JPEG_INSTANCE_0
  *      - ::NVMEDIA_JPEG_INSTANCE_1     [Supported only on T23X]
- *      - ::NVMEDIA_JPEG_INSTANCE_AUTO  [Supported only on T23X]
  * @param[out] attrlist A pointer to an %NvSciBufAttrList structure where
  *                NvMediaIJPE places the NvSciBuf attributes.
  *
@@ -1207,6 +1203,37 @@ NvMediaIJPEGetEOFNvSciSyncFence(
     const NvMediaIJPE        *encoder,
     NvSciSyncObj      eofnvscisyncobj,
     NvSciSyncFence    *eofnvscisyncfence
+);
+
+/**
+ * @brief Queries the IJPE device list
+ *
+ * @pre  NvMediaIJPEGetVersion()
+ * @post NvMediaIJPECreate()
+ *
+ * @usage
+ * - Allowed context for the API call
+ *   - Interrupt handler: No
+ *   - Signal handler: No
+ *   - Thread-safe: Yes
+ *   - Re-entrant: No
+ *   - Async/Sync: Sync
+ * - Required privileges: None
+ * - API group
+ *   - Init: Yes
+ *   - Runtime: No
+ *   - De-Init: No
+ *
+ * @param[in] version A pointer to a @ref NvMediaDeviceList structure
+ *                    of the client.
+ * @return ::NvMediaStatus The status of the operation.
+ * Possible values are:
+ * - ::NVMEDIA_STATUS_OK
+ * - ::NVMEDIA_STATUS_BAD_PARAMETER if the pointer is invalid.
+ */
+NvMediaStatus
+NvMediaIJPEQueryHWDevices(
+    NvMediaDeviceList *deviceList
 );
 
 /*

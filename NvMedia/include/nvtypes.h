@@ -1,5 +1,6 @@
 /*
- * Copyright (c) 2017-2022, NVIDIA CORPORATION.  All rights reserved.
+ * SPDX-FileCopyrightText: Copyright (c) 2017-2024 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+ * SPDX-License-Identifier: LicenseRef-NvidiaProprietary
  *
  * NVIDIA CORPORATION and its licensors retain all intellectual property
  * and proprietary rights in and to this software, related documentation
@@ -11,7 +12,7 @@
 #ifndef INCLUDE_NVTYPES_H
 #define INCLUDE_NVTYPES_H
 
-#if (defined(__QNX__) && defined(NV_IS_SAFETY) && (NV_IS_SAFETY == 1))
+#if ((defined(__QNX__) || defined(__linux__)) && defined(NV_IS_SAFETY) && (NV_IS_SAFETY == 1))
 #include "nvtypes_tegra_safety.h"
 #else
 #include "p4-mirror/sdk/nvidia/inc/nvtypes.h"

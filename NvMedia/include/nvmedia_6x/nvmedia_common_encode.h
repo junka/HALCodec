@@ -1,5 +1,5 @@
 /*
- * SPDX-FileCopyrightText: Copyright (c) 2021-2024 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+ * SPDX-FileCopyrightText: Copyright (c) 2021-2025 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
  * SPDX-License-Identifier: LicenseRef-NvidiaProprietary
  *
  * NVIDIA CORPORATION, its affiliates and licensors retain all intellectual
@@ -50,7 +50,7 @@ extern "C" {
 #define NVMEDIA_ENCODE_INFINITE_GOPLENGTH       0xFFFFFFFFU
 
 /** Maximum number of Personal Identifiable Information (PII) regions */
-#define NVMEDIA_ENCODE_MAX_PII_REGIONS 32U
+#define NVMEDIA_ENCODE_MAX_PII_REGIONS 64U
 
 /**
  * \hideinitializer
@@ -61,10 +61,10 @@ typedef enum {
     NVMEDIA_ENCODER_INSTANCE_0 = 0,
     /** @brief Specifies the encoder instance ID 1 */
     NVMEDIA_ENCODER_INSTANCE_1,
-   /** @brief Specifies that the encoder instance ID
-    * can be set dynamically during encode
-    */
-    NVMEDIA_ENCODER_INSTANCE_AUTO,
+    /** @brief Specifies the encoder instance ID 2 */
+    NVMEDIA_ENCODER_INSTANCE_2,
+    /** @brief Specifies the encoder instance ID 3 */
+    NVMEDIA_ENCODER_INSTANCE_3,
 } NvMediaEncoderInstanceId;
 
 /**
@@ -83,7 +83,6 @@ typedef struct {
 
 /**
  * @brief Holds Personal Identifiable Information (PII) regions
- * This feature is not supported in the QNX Safety build.
  */
 typedef struct {
     /** PII region rectangle */
@@ -266,9 +265,9 @@ typedef enum {
     /** High422 profile */
     NVMEDIA_ENCODE_PROFILE_HIGH422     = 122,
     /** High 444 profile */
-    /** H.264 High444 profile support lossless encode (trans-quant bypass) for
-        YUV444 and YUV420 input. Lossy encode is not supported with High444
-        profile. */
+    /** The High444 profile in H.264 supports lossy encoding for both YUV444
+        and YUV420. It is also the only profile that supports lossless encoding
+        (trans-quant bypass) for both YUV444 and YUV420 input. */
     NVMEDIA_ENCODE_PROFILE_HIGH444     = 244,
     /** Cavlc444_intra predictive profile */
     NVMEDIA_ENCODE_PROFILE_CAVLC444_INTRA= 44,
@@ -462,7 +461,7 @@ typedef enum {
      *  - Quality: Low */
     NVMEDIA_ENC_PRESET_UHP                     = 0x20,
     /** Encoder Quality Preset Default.
-     *  Default Encoder settings applied*/
+     *  Default Encoder settings applied */
     NVMEDIA_ENC_PRESET_DEFAULT                 = 0x7FFFFFFF
 } NvMediaEncPreset;
 
@@ -802,9 +801,9 @@ typedef enum {
        end of encoded bitstream data.
        This setting is not supported in the QNX Safety build. */
     NVMEDIA_ENCODE_CONFIG_H264_ENABLE_MV_BUFFER_DUMP           = (1 << 9),
-    /** Enable encoder profiling. Profiling information would be added
-       as part of output extradata.
-       This setting is not supported in the QNX Safety build. */
+    /** Enable encoder profiling.
+        \note This feature is not supported.
+        \deprecated This feature will be deprecated in a future release. */
     NVMEDIA_ENCODE_CONFIG_H264_ENABLE_PROFILING                = (1 << 10),
     /** Enable support to use client provided Initial QP for all frame types */
     NVMEDIA_ENCODE_CONFIG_H264_INIT_QP                         = (1 << 11),
@@ -812,9 +811,9 @@ typedef enum {
     NVMEDIA_ENCODE_CONFIG_H264_QP_MAX                          = (1 << 12),
     /** Enable support to use 4 byte start code in all the slices in a picture */
     NVMEDIA_ENCODE_CONFIG_H264_ENABLE_FOUR_BYTE_START_CODE     = (1 << 13),
-    /** Enable ultra fast encoding. It overrides some of the quality settings
-        to achieve ultra fast encoding. This is equivalent to setting
-        \ref NVMEDIA_ENCODE_QUALITY_L0 as the \ref NvMediaEncodeQuality. */
+    /** Use "NvMediaEncPreset" instead to set ultra fast encode
+        \note This feature is not supported.
+        \deprecated This feature will be deprecated in a future release. */
     NVMEDIA_ENCODE_CONFIG_H264_ENABLE_ULTRA_FAST_ENCODE        = (1 << 14),
     /** Enable support for motion vector buffer dump in a simplified (V2)
         format. Motion vector buffer will be appended to the end of encoded
@@ -1100,16 +1099,17 @@ typedef struct {
     /** Encode all frames as I frames.
         \valuerange 0 to disable, non-zero value to enable */
     uint32_t enableAllIFrames : 1;
-    /** Enables feature to allocate memory as per optimizations*/
+    /** Deprecated feature, do not use */
     uint32_t enableMemoryOptimization : 1;
     /** Enables video anonymization of PII regions
         \valuerange 0 to 1
-        - 0: Disables the video anonymization feature.
-        - 1: Enables the video anonymization feature.
-        This setting is not supported in the QNX Safety build. */
+        - 0: Disables the video anonymization feature
+        - 1: Enables the video anonymization feature */
     uint32_t enableAnonEncode : 1;
+    /** Set to 1 to disable the memory optimizations*/
+    uint32_t disableMemoryOptimization : 1;
     /** Add padding */
-    uint32_t reserved                : 24;
+    uint32_t reserved                : 23;
 } NvMediaEncodeInitializeParamsH264;
 
 /**
@@ -1179,11 +1179,9 @@ typedef struct {
     uint32_t frameRateDen;
     /** Holds the viewId of current picture */
     uint32_t viewId;
-    /** Holds the PII regions information
-        This feature is not supported in the QNX Safety build. */
+    /** Holds the PII regions information */
     NvMediaEncPIIParams PIIparams[NVMEDIA_ENCODE_MAX_PII_REGIONS];
-    /** Holds the number of PII regions for current pic
-        This feature is not supported in the QNX Safety build. */
+    /** Holds the number of PII regions for current pic */
     uint32_t numPIIRegions;
 } NvMediaEncodePicParamsH264;
 /** @} <!-- Ends h264_encoder_api H.264 Encoder -> */
@@ -1290,11 +1288,13 @@ typedef enum {
        motion vector dump. Motion vector buffer will be appended at the
        end of encoded bitstream data */
     NVMEDIA_ENCODE_CONFIG_H265_ENABLE_MV_BUFFER_DUMP           = (1 << 9),
-    /** Enable encoder profiling. Profiling information would be added
-       as part of output extradata */
+    /** Enable encoder profiling.
+        \note This feature is not supported.
+        \deprecated This feature will be deprecated in a future release. */
     NVMEDIA_ENCODE_CONFIG_H265_ENABLE_PROFILING                = (1 << 10),
-    /** Enable ultra fast encoding. It overrides some of the quality settings
-        to achieve ultra fast encoding. */
+    /** Use "NvMediaEncPreset" instead to set ultra fast encode
+        \note This feature is not supported.
+        \deprecated This feature will be deprecated in a future release. */
     NVMEDIA_ENCODE_CONFIG_H265_ENABLE_ULTRA_FAST_ENCODE        = (1 << 11),
     /** Enable support to use client provided Initial QP for all frame types */
     NVMEDIA_ENCODE_CONFIG_H265_INIT_QP                         = (1 << 12),
@@ -1548,10 +1548,12 @@ typedef struct {
     /** Encode all frames as I frames.
         \valuerange 0 to disable, non-zero value to enable */
     uint32_t enableAllIFrames : 1;
-    /** Enables feature to allocate memory as per optimizations*/
+    /** Deprecated feature, do not use */
     uint32_t enableMemoryOptimization : 1;
+    /** Set to 1 to disable the memory optimizations*/
+    uint32_t disableMemoryOptimization : 1;
     /** Add padding */
-    uint32_t reserved                : 25;
+    uint32_t reserved                : 24;
     /** Use ampDisable to enable or disable assymetric partition types.
      *  - 0: enable AMP block paritions
      *  - 1: disble AMP block paritions */
@@ -1662,8 +1664,9 @@ typedef enum {
     NVMEDIA_ENCODE_CONFIG_VP9_ENABLE_HIGH_PRECISION_MV                = (1 << 3),
     /** Disable error resiliency. Error resiliency is enabled by default */
     NVMEDIA_ENCODE_CONFIG_VP9_DISABLE_ERROR_RESILIENT                 = (1 << 4),
-    /** Enable encoder profiling. Profiling information would be added
-       as part of output extradata */
+    /** Enable encoder profiling.
+        \note This feature is not supported.
+        \deprecated This feature will be deprecated in a future release. */
     NVMEDIA_ENCODE_CONFIG_VP9_ENABLE_PROFILING                        = (1 << 5),
     /** Enable support to use client provided Initial QP for all frame types */
     NVMEDIA_ENCODE_CONFIG_VP9_INIT_QP                                 = (1 << 6),
@@ -1892,8 +1895,9 @@ typedef enum {
     NVMEDIA_ENCODE_CONFIG_AV1_DISABLE_CDF_UPDATE                      = (1 << 2),
     /** enable/disable CDF update at end of frame */
     NVMEDIA_ENCODE_CONFIG_AV1_FRAME_END_CDF_UPDATE                    = (1 << 3),
-    /** Enable encoder profiling. Profiling information would be added
-       as part of output extradata */
+    /** Enable encoder profiling.
+        \note This feature is not supported.
+        \deprecated This feature will be deprecated in a future release. */
     NVMEDIA_ENCODE_CONFIG_AV1_ENABLE_PROFILING                        = (1 << 5),
     /** Enable support to use client provided Initial QP for all frame types */
     NVMEDIA_ENCODE_CONFIG_AV1_INIT_QP                                 = (1 << 6),
@@ -2043,10 +2047,12 @@ typedef struct {
         \ref NvMediaEncodeInitializeParamsVP9 \a enableExternalMEHints to
         true. */
     NvMediaEncodeExternalMeHintCountsPerBlocktype maxMEHintCountsPerBlock[2];
-    /** Enables feature to allocate memory as per optimizations*/
+    /** Deprecated feature, do not use */
     uint32_t enableMemoryOptimization : 1;
+    /** Set to 1 to disable the memory optimizations*/
+    uint32_t disableMemoryOptimization : 1;
     /** Reserved*/
-    uint32_t reserved1 : 31;
+    uint32_t reserved1 : 30;
     /** Reserved Bytes */
     uint32_t reserved[19];
 } NvMediaEncodeInitializeParamsAV1;

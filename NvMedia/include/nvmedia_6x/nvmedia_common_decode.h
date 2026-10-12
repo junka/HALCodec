@@ -1,5 +1,5 @@
 /*
- * SPDX-FileCopyrightText: Copyright (c) 2021-2022 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+ * SPDX-FileCopyrightText: Copyright (c) 2021-2024 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
  * SPDX-License-Identifier: LicenseRef-NvidiaProprietary
  *
  * NVIDIA CORPORATION, its affiliates and licensors retain all intellectual
@@ -58,10 +58,10 @@ typedef enum  {
     NVMEDIA_DECODER_INSTANCE_0 = 0,
     /** @brief Specifies the decoder instance ID 1 */
     NVMEDIA_DECODER_INSTANCE_1,
-   /** @brief Specifies that the decoder instance ID
-    * can be set dynamically during decode
-    */
-    NVMEDIA_DECODER_INSTANCE_AUTO,
+    /** @brief Specifies the encoder instance ID 2 */
+    NVMEDIA_DECODER_INSTANCE_2,
+    /** @brief Specifies the encoder instance ID 3 */
+    NVMEDIA_DECODER_INSTANCE_3,
 } NvMediaDecoderInstanceId;
 
 /**
@@ -103,7 +103,7 @@ typedef void NvMediaRefSurface;
  * @brief To Get the decoding status from HW decoder
  */
 typedef struct{
-    /** @brief pass hw decode clock value to calculate decode time */
+    /** @brief  Unused variable. Retained for backward compatibility */
     uint32_t hwClockValue;
     /** @brief non-zero value indicates error occured during decoding (codec-specific) */
     uint16_t decode_error;
@@ -113,7 +113,7 @@ typedef struct{
     uint32_t concealed_mbs;        // number of macroblocks concealed
     /** @brief 32 bits fields, each bit indicate the decoding progress */
     uint32_t decoding_status;
-    /** @brief HW decoding time */
+    /** @brief  Unused variable. Retained for backward compatibility */
     uint32_t hwDecodeTime;
 } NvMediaIDEFrameStatus;
 
@@ -441,6 +441,14 @@ typedef struct {
     int32_t last_pps_id;
     /** Copy of the H.264 bitstream field, qpprime_y_zero_transform_bypass_flag */
     int32_t qpprime_y_zero_transform_bypass_flag;
+    /** Copy of the H264 Profile IDC */
+    uint32_t profile_idc;
+    /** Copy of the H264 Level IDC */
+    uint32_t level_idc;
+    /** Copy of the H264 bitdepth for Luma */
+    uint32_t bit_depth_luma_minus8;
+    /** Copy of the H264 bitdepth for Chroma */
+    uint32_t bit_depth_chroma_minus8;
 } NvMediaPictureInfoH264;
 
 /** @} <!-- Ends h264decoder_api Basic Types sub-group --> */
@@ -1520,16 +1528,25 @@ typedef struct _NvMediaTile_AV1 {
  *
  */
 typedef struct _NvMediaPictureInfo_AV1 {
+    // Indicates the applicable display width in all cases (normal, superres, DRC)
     uint32_t width;
+    // Indicates the applicable display height in all cases (normal, superres, DRC)
     uint32_t height;
-    uint32_t superres_width;                // Not defined in DXVA
+    // Indicates scaled width in case of super resolution feature. Not defined in DXVA.
+    uint32_t superres_width;
+    // Indicates maximum possible width for purpose of Allocation in case of on the fly DRC.
     uint32_t max_width;
+    // Indicates maximum possible height for purpose of Allocation in case of on the fly DRC.
     uint32_t max_height;
 
+    // Indicates Picture structure for normal Current frame.
     NvMediaPicEntry_AV1_Short CurrPic;
-    NvMediaPicEntry_AV1_Short FgsPic;     // Not defined in DXVA
+    // Indicates Picture structure for FGS frame. Not defined in DXVA.
+    NvMediaPicEntry_AV1_Short FgsPic;
 
+    // Indicates the scaling factor in case of super resolution width.
     uint8_t superres_denom;
+    // Indicates 8 or 10 Bit.
     uint8_t BitDepth;
     uint8_t profile;
 

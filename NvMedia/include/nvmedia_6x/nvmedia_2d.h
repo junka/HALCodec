@@ -1,5 +1,5 @@
 /*
- * SPDX-FileCopyrightText: Copyright (c) 2013-2024 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+ * SPDX-FileCopyrightText: Copyright (c) 2013-2025 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
  * SPDX-License-Identifier: LicenseRef-NvidiaProprietary
  *
  * NVIDIA CORPORATION, its affiliates and licensors retain all intellectual
@@ -22,6 +22,7 @@
 
 #include "nvmedia_core.h"
 #include <stdint.h>
+#include <stdbool.h>
 
 #ifdef __cplusplus
 extern "C" {
@@ -36,37 +37,19 @@ extern "C" {
 /// @{
 ///
 
-/// @brief Major version number of NvMedia 2D header.
-///
-/// This defines the major version of the API defined in this header. This
-/// is intended to be used when validating the version number returned by the
-/// #NvMedia2DGetVersion() function.
-///
-/// @sa NvMedia2DGetVersion()
-///
-#define NVMEDIA_2D_VERSION_MAJOR   8
+/// @brief Maximum number of horizontal LDC regions.
+#define NVMEDIA_2D_MAX_LDC_REGIONS_X 4U
 
-/// @brief Minor version number of NvMedia 2D header.
-///
-/// This defines the minor version of the API defined in this header. This
-/// is intended to be used when validating the version number returned by the
-/// #NvMedia2DGetVersion() function.
-///
-/// @sa NvMedia2DGetVersion()
-///
-#define NVMEDIA_2D_VERSION_MINOR   0
-
-/// @brief Patch version number of NvMedia 2D header.
-///
-/// This defines the patch version of the API defined in this header.
-///
-/// @sa NvMedia2DGetVersion()
-///
-#define NVMEDIA_2D_VERSION_PATCH   0
+/// @brief Maximum number of vertical LDC regions.
+#define NVMEDIA_2D_MAX_LDC_REGIONS_Y 4U
 
 /// @brief 2D filter mode.
 ///
 /// This enum describes the filter modes that are supported by NvMedia 2D.
+///
+/// If no filter mode is explicitly set then an appropriate mode will be
+/// automatically selected, depending on the current scaling factor and
+/// hardware restrictions.
 ///
 /// @sa NvMedia2DSetFilterBuffer()
 ///
@@ -74,8 +57,7 @@ typedef enum
 {
     /// @brief Filtering is disabled.
     ///
-    /// This mode results in nearest-neighbor filtering being used. This is the
-    /// default mode.
+    /// This mode results in nearest-neighbor filtering being used.
     ///
     NVMEDIA_2D_FILTER_OFF = 0x1,
 
@@ -88,7 +70,7 @@ typedef enum
     /// @brief Medium quality filtering.
     ///
     /// This mode results in 5-tap filtering being used. By default, the filter
-    /// used is a Lanczos filter. The coefficients can be overriden with
+    /// used is a Lanczos filter. The coefficients can be overridden with
     /// NvMedia2DSetFilterBuffer().
     ///
     NVMEDIA_2D_FILTER_MEDIUM,
@@ -96,7 +78,7 @@ typedef enum
     /// @brief Highest quality filtering.
     ///
     /// This mode results in 10-tap filtering being used. By default, the filter
-    /// used is a Lanczos filter. The coefficients can be overriden with
+    /// used is a Lanczos filter. The coefficients can be overridden with
     /// NvMedia2DSetFilterBuffer().
     ///
     NVMEDIA_2D_FILTER_HIGH
@@ -172,7 +154,7 @@ typedef enum
 ///
 typedef enum
 {
-    /// @brief No transform.
+    /// @brief No transform. This is the default behavior.
     NVMEDIA_2D_TRANSFORM_NONE = 0x0,
 
     /// @brief Rotate 90 degrees anti-clockwise.
@@ -253,9 +235,7 @@ typedef enum
 /// This type holds the attributes to control the behaviour of the NvMedia2D
 /// context. These attributes take effect during the call to #NvMedia2DCreate().
 ///
-/// This struct itself can be considered a POD type, so it does not have any
-/// functions to create/destroy it.
-///
+/// @sa NvMedia2DGetDefaultAttributes()
 /// @sa NvMedia2DCreate()
 ///
 typedef struct
@@ -293,10 +273,190 @@ typedef struct
     /// @sa NvMedia2DCreateFilterBuffer()
     uint32_t maxFilterBuffers;
 
+    /// @brief Maximum number of LDC warp maps that can be created.
+    ///
+    /// Must be in range [0, 64].
+    ///
+    /// @sa NvMedia2DLdcWarpMap
+    /// @sa NvMedia2DCreateLdcWarpMap()
+    uint32_t maxLdcWarpMaps;
+
+    /// @brief Maximum number of LDC mask maps that can be created.
+    ///
+    /// Must be in range [0, 64].
+    ///
+    /// @sa NvMedia2DLdcMaskMap
+    /// @sa NvMedia2DCreateLdcMaskMap()
+    uint32_t maxLdcMaskMaps;
+
+    /// @brief Maximum number of TNR states that can be created.
+    ///
+    /// Must be in range [0, 64].
+    ///
+    /// @sa NvMedia2DTnrState
+    /// @sa NvMedia2DCreateTnrState()
+    uint32_t maxTnrStates;
+
     /// @brief Internal use only.
     uint32_t flags;
 
 } NvMedia2DAttributes;
+
+/// @brief Attributes structure for #NvMedia2DCreateLdcWarpMap().
+///
+/// This type holds the attributes to control the fixed characteristics of an
+/// LDC warp map object. These attributes take effect during the call to
+/// NvMedia2DCreateLdcWarpMap() and are used to determine what resources need
+/// to be allocated for the warp map.
+///
+/// @sa NvMedia2DGetDefaultLdcWarpMapAttributes()
+/// @sa NvMedia2DCreateLdcWarpMap()
+///
+typedef struct
+{
+     /// @brief Maximum allowed number of control points horizontally
+     ///        in a warp map. This controls the amount of memory allocated
+     ///        for warp map.
+     ///
+     /// Must be in range [1, 16384].
+     ///
+    uint32_t maxWarpMapWidth;
+
+     /// @brief Maximum allowed number of control points vertically
+     ///        in a warp map. This controls the amount of memory allocated
+     ///        for warp map.
+     ///
+     /// Must be in range [1, 16384].
+     ///
+    uint32_t maxWarpMapHeight;
+
+} NvMedia2DLdcWarpMapAttributes;
+
+/// @brief Attributes structure for #NvMedia2DCreateLdcMaskMap().
+///
+/// This type holds the attributes to control the fixed characteristics of an
+/// LDC mask map object. These attributes take effect during the call to
+/// NvMedia2DCreateLdcMaskMap() and are used to determine what resources need
+/// to be allocated for the mask map.
+///
+/// @sa NvMedia2DGetDefaultLdcMaskMapAttributes()
+/// @sa NvMedia2DCreateLdcMaskMap()
+///
+typedef struct
+{
+    /// @brief Maximum allowed destination rectangle width.
+    ///        These control the amount of memory allocated for the mask map.
+    ///
+    /// If used, must be in range [64, 16384].
+    ///
+    uint32_t maxDstWidth;
+
+    /// @brief Maximum allowed destination rectangle height.
+    ///        These control the amount of memory allocated for the mask map.
+    ///
+    /// If used, must be in range [16, 16384].
+    ///
+    uint32_t maxDstHeight;
+
+} NvMedia2DLdcMaskMapAttributes;
+
+/// @brief Attributes structure for #NvMedia2DCreateTnrState().
+///
+/// This type holds the attributes to control the fixed characteristics of a
+/// TNR state object. These attributes take effect during the call to
+/// NvMedia2DCreateTnrState() and are used to determine what resources need
+/// to be allocated for the object.
+///
+/// @sa NvMedia2DGetDefaultTnrStateAttributes()
+/// @sa NvMedia2DCreateTnrState()
+///
+typedef struct
+{
+    /// @brief Maximum allowed destination rectangle width.
+    ///        These control the amount of memory allocated for the internal
+    ///        TNR memory resources.
+    ///
+    /// If used, must be in range [64, 16384].
+    ///
+    uint32_t maxDstWidth;
+
+    /// @brief Maximum allowed destination rectangle height.
+    ///        These control the amount of memory allocated for the internal
+    ///        TNR memory resources.
+    ///
+    /// If used, must be in range [16, 16384].
+    ///
+    uint32_t maxDstHeight;
+
+} NvMedia2DTnrStateAttributes;
+
+/// @brief Capabilities of the NvMedia2D context.
+///
+/// This type holds the capabilities offered by the NvMedia2D context. These
+/// capabilities are dependent on the current VIC chip.
+///
+/// @sa NvMedia2DGetCapabilities()
+///
+typedef struct
+{
+    /// @brief Maximum number of input layers supported by compose operation.
+    uint32_t maxComposeLayers;
+
+    /// @brief Minimum downscale factor supported by compose operation.
+    float minScaleFactor;
+
+    /// @brief Maximum upscale factor supported by compose operation.
+    float maxScaleFactor;
+
+    /// @brief Minimum height of surface.
+    uint32_t minSurfaceHeight;
+
+    /// @brief Maximum height of surface.
+    uint32_t maxSurfaceHeight;
+
+    /// @brief Minimum width of surface.
+    uint32_t minSurfaceWidth;
+
+    /// @brief Maximum width of surface.
+    uint32_t maxSurfaceWidth;
+
+    /// @brief Width of the tiles the HW processes the surfaces in.
+    uint32_t tileWidth;
+
+    /// @brief Height of the tiles the HW processes the surfaces in.
+    uint32_t tileHeight;
+
+    /// @brief Compare CRC operation is supported.
+    bool supportsCompareCrc;
+
+    /// @brief Read CRC operation is supported.
+    bool supportsReadCrc;
+
+    /// @brief Compose operation is supported.
+    bool supportsCompose;
+
+    /// @brief Per-layer stand-alone LDC operation is supported.
+    bool supportsLdc;
+
+    /// @brief Per-layer LDC + Compose operation is supported.
+    bool supportsComposeLdc;
+
+    /// @brief Compose + TNR output operation is supported.
+    bool supportsComposeTnrOutput;
+
+    /// @brief Compose + XSobel post-process operation is supported.
+    bool supportsComposeXSobel;
+
+    /// @brief LDC mask map is supported.
+    bool supportsLdcMaskMap;
+
+    /// @brief Processing 16-bit YUV formats natively is supported.
+    bool supports16BitYUVNatively;
+
+    /// @brief Non-aligned destination and clip rectangles with chroma
+    ///        sub-sampled YUV formats are supported.
+    bool supportsNonAlignedRects;
+} NvMedia2DCapabilities;
 
 /// @brief Stores configuration for the NvMedia2DCompose() operation.
 ///
@@ -311,10 +471,14 @@ typedef struct
 /// NvMedia2DComposeParameters handle to a known value.
 ///
 /// @sa NvMedia2DGetComposeParameters()
+/// @sa NvMedia2DReleaseComposeParameters()
 /// @sa NvMedia2DInsertPreNvSciSyncFence()
 /// @sa NvMedia2DSetNvSciSyncObjforEOF()
 /// @sa NvMedia2DSetSrcGeometry()
 /// @sa NvMedia2DSetSrcFilter()
+/// @sa NvMedia2DSetSrcLdcTransformMatrix()
+/// @sa NvMedia2DSetSrcLdcWarpMap()
+/// @sa NvMedia2DSetSrcLdcMaskMap()
 /// @sa NvMedia2DSetSrcNvSciBufObj()
 /// @sa NvMedia2DSetDstNvSciBufObj()
 /// @sa NvMedia2DCompose()
@@ -332,10 +496,58 @@ typedef uint32_t NvMedia2DComposeParameters;
 /// Value 0 is never a valid handle value, and can be used to initialize an
 /// NvMedia2DFilterBuffer handle to a known value.
 ///
-/// @sa NvMedia2DCreateFilterBuffer
-/// @sa NvMedia2DDestroyFilterBuffer
+/// @sa NvMedia2DCreateFilterBuffer()
+/// @sa NvMedia2DDestroyFilterBuffer()
 ///
 typedef uint32_t NvMedia2DFilterBuffer;
+
+/// @brief Stores resources for an LDC warp map.
+///
+/// The underlying object cannot be instantiated directly by the client. Instead
+/// use the #NvMedia2DCreateLdcWarpMap() function to create and retrieve
+/// a handle to an available instance with resources allocated.
+/// Use #NvMedia2DDestroyLdcWarpMap() function to deallocate resources
+/// allocated by #NvMedia2DCreateLdcWarpMap() and release an instance.
+///
+/// Value 0 is never a valid handle value, and can be used to initialize an
+/// NvMedia2DLdcWarpMap handle to a known value.
+///
+/// @sa NvMedia2DCreateLdcWarpMap()
+/// @sa NvMedia2DDestroyLdcWarpMap()
+///
+typedef uint32_t NvMedia2DLdcWarpMap;
+
+/// @brief Stores resources for an LDC mask map.
+///
+/// The underlying object cannot be instantiated directly by the client. Instead
+/// use the #NvMedia2DCreateLdcMaskMap() function to create and retrieve
+/// a handle to an available instance with resources allocated.
+/// Use #NvMedia2DDestroyLdcMaskMap() function to deallocate resources
+/// allocated by #NvMedia2DCreateLdcMaskMap() and release an instance.
+///
+/// Value 0 is never a valid handle value, and can be used to initialize an
+/// NvMedia2DLdcMaskMap handle to a known value.
+///
+/// @sa NvMedia2DCreateLdcMaskMap()
+/// @sa NvMedia2DDestroyLdcMaskMap()
+///
+typedef uint32_t NvMedia2DLdcMaskMap;
+
+/// @brief Stores state and resources for TNR operation.
+///
+/// The underlying object cannot be instantiated directly by the client. Instead
+/// use the #NvMedia2DCreateTnrState() function to create and retrieve
+/// a handle to an available instance with resources allocated.
+/// Use #NvMedia2DDestroyTnrState() function to deallocate resources
+/// allocated by #NvMedia2DCreateTnrState() and release an instance.
+///
+/// Value 0 is never a valid handle value, and can be used to initialize an
+/// NvMedia2DTnrState handle to a known value.
+///
+/// @sa NvMedia2DCreateTnrState()
+/// @sa NvMedia2DDestroyTnrState()
+///
+typedef uint32_t NvMedia2DTnrState;
 
 /// @brief Stores information returned from NvMedia2DCompose().
 ///
@@ -382,6 +594,7 @@ typedef struct
     /// Other bits of the values are discarded.
     ///
     int16_t coeffs[32][5];
+
 } NvMedia2DFilterCoefficients5Tap;
 
 /// @brief Coefficients values structure for 10-tap custom filter.
@@ -408,50 +621,408 @@ typedef struct
     /// Other bits of the values are discarded.
     ///
     int16_t coeffs[32][10];
+
 } NvMedia2DFilterCoefficients10Tap;
 
-/// @brief Returns the version number of the NvMedia 2D library.
+/// @brief Holds the NvMedia LDC region configuration.
 ///
-/// This function returns the major and minor version number of the
-/// NvMedia 2D library. The client must pass an #NvMediaVersion struct
-/// to this function, and the version information will be returned in this
-/// struct.
+/// This structure defines the layout of the control points
+/// in the destination image.
 ///
-/// This allows the client to verify that the version of the library matches
-/// and is compatible with the the version number of the header file they are
-/// using.
+/// The control points are used as the basis for geometric transformation from
+/// source image to destination image. The remaining points are transformed
+/// based on the interpolation. Thus the density of the control points controls
+/// the quality of the geometric transformation.
 ///
-/// @param[out] version  Pointer to an #NvMediaVersion struct that will be
-///                      populated with the version information.
+/// This is an example of defining regions in the image:
+/// @code
 ///
-/// @return An #NvMediaStatus return code.
-/// @retval NVMEDIA_STATUS_OK             Version information returned
-///                                       successfully.
-/// @retval NVMEDIA_STATUS_BAD_PARAMETER  @a version is NULL.
+///           (dstRect->x1 - dstRect->x0)
+///        /                              \'
+///       /                                \'
+///      /                                  \'
 ///
-/// @pre None.
+///  regionWidth[0]             regionWidth[numRegionsX -1]
+///      /     \                     /      \'
+///     |-------|                   |--------|
+///     --------------------------------------                                      \'
+///     |******** ******** ...      ******** |--                                     \'
+///     |* +  + * *      * ...      *      * |   \                                    \'
+///     |* +  + * *      *          *      * | regionHeight[0]                         \'
+///     |* +  + * *      *          *      * |   /                                      \'
+///     |******** ********          ******** |--                                         \'
+///     |..                         ..       |                                            \'
+///     |..                         ..       |
+///     |..                         ..       |                           (dstRect->y1 - dstRect->y0)
+///     |                                    |
+///     |                                    |                                            /
+///     |******** ********...       ******** |--                                         /
+///     |*      * *      *...       *      * |  \                                       /
+///     |*      * *      *          *      * | regionHeight[numRegionsY -1]            /
+///     |*      * *      *          *      * |  /                                     /
+///     |******** ********          ******** |--                                     /
+///     --------------------------------------
 ///
-/// @usage
-/// - Allowed context for the API call
-///   - Interrupt handler: No
-///   - Signal handler: No
-///   - Thread-safe: Yes, with the following conditions:
-///     - Each thread uses different NvMediaVersion object
-///   - Re-entrant: No
-///   - Async/Sync: Sync
-/// - Required privileges: None
-/// - API group
-///   - Init: Yes
-///   - Runtime: Yes
-///   - De-Init: Yes
+/// @endcode
 ///
-/// @sa NVMEDIA_2D_VERSION_MAJOR
-/// @sa NVMEDIA_2D_VERSION_MINOR
-/// @sa NVMEDIA_2D_VERSION_PATCH
-/// @sa NvMediaVersion
+/// This is an example of defining control points in one region:
+/// @code
+///     *********
+///     *  +  + *-- \'
+///     *       *     (1 << controlPointYSpacingLog2)
+///     *  +  + *-- /
+///     *       *
+///     *********
+///        |--|
+///      (1 << controlPointXSpacingLog2)
 ///
-NvMediaStatus
-NvMedia2DGetVersion(NvMediaVersion * const version);
+/// @endcode
+/// See #NvMedia2DLdcWarpMapParameters for additional details of how
+/// the control points are organized.
+///
+/// Restrictions
+///
+/// * numRegionsX cannot exceed #NVMEDIA_2D_MAX_LDC_REGIONS_X.
+/// * numRegionsY cannot exceed #NVMEDIA_2D_MAX_LDC_REGIONS_Y.
+/// * Alignment restrictions:
+///   - regionWidth[N] must be equal or greater than and a multiple of
+///     NvMedia2DCapabilities::tileWidth for each N, except N = numRegionsX - 1.
+///   - regionHeight[N] must be equal or greater than and a multiple of
+///     NvMedia2DCapabilities::tileHeight for each N, except N = numRegionsY -
+///     1.
+/// * Region width/height restrictions:
+///  - regionWidth[N] must be less than or equal to 16384 for each N.
+///  - regionHeight[N] must be less than or equal to 16384 for each N.
+///  - The sum of regionWidth[] must be equal to the width of the dstRect
+///    argument passed to #NvMedia2DSetSrcGeometry(), and less than or equal to
+///    16384.
+///  - The sum of regionHeight[] must be equal to the height of dstRect
+///    argument passed to #NvMedia2DSetSrcGeometry(), and less than or equal to
+///    16384.
+/// * Control point interval restrictions:
+///  - controlPointXSpacingLog2[N] must be in range [0, 7] for each N.
+///  - controlPointYSpacingLog2[N] must be in range [0, 7] for each N.
+///
+/// @sa NvMedia2DCapabilities
+/// @sa NvMedia2DLdcTransformMatrix
+/// @sa NvMedia2DLdcWarpMapParameters
+/// @sa NvMedia2DFillLdcWarpMap()
+/// @sa NvMedia2DSetSrcLdcTransformMatrix()
+///
+typedef struct
+{
+    /// @brief Holds the number of horizontal regions.
+    ///        Allowed values are [1, 4], inclusive.
+    uint32_t numRegionsX;
+
+    /// @brief Holds the number of vertical regions.
+    ///        Allowed values are [1, 4], inclusive.
+    uint32_t numRegionsY;
+
+    /// @brief Holds the width of regions.
+    uint32_t regionWidth[NVMEDIA_2D_MAX_LDC_REGIONS_X];
+
+    /// @brief Holds the height of regions.
+    uint32_t regionHeight[NVMEDIA_2D_MAX_LDC_REGIONS_Y];
+
+    /// @brief Holds the horizontal interval between the control points
+    ///        in each region in log2 space.
+    uint32_t controlPointXSpacingLog2[NVMEDIA_2D_MAX_LDC_REGIONS_X];
+
+    /// @brief Holds the vertical interval between the control points
+    ///        in each region in log2 space.
+    uint32_t controlPointYSpacingLog2[NVMEDIA_2D_MAX_LDC_REGIONS_Y];
+
+} NvMedia2DLdcRegionParameters;
+
+/// @brief Holds configutation for LDC transform matrix.
+///
+/// @sa NvMedia2DSetSrcLdcTransformMatrix()
+///
+typedef struct
+{
+    /// @brief Specifies the regions parameters.
+    NvMedia2DLdcRegionParameters regionParams;
+
+    /// @brief Holds the inverse perspective matrix,
+    ///        defined in the following way:
+    ///            |p[0][0]  p[0][1]  p[0][2]|
+    ///            |p[1][0]  p[1][1]  p[1][2]|
+    ///            |p[2][0]  p[2][1]  p[2][2]|
+    float matrixCoeffs[3][3];
+
+} NvMedia2DLdcTransformMatrix;
+
+/// @brief Represents a LDC warp map control point.
+///
+/// @sa NvMedia2DLdcWarpMapParameters
+///
+typedef struct
+{
+    /// @brief Horizontal coordinate.
+    ///
+    /// Clamped to range [-32768, 32767.96875]. NaN is mapped to -32768.
+    ///
+    float x;
+
+    /// @brief Vertical coordinate.
+    ///
+    /// Clamped to range [-32768, 32767.96875]. NaN is mapped to -32768.
+    ///
+    float y;
+
+} NvMedia2DLdcControlPoint;
+
+/// @brief Holds the NvMedia definition of an LDC Warp Map.
+///
+/// Warp Map stores the mappings of each control point from destination
+/// image to input image. The coordinates of control points in a destination
+/// image are defined by regionParams.
+///
+/// If warp map region N has controlPointXSpacingLog2[N] = 0 it is considered to
+/// have "full columns", and with controlPointYSpacingLog2[N] = 0 "full rows".
+/// Otherwise, the region has "sparse columns/rows".
+///
+/// The warp map processing always operates on "tiles" of size
+/// NvMedia2DCapabilities::tileWidth x NvMedia2DCapabilities::tileHeight pixels.
+/// When determining the number of control points in warp map region N,
+/// regionWidth[N] is rounded up to the next multiple of tile width and
+/// regionHeight[N] to the next multiple of tile height.
+///
+/// In a warp map region with full columns/rows, the number of columns/rows of
+/// control points equals the tile size rounded up width/height of the region.
+///
+/// In a warp map region with sparse columns/rows,
+/// - First control point column/row is at position 0 within the region.
+/// - There's always an odd number of columns/rows of control points.
+/// - The position of the last control point column/row is always outside the
+///   tile size rounded up width/height of the region.
+///
+/// For example, if region width is 192 and control point interval is 64, it
+/// will result in 5 columns of control points with X-coordinates 0, 64, 128,
+/// 192 and 256.
+///
+/// The code below shows how to calculate the exact number of control points
+/// for a single region:
+///
+/// @code
+///     NvMedia2DCapabilities caps;
+///     NvMedia2DLdcRegionParameters regionInfo;
+///     ...
+///     w = RoundUp(regionInfo.regionWidth[i], caps.tileWidth);
+///     dx = 1 << regionInfo.controlPointXSpacingLog2[i];
+///     numColumns = RoundUp(w, 2 * dx) / dx + (dx == 1 ? 0 : 1);
+///
+///     h = RoundUp(regionInfo.regionHeight[i], caps.tileHeight);
+///     dy = 1 << regionInfo.controlPointYSpacingLog2[i];
+///     numRows = RoundUp(h, 2 * dy) / dy + (dy == 1 ? 0 : 1);
+/// @endcode
+///
+/// Where `RoundUp()` rounds the first argument up to the nearest multiple of
+/// the second argument.
+///
+/// @sa NvMedia2DCapabilities
+/// @sa NvMedia2DLdcRegionParameters
+/// @sa NvMedia2DFillLdcWarpMap()
+/// @sa NvMedia2DSetSrcLdcTransformMatrix()
+///
+typedef struct
+{
+    /// @brief Specifies the regions paramters.
+    NvMedia2DLdcRegionParameters regionParams;
+
+    /// @brief Number of control points in the controlPoints array.
+    ///
+    /// Must equal the number of control points specified by regionParams.
+    ///
+    uint32_t numControlPoints;
+
+    /// @brief Array of control points across all the regions
+    ///        stored in a row-major order.
+    NvMedia2DLdcControlPoint const *controlPoints;
+
+} NvMedia2DLdcWarpMapParameters;
+
+/// @brief Holds the LDC Mask Map information.
+///
+/// With the destination rectangle, this mask map surface defines the region of
+/// interest in the destination image.
+/// The dstRect argument passed to #NvMedia2DSetSrcGeometry() defines the
+/// destination rectangle.
+///
+/// @sa NvMedia2DFillLdcMaskMap()
+///
+typedef struct
+{
+    /// @brief Holds the width in pixels of the mask map surface,
+    ///        which must be equal to the width of the destination rectangle.
+    uint32_t width;
+
+    /// @brief Holds the height in pixels of the mask map surface,
+    ///        which must be equal to the height of the destination rectangle.
+    uint32_t height;
+
+    /// @brief Indicates whether to fill the masked pixel with
+    ///        the mask color.
+    bool useMaskColor;
+
+    /// @brief Holds the Y channel value of the mask color.
+    ///
+    /// If used, must be in range [0, 1].
+    ///
+    float maskColorY;
+
+    /// @brief Holds the U channel value of the mask color.
+    ///
+    /// If used, must be in range [0, 1].
+    ///
+    float maskColorU;
+
+    /// @brief Holds the V channel value of the mask color.
+    ///
+    /// If used, must be in range [0, 1].
+    ///
+    float maskColorV;
+
+    /// @brief Holds the value for the Mask Map surface.
+    ///
+    /// The Mask Map surface is stored row by row. Each stored bool value is
+    /// used to indicate whether this pixel has been masked or not.
+    /// A true value means that the pixel is not to be masked.
+    /// The buffer needs to hold width * height bool objects.
+    bool const *pixelMasks;
+
+} NvMedia2DLdcMaskMapParameters;
+
+/// @brief Holds the TNR3 initialization parameters.
+///
+/// @sa NvMedia2DSetTnrParameters()
+///
+typedef struct
+{
+    /// @brief Holds the sigma of the luma for spatial filter.
+    ///
+    /// Must be in range [1, 46340].
+    ///
+    uint32_t spatialSigmaLuma;
+
+    /// @brief Holds the sigma of the chroma for spatial filter.
+    ///
+    /// Must be in range [1, 46340].
+    ///
+    uint32_t spatialSigmaChroma;
+
+    /// @brief Holds the sigma of the luma for range filter.
+    ///
+    /// Must be in range [1, 46340].
+    ///
+    uint32_t rangeSigmaLuma;
+
+    /// @brief Holds the sigma of the chroma for range filter.
+    ///
+    /// Must be in range [1, 46340].
+    ///
+    uint32_t rangeSigmaChroma;
+
+    /// @brief Holds the SAD multiplier parameter.
+    ///
+    /// Must be in range [0, 1.125].
+    ///
+    float sadMultiplier;
+
+    /// @brief Holds the weight of luma when calculating SAD.
+    ///
+    /// Must be in range [0, 1.96875].
+    ///
+    float sadWeightLuma;
+
+    /// @brief Holds a flag which enables or disables the spatial alpha smooth.
+    bool alphaSmoothEnable;
+
+    /// @brief Holds the temporal alpha restrict increase capablility.
+    ///
+    /// Must be in range [0, 1.9990234375].
+    ///
+    float alphaIncreaseCap;
+
+    /// @brief Holds the alpha scale IIR for strength.
+    ///
+    /// Must be in range [0, 1.9990234375].
+    ///
+    float alphaScaleIIR;
+
+    /// @brief Holds the max luma value in Alpha Clip Calculation.
+    ///
+    /// Must be in range [0, 1.9990234375].
+    ///
+    float alphaMaxLuma;
+
+    /// @brief Holds the min luma value in Alpha Clip Calculation.
+    ///
+    /// Must be in range [0, 1.9990234375].
+    ///
+    float alphaMinLuma;
+
+    /// @brief Holds the max chroma value in Alpha Clip Calculation.
+    ///
+    /// Must be in range [0, 1.9990234375].
+    ///
+    float alphaMaxChroma;
+
+    /// @brief Holds the min chroma value in Alpha Clip Calculation.
+    ///
+    /// Must be in range [0, 1.9990234375].
+    ///
+    float alphaMinChroma;
+
+    /// @brief Holds parameter BetaX1 in Beta Calculation.
+    ///
+    /// Must be in range [0, 1.9990234375].
+    ///
+    float betaX1;
+
+    /// @brief Holds parameter BetaX2 in Beta Calculation.
+    ///
+    /// Must be in range [0, 1.9990234375].
+    ///
+    float betaX2;
+
+    /// @brief Holds parameter MaxBeta threshold in Beta Calculation.
+    ///
+    /// Must be in range [0, 1.9990234375].
+    ///
+    float maxBeta;
+
+    /// @brief Holds parameter BetaX2 in Beta Calculation.
+    ///
+    /// Must be in range [0, 1.9990234375].
+    ///
+    float minBeta;
+} NvMedia2DTnrParameters;
+
+/// @brief Number of bytes in NvMedia 2D checksums.
+#define NVMEDIA_2D_CHECKSUM_NUM_BYTES 24u
+
+/// @brief Represents a checksum.
+typedef struct
+{
+    /// @brief The checksum data.
+    uint8_t data[NVMEDIA_2D_CHECKSUM_NUM_BYTES];
+} NvMedia2DChecksum;
+
+/// @brief NvMedia 2D checksum mode.
+///
+/// This enum describes the different checksum calculation modes that are
+/// supported by NvMedia 2D.
+///
+typedef enum
+{
+    /// @brief No checksum calculated. This is the default behavior.
+    NVMEDIA_2D_CHECKSUM_MODE_DISABLED,
+
+    /// @brief Checksum calculated from source surface pixel data.
+    NVMEDIA_2D_CHECKSUM_MODE_SRC_SURFACE,
+} NvMedia2DChecksumMode;
 
 /// @brief NvMedia2D Context.
 ///
@@ -463,19 +1034,142 @@ NvMedia2DGetVersion(NvMediaVersion * const version);
 ///
 typedef struct NvMedia2D NvMedia2D;
 
+/// @brief Return the default values for NvMedia2DAttributes.
+///
+/// This function returns a NvMedia2DAttributes structure with
+/// default values.
+///
+/// Default attributes:
+/// - numComposeParameters: 1
+/// - maxRegisteredBuffers: 64
+/// - maxRegisteredSyncs: 16
+/// - maxFilterBuffers: 0
+/// - maxLdcWarpMaps: 16
+/// - maxLdcMaskMaps: 16
+/// - maxTnrStates: 16
+/// - flags: 0
+///
+/// @return A NvMedia2DAttributes structure with default values.
+///
+/// @pre None.
+///
+/// @usage
+/// - Allowed context for the API call
+///   - Interrupt handler: No
+///   - Signal handler: No
+///   - Thread-safe: Yes
+///   - Re-entrant: No
+///   - Async/Sync: Sync
+/// - Required privileges: None
+/// - API group
+///   - Init: Yes
+///   - Runtime: No
+///   - De-Init: No
+///
+/// @sa NvMedia2DAttributes
+///
+NvMedia2DAttributes
+NvMedia2DGetDefaultAttributes(void);
+
+/// @brief Return the default values for NvMedia2DLdcWarpMapAttributes.
+///
+/// This function returns a NvMedia2DLdcWarpMapAttributes structure with
+/// default values.
+///
+/// Default attributes:
+/// - maxWarpMapWidth: 0
+/// - maxWarpMapHeight: 0
+///
+/// @return A NvMedia2DLdcWarpMapAttributes structure with default values.
+///
+/// @pre None.
+///
+/// @usage
+/// - Allowed context for the API call
+///   - Interrupt handler: No
+///   - Signal handler: No
+///   - Thread-safe: Yes
+///   - Re-entrant: No
+///   - Async/Sync: Sync
+/// - Required privileges: None
+/// - API group
+///   - Init: Yes
+///   - Runtime: No
+///   - De-Init: No
+///
+/// @sa NvMedia2DLdcWarpMapAttributes
+///
+NvMedia2DLdcWarpMapAttributes
+NvMedia2DGetDefaultLdcWarpMapAttributes(void);
+
+/// @brief Return the default values for NvMedia2DLdcMaskMapAttributes.
+///
+/// This function returns a NvMedia2DLdcMaskMapAttributes structure with
+/// default values.
+///
+/// Default attributes:
+/// - maxDstWidth: 0
+/// - maxDstHeight: 0
+///
+/// @return A NvMedia2DLdcMaskMapAttributes structure with default values.
+///
+/// @pre None.
+///
+/// @usage
+/// - Allowed context for the API call
+///   - Interrupt handler: No
+///   - Signal handler: No
+///   - Thread-safe: Yes
+///   - Re-entrant: No
+///   - Async/Sync: Sync
+/// - Required privileges: None
+/// - API group
+///   - Init: Yes
+///   - Runtime: No
+///   - De-Init: No
+///
+/// @sa NvMedia2DLdcMaskMapAttributes
+///
+NvMedia2DLdcMaskMapAttributes
+NvMedia2DGetDefaultLdcMaskMapAttributes(void);
+
+/// @brief Return the default values for NvMedia2DTnrStateAttributes.
+///
+/// This function returns a NvMedia2DTnrStateAttributes structure with
+/// default values.
+///
+/// Default attributes:
+/// - maxDstWidth: 0
+/// - maxDstHeight: 0
+///
+/// @return A NvMedia2DTnrStateAttributes structure with default values.
+///
+/// @pre None.
+///
+/// @usage
+/// - Allowed context for the API call
+///   - Interrupt handler: No
+///   - Signal handler: No
+///   - Thread-safe: Yes
+///   - Re-entrant: No
+///   - Async/Sync: Sync
+/// - Required privileges: None
+/// - API group
+///   - Init: Yes
+///   - Runtime: No
+///   - De-Init: No
+///
+/// @sa NvMedia2DTnrStateAttributes
+///
+NvMedia2DTnrStateAttributes
+NvMedia2DGetDefaultTnrStateAttributes(void);
+
 /// @brief Creates a new NvMedia2D context.
 ///
 /// This function creates a new instance of an NvMedia2D context, and returns a
 /// pointer to that context. Ownership of this context is passed to the caller.
 /// When no longer in use, the caller must destroy the context using the
 /// #NvMedia2DDestroy() function.
-///
-/// Default attributes (when not specified by caller):
-/// - numComposeParameters: 1
-/// - maxRegisteredBuffers: 64
-/// - maxRegisteredSyncs: 16
-/// - maxFilterBuffers: 0
-/// - flags: 0.
 ///
 /// @param[out] handle  Pointer to receive the handle to the new NvMedia2D
 ///                     context.
@@ -496,7 +1190,9 @@ typedef struct NvMedia2D NvMedia2D;
 /// @retval NVMEDIA_STATUS_ERROR          An internal failure occurred when
 ///                                       trying to create the context.
 ///
-/// @pre None.
+/// @pre
+/// - Any NvMedia2DAttributes struct passed in @a attr must have been
+///   initialized with NvMedia2DGetDefaultAttributes().
 ///
 /// @usage
 /// - Allowed context for the API call
@@ -512,7 +1208,9 @@ typedef struct NvMedia2D NvMedia2D;
 ///   - Runtime: No
 ///   - De-Init: No
 ///
+/// @sa NvMedia2DAttributes
 /// @sa NvMedia2D
+/// @sa NvMedia2DGetDefaultAttributes()
 /// @sa NvMedia2DDestroy()
 ///
 NvMediaStatus
@@ -526,6 +1224,7 @@ NvMedia2DCreate(NvMedia2D ** const handle,
 /// Before calling this function, the caller must ensure:
 /// - There are no NvSciSync or NvSyncBuf objects still registered against the
 ///   NvMedia2D context.
+/// - There are no NvMedia2DFilterBuffer objects still alive.
 /// - All previous 2D operations submitted using NvMedia2DCompose() have
 //    completed.
 ///
@@ -538,7 +1237,9 @@ NvMedia2DCreate(NvMedia2D ** const handle,
 ///                                       system state.
 /// @retval NVMEDIA_STATUS_PENDING        There are still some NvSciSync or
 ///                                       NvSciBuf objects registered against
-///                                       the NvMedia2D context.
+///                                       the NvMedia2D context, or there are
+///                                       some NvMedia2DFilterBuffer objects
+///                                       that have not been destroyed.
 /// @retval NVMEDIA_STATUS_ERROR          An internal failure occurred when
 ///                                       trying to destroy the context. The
 ///                                       context is in state where the only
@@ -568,22 +1269,31 @@ NvMedia2DCreate(NvMedia2D ** const handle,
 NvMediaStatus
 NvMedia2DDestroy(NvMedia2D const * const handle);
 
+/// @brief Returns the NvMedia2D context capabilities.
+///
+/// This function returns a pointer to a read-only #NvMedia2DCapabilities struct,
+/// populated with the capabilities of the NvMedia2D context.
+///
+/// @return Pointer to a read-only #NvMedia2DCapabilities struct. Ownership of this
+///         pointer is retained by the NvMedia2D context. The return value will be
+///         a null pointer if the specified context is invalid.
+///
+/// @sa NvMedia2DCapabilities
+///
+NvMedia2DCapabilities const *
+NvMedia2DGetCapabilities(NvMedia2D const * const handle);
+
 /// @brief Returns an #NvMedia2DComposeParameters instance.
 ///
 /// This functions returns a handle to an NvMedia2DComposeParameters object.
 /// The object will be initialized and ready to use. The caller takes ownership
 /// of this handle. Ownership will be passed back to the NvMedia2D context when
-/// it is subsequently used in the #NvMedia2DCompose() operation.
+/// it is subsequently used in the #NvMedia2DCompose() operation, or explicitly
+/// released with #NvMedia2DReleaseComposeParameters().
 ///
 /// The handle returned in @a params is tied to the specific NvMedia2D context
 /// instance passed in @a handle and cannot be used with other context
 /// instances.
-///
-/// The object will be initialized with these default values:
-/// - source rectangle: set to the dimensions of the source surface
-/// - destination rectangle: set to the dimensions of the destination surface
-/// - filter: NVMEDIA_2D_FILTER_OFF
-/// - transform: NVMEDIA_2D_TRANSFORM_NONE.
 ///
 /// @param[in]  handle  Pointer to the NvMedia2D context.
 /// @param[out] params  Pointer to an #NvMedia2DComposeParameters, which will
@@ -620,11 +1330,58 @@ NvMedia2DDestroy(NvMedia2D const * const handle);
 ///   - De-Init: No
 ///
 /// @sa NvMedia2DComposeParameters
+/// @sa NvMedia2DReleaseComposeParameters()
 /// @sa NvMedia2DCompose()
 ///
 NvMediaStatus
 NvMedia2DGetComposeParameters(NvMedia2D const * const handle,
                               NvMedia2DComposeParameters * const params);
+
+/// @brief Releases an #NvMedia2DComposeParameters instance.
+///
+/// This function releases an #NvMedia2DComposeParameters instance acquired with
+/// #NvMedia2DGetComposeParameters() without executing the compose operation
+/// described by the parameters. This can be useful in error handling scenarios.
+///
+/// If the operation is submitted with #NvMedia2DCompose(), there is no need to
+/// call this function.
+///
+/// @param[in] handle  Pointer to the #NvMedia2D context.
+/// @param[in] params  The #NvMedia2DComposeParameters instance to release.
+///
+/// @return An #NvMediaStatus return code.
+/// @retval NVMEDIA_STATUS_OK             Parameters instance released
+///                                       successfully.
+/// @retval NVMEDIA_STATUS_BAD_PARAMETER  One of the parameters has an invalid
+///                                       value, either:
+///                                       - @a handle is NULL
+///                                       - @a params is invalid.
+///
+/// @pre
+/// - @a handle must be valid NvMedia2D handle created with NvMedia2DCreate().
+/// - @a params must be valid NvMedia2DComposeParameters handle created with
+///   NvMedia2DGetComposeParameters().
+///
+/// @usage
+/// - Allowed context for the API call
+///   - Interrupt handler: No
+///   - Signal handler: No
+///   - Thread-safe: Yes, with the following conditions:
+///     - Each thread uses different NvMedia2D handle
+///   - Re-entrant: No
+///   - Async/Sync: Sync
+/// - Required privileges: None
+/// - API group
+///   - Init: No
+///   - Runtime: Yes
+///   - De-Init: No
+///
+/// @sa NvMedia2DComposeParameters
+/// @sa NvMedia2DGetComposeParameters()
+///
+NvMediaStatus
+NvMedia2DReleaseComposeParameters(NvMedia2D const *const handle,
+                                  NvMedia2DComposeParameters const params);
 
 /// @brief Performs a 2D compose operation.
 ///
@@ -633,15 +1390,19 @@ NvMedia2DGetComposeParameters(NvMedia2D const * const handle,
 /// values on the way. The surfaces can have different pixel formats. NvMedia 2D
 /// does the necessary conversions between the formats.
 ///
-/// @note For a YUV surface type with 16-bit depth, only scale and crop are
-/// supported. Pixel format conversion, transformations or multi-surface
-/// composition is not supported.
-///
 /// If the dimensions of the source rectangle do not match the dimensions of the
 /// destination rectangle, the operation scales the pixels to fit the
-/// destination rectangle. The filtering mode for scale defaults to
-/// #NVMEDIA_2D_FILTER_OFF. Additional filtering modes can be used by setting
-/// the corresponding parameter using #NvMedia2DSetSrcFilter().
+/// destination rectangle. If the source or the destination rectangle is not
+/// explicitly set, it will default to match the dimensions of the source or the
+/// destination surface, respectively.
+///
+/// If the clip rectangle is not explicitly set, it will default to match the
+/// dimensions of the destination rectangle if single source layer is set, or
+/// the dimensions of the destination surface if multiple source layers are set.
+///
+/// If no filter mode is explicitly set, then an appropriate mode will be
+/// automatically selected, depending on the current scaling factor and hardware
+/// restrictions.
 ///
 /// This example performs a straight pixel copy between surfaces of the same
 /// dimensions (but not necessarily the same bit depth or color format):
@@ -657,45 +1418,52 @@ NvMedia2DGetComposeParameters(NvMedia2D const * const handle,
 /// @anchor NvMedia2DComposeParameterRestrictions
 ///
 /// Restrictions on dimensions for input and output surfaces:
-/// - For 16-bit YUV/YUVX/Y formats:
-///   - Width must be within the range: [16, 8192]
-///   - Height must be within the range: [16, 8192]
-/// - For any other supported format:
-///   - Width must be within the range: [16, 16384]
-///   - Height must be within the range: [16, 16384]
+/// - Width must be within the range: [16, 16384]
+/// - Height must be within the range: [16, 16384]
 ///
-/// Additional restrictions for chroma sub-sampled YUV formats:
+/// Additional surface dimension restrictions for chroma sub-sampled YUV
+/// formats:
 /// - 444:
 ///   - Width: no restriction
 ///   - Height: no restriction
 /// - 422:
-///   - Width:
-///     - must be a multiple of 2
-///     - must be at least 32 for 16-bit YUV formats
+///   - Width: must be a multiple of 2
 ///   - Height: no restriction
 /// - 422R:
 ///   - Width: no restriction
-///   - Height:
-///     - must be a multiple of 2
-///     - must be at least 32 for 16-bit YUV formats
+///   - Height: must be a multiple of 2
 /// - 420:
-///   - Width:
-///     - must be a multiple of 2
-///     - must be at least 32 for 16-bit YUV formats
-///   - Height:
-///     - must be a multiple of 2
-///     - must be at least 32 for 16-bit YUV formats
+///   - Width: must be a multiple of 2
+///   - Height: must be a multiple of 2
 ///
 /// Restrictions on the source rectangle:
 /// - Must be within the bounds of the source surface.
 /// - Width and height must be greater than zero.
 ///
-/// Restrictions on the destination rectangle:
+/// Restrictions on the destination and clip rectangle:
 /// - Must be within the bounds of the destination surface.
 /// - Width and height must be greater than zero.
-/// - For 16-bit formats, top-left corner must be zero.
-/// - For any YUV format with chroma subsampling different than 444, all corners
-///   must be aligned to a a multiple of 2.
+///
+/// Restrictions on the source layers:
+/// - The number of source layers configured must be at most
+///   NvMedia2DCapabilities::maxComposeLayers.
+///
+/// If NvMedia2DCapabilities::supports16BitYUVNatively is false, following
+/// additional restrictions apply for 16-bit YUV/YUVX/Y formats:
+/// - Only scaling and cropping are supported. Pixel format conversion,
+///   transformations or multi-surface composition is not supported.
+/// - Surface width must be within the range: [16, 8192]
+/// - Surface height must be within the range: [16, 8192]
+/// - With 422 chroma sub-sampling, surface width must be at least 32
+/// - With 422R chroma sub-sampling, surface height must be at least 32
+/// - With 420 chroma sub-sampling, both surface width and surface height must
+///   be at least 32
+/// - Destination rectangle top-left corner must be zero.
+///
+/// If NvMedia2DCapabilities::supportsNonAlignedRects is false, following
+/// additional restrictions apply for chroma sub-sampled YUV formats:
+/// - All destination and clip rectangle corners must be aligned to a a multiple
+///   of 2.
 ///
 /// @anchor NvMedia2DComposeConcurrencyRestrictions
 ///
@@ -712,9 +1480,13 @@ NvMedia2DGetComposeParameters(NvMedia2D const * const handle,
 /// - Using (semi-)planar YUV formats generally provides better performance than
 ///   interleaved (Y8U8Y8V8 etc.) formats.
 /// - The hardware accelerator utilized by NvMedia 2D accesses the destination
-///   surface in 64x16 (width x height) pixel tiles. Using destination surface
-///   size and destination rectangle dimensions that are exact multiples of the
-///   tile size most optimally aligns with this hardware access pattern.
+///   surface in "tiles" of size NvMedia2DCapabilities::tileWidth x
+///   NvMedia2DCapabilities::tileHeight pixels. Using destination surface size
+///   and destination rectangle dimensions that are exact multiples of the tile
+///   size most optimally aligns with this hardware access pattern.
+/// - If NvMedia2DCapabilities::supports16BitYUVNatively is false, operations
+///   with 16-bit (semi-)planar YUV format surfaces will be processed with
+///   multiple harware accelerator passes.
 ///
 /// The result info returned in @a result is tied to the specific NvMedia2D
 /// context instance passed in @a handle and cannot be used with other context
@@ -774,6 +1546,7 @@ NvMedia2DGetComposeParameters(NvMedia2D const * const handle,
 ///   - Runtime: Yes
 ///   - De-Init: No
 ///
+/// @sa NvMedia2DCapabilities
 /// @sa NvMedia2DComposeParameters
 /// @sa NvMedia2DGetComposeParameters()
 /// @sa NvMedia2DInsertPreNvSciSyncFence()
@@ -781,6 +1554,9 @@ NvMedia2DGetComposeParameters(NvMedia2D const * const handle,
 /// @sa NvMedia2DSetSrcGeometry()
 /// @sa NvMedia2DSetSrcFilter()
 /// @sa NvMedia2DSetSrcBlendMode()
+/// @sa NvMedia2DSetSrcLdcTransformMatrix()
+/// @sa NvMedia2DSetSrcLdcWarpMap()
+/// @sa NvMedia2DSetSrcLdcMaskMap()
 /// @sa NvMedia2DSetSrcNvSciBufObj()
 /// @sa NvMedia2DSetDstNvSciBufObj()
 /// @sa NvMedia2DGetEOFNvSciSyncFence()
@@ -941,6 +1717,263 @@ NvMedia2DSetSrcBlendMode(NvMedia2D const * const handle,
                          NvMedia2DBlendMode const blendMode,
                          float const constantAlpha);
 
+/// @brief Sets the LDC transform matrix for a source layer.
+///
+/// Only one of LDC transform matrix or LDC warp map can be set for a given
+/// source layer of a compose operation.
+///
+/// @param[in] handle        Pointer to the NvMedia2D context.
+/// @param[in] params        An NvMedia2DComposeParameters handle.
+/// @param[in] index         Index of source layer to configure. Must be in
+///                          range [0, 15].
+/// @param[in] ldcIptParams  Pointer to an #NvMedia2DLdcTransformMatrix struct.
+///
+/// @return An #NvMediaStatus return code.
+/// @retval NVMEDIA_STATUS_OK               Parameters set successfully.
+/// @retval NVMEDIA_STATUS_BAD_PARAMETER    One of the parameters has an invalid
+///                                         value. This could be:
+///                                         - @a handle is NULL
+///                                         - @a params is invalid
+///                                         - @a index is out of range
+///                                         - @a ldcIptParams is NULL.
+///
+/// @pre
+/// - @a handle must be valid NvMedia2D handle created with NvMedia2DCreate().
+/// - @a params must be valid NvMedia2DComposeParameters handle created with
+///   NvMedia2DGetComposeParameters().
+///
+/// @usage
+/// - Allowed context for the API call
+///   - Interrupt handler: No
+///   - Signal handler: No
+///   - Thread-safe: Yes, with the following conditions:
+///     - Each thread uses different NvMedia2D handle
+///   - Re-entrant: No
+///   - Async/Sync: Sync
+/// - Required privileges: None
+/// - API group
+///   - Init: No
+///   - Runtime: Yes
+///   - De-Init: No
+///
+/// @sa NvMedia2DComposeParameters
+/// @sa NvMedia2DLdcWarpMap
+/// @sa NvMedia2DCompose()
+///
+NvMediaStatus
+NvMedia2DSetSrcLdcTransformMatrix(NvMedia2D const * const handle,
+                                  NvMedia2DComposeParameters const params,
+                                  uint32_t const index,
+                                  NvMedia2DLdcTransformMatrix const * const ldcIptParams);
+
+/// @brief Sets the LDC warp map for a source layer.
+///
+/// After a successful call to this function, the compose parameters object
+/// referred to by @a params will refer to the LDC warp map object passed in
+/// @a ldcWarpMap. Any updates to the LDC warp map object will be reflected in
+/// the compose operation described by @a params. The caller is responsible for
+/// ensuring the lifetime of the LDC warp map object extends beyond the duration
+/// of the compose operation.
+///
+/// Only one of LDC transform matrix or LDC warp map can be set for a given
+/// source layer of a compose operation.
+///
+/// @param[in] handle      Pointer to the NvMedia2D context.
+/// @param[in] params      An NvMedia2DComposeParameters handle.
+/// @param[in] index       Index of source layer to configure. Must be in range
+///                        [0, 15].
+/// @param[in] ldcWarpMap  An #NvMedia2DLdcWarpMap handle.
+///
+/// @return An #NvMediaStatus return code.
+/// @retval NVMEDIA_STATUS_OK               Parameters set successfully.
+/// @retval NVMEDIA_STATUS_BAD_PARAMETER    One of the parameters has an invalid
+///                                         value. This could be:
+///                                         - @a handle is NULL
+///                                         - @a params is invalid
+///                                         - @a index is out of range
+///                                         - @a ldcWarpMap is invalid.
+///
+/// @pre
+/// - @a handle must be valid NvMedia2D handle created with NvMedia2DCreate().
+/// - @a params must be valid NvMedia2DComposeParameters handle created with
+///   NvMedia2DGetComposeParameters().
+/// - @a ldcWarpMap must be valid NvMedia2DLdcWarpMap handle created with
+///   NvMedia2DCreateLdcWarpMap().
+///
+/// @usage
+/// - Allowed context for the API call
+///   - Interrupt handler: No
+///   - Signal handler: No
+///   - Thread-safe: Yes, with the following conditions:
+///     - Each thread uses different NvMedia2D handle
+///   - Re-entrant: No
+///   - Async/Sync: Sync
+/// - Required privileges: None
+/// - API group
+///   - Init: No
+///   - Runtime: Yes
+///   - De-Init: No
+///
+/// @sa NvMedia2DComposeParameters
+/// @sa NvMedia2DLdcWarpMap
+/// @sa NvMedia2DCompose()
+///
+NvMediaStatus
+NvMedia2DSetSrcLdcWarpMap(NvMedia2D const * const handle,
+                          NvMedia2DComposeParameters const params,
+                          uint32_t const index,
+                          NvMedia2DLdcWarpMap const ldcWarpMap);
+
+/// @brief Sets the LDC mask map for a source layer.
+///
+/// After a successful call to this function, the compose parameters object
+/// referred to by @a params will refer to the LDC mask map object passed in
+/// @a ldcMaskMap. Any updates to the LDC mask map object will be reflected in
+/// the compose operation described by @a params. The caller is responsible for
+/// ensuring the lifetime of the LDC mask map object extends beyond the duration
+/// of the compose operation.
+///
+/// @param[in] handle      Pointer to the NvMedia2D context.
+/// @param[in] params      An NvMedia2DComposeParameters handle.
+/// @param[in] index       Index of source layer to configure. Must be in range
+///                        [0, 15].
+/// @param[in] ldcMaskMap  An #NvMedia2DLdcMaskMap handle.
+///
+/// @return An #NvMediaStatus return code.
+/// @retval NVMEDIA_STATUS_OK               Parameters set successfully.
+/// @retval NVMEDIA_STATUS_BAD_PARAMETER    One of the parameters has an invalid
+///                                         value. This could be:
+///                                         - @a handle is NULL
+///                                         - @a params is invalid
+///                                         - @a index is out of range
+///                                         - @a ldcMaskMap is invalid.
+///
+/// @pre
+/// - @a handle must be valid NvMedia2D handle created with NvMedia2DCreate().
+/// - @a params must be valid NvMedia2DComposeParameters handle created with
+///   NvMedia2DGetComposeParameters().
+/// - @a ldcMaskMap must be valid NvMedia2DLdcMaskMap handle created with
+///   NvMedia2DCreateLdcMaskMap().
+///
+/// @usage
+/// - Allowed context for the API call
+///   - Interrupt handler: No
+///   - Signal handler: No
+///   - Thread-safe: Yes, with the following conditions:
+///     - Each thread uses different NvMedia2D handle
+///   - Re-entrant: No
+///   - Async/Sync: Sync
+/// - Required privileges: None
+/// - API group
+///   - Init: No
+///   - Runtime: Yes
+///   - De-Init: No
+///
+/// @sa NvMedia2DComposeParameters
+/// @sa NvMedia2DLdcMaskMap
+/// @sa NvMedia2DCompose()
+///
+NvMediaStatus
+NvMedia2DSetSrcLdcMaskMap(NvMedia2D const * const handle,
+                          NvMedia2DComposeParameters const params,
+                          uint32_t const index,
+                          NvMedia2DLdcMaskMap const ldcMaskMap);
+
+/// @brief Sets the clip rectangle for the compose operation.
+///
+/// Write to the destination surface is restricted to the region specified by
+/// the clip rectangle.
+///
+/// @param[in] handle    Pointer to the NvMedia2D context.
+/// @param[in] params    An NvMedia2DComposeParameters handle.
+/// @param[in] clipRect  Pointer to an NvMediaRect that contains the clip
+///                      rectangle, or NULL for default rectangle.
+///
+/// @return An #NvMediaStatus return code.
+/// @retval NVMEDIA_STATUS_OK             Parameters set successfully.
+/// @retval NVMEDIA_STATUS_BAD_PARAMETER  One of the parameters has an invalid
+///                                       value. This could be:
+///                                       - @a handle is NULL
+///                                       - @a params is invalid.
+///
+/// @pre
+/// - @a handle must be valid NvMedia2D handle created with NvMedia2DCreate().
+/// - @a params must be valid NvMedia2DComposeParameters handle created with
+///   NvMedia2DGetComposeParameters().
+///
+/// @usage
+/// - Allowed context for the API call
+///   - Interrupt handler: No
+///   - Signal handler: No
+///   - Thread-safe: Yes, with the following conditions:
+///     - Each thread uses different NvMedia2D handle
+///   - Re-entrant: No
+///   - Async/Sync: Sync
+/// - Required privileges: None
+/// - API group
+///   - Init: No
+///   - Runtime: Yes
+///   - De-Init: No
+///
+/// @sa NvMedia2DComposeParameters
+/// @sa NvMedia2DCompose()
+///
+NvMediaStatus
+NvMedia2DSetClipRect(NvMedia2D const * const handle,
+                     NvMedia2DComposeParameters const params,
+                     NvMediaRect const * const clipRect);
+
+/// @brief Sets the TNR state to use for the compose operation.
+///
+/// After a successful call to this function, the compose parameters object
+/// referred to by @a params will refer to the TNR state object passed in
+/// @a tnrState. Any updates to the TNR state object will be reflected in the
+/// compose operation described by @a params. The caller is responsible for
+/// ensuring the lifetime of the TNR state object extends beyond the duration
+/// of the compose operation.
+///
+/// @param[in] handle    Pointer to the NvMedia2D context.
+/// @param[in] params    An NvMedia2DComposeParameters handle.
+/// @param[in] tnrState  An #NvMedia2DTnrState handle.
+///
+/// @return An #NvMediaStatus return code.
+/// @retval NVMEDIA_STATUS_OK               Parameters set successfully.
+/// @retval NVMEDIA_STATUS_BAD_PARAMETER    One of the parameters has an invalid
+///                                         value. This could be:
+///                                         - @a handle is NULL
+///                                         - @a params is invalid
+///                                         - @a tnrState is invalid.
+///
+/// @pre
+/// - @a handle must be valid NvMedia2D handle created with NvMedia2DCreate().
+/// - @a params must be valid NvMedia2DComposeParameters handle created with
+///   NvMedia2DGetComposeParameters().
+/// - @a tnrState must be valid NvMedia2DTnrState handle created with
+///   NvMedia2DCreateTnrState().
+///
+/// @usage
+/// - Allowed context for the API call
+///   - Interrupt handler: No
+///   - Signal handler: No
+///   - Thread-safe: Yes, with the following conditions:
+///     - Each thread uses different NvMedia2D handle
+///   - Re-entrant: No
+///   - Async/Sync: Sync
+/// - Required privileges: None
+/// - API group
+///   - Init: No
+///   - Runtime: Yes
+///   - De-Init: No
+///
+/// @sa NvMedia2DComposeParameters
+/// @sa NvMedia2DTnrState
+/// @sa NvMedia2DCompose()
+///
+NvMediaStatus
+NvMedia2DSetTnrState(NvMedia2D const * const handle,
+                     NvMedia2DComposeParameters const params,
+                     NvMedia2DTnrState const tnrState);
+
 /// @brief Creates and returns an #NvMedia2DFilterBuffer instance.
 ///
 /// This functions returns a handle to an NvMedia2DFilterBuffer object. The
@@ -952,7 +1985,7 @@ NvMedia2DSetSrcBlendMode(NvMedia2D const * const handle,
 /// instances.
 ///
 /// The buffer instance must be destroyed with #NvMedia2DDestroyFilterBuffer()
-/// during the De-Init stage.
+/// during the De-Init stage, before calling NvMedia2DDestroy().
 ///
 /// @param[in]  handle        Pointer to the NvMedia2D context.
 /// @param[out] filterBuffer  Pointer to an #NvMedia2DFilterBuffer, which will
@@ -1052,7 +2085,11 @@ NvMedia2DDestroyFilterBuffer(NvMedia2D const * const handle,
 ///
 /// This function updates the NvMedia2DComposeParameters instance to indicate
 /// that the specified filter buffer object shall be used to provide the custom
-/// filter coefficients for the compose operation.
+/// filter coefficients for the compose operation. Any updates to the filter
+/// buffer object will be reflected in the compose operation described by
+/// the NvMedia2DComposeParameters instance. The caller is responsible for
+/// ensuring the lifetime of the filter buffer object extends beyond the
+/// duration of the compose operation.
 ///
 /// After this function returns successfully, there are a few additional
 /// limitations on the compose operation:
@@ -1249,137 +2286,633 @@ NvMedia2DComputeFilterCoefficients10Tap(NvMedia2D const * const handle,
                                         NvMedia2DFilterCoefficients10Tap const * const chromaX,
                                         NvMedia2DFilterCoefficients10Tap const * const chromaY);
 
+/// @brief Creates and returns an #NvMedia2DLdcWarpMap instance.
+///
+/// This functions returns a handle to an NvMedia2DLdcWarpMap object. The
+/// warp map can be used to control behaviour of an LDC operation.
+///
+/// The handle returned in @a ldcWarpMap is tied to the specific NvMedia2D
+/// context instance passed in @a handle and cannot be used with other context
+/// instances.
+///
+/// The warp map instance must be destroyed with #NvMedia2DDestroyLdcWarpMap()
+/// during the De-Init stage.
+///
+/// @param[in]  handle          Pointer to the NvMedia2D context.
+/// @param[in]  ldcWarpMapAttr  Pointer to NvMedia2DLdcWarpMapAttributes struct,
+///                             or NULL for default attributes.
+/// @param[out] ldcWarpMap      Pointer to an #NvMedia2DLdcWarpMap, which will
+///                             be populated with the handle.
+///
+/// @return An #NvMediaStatus return code.
+/// @retval NVMEDIA_STATUS_OK                      Object created successfully.
+/// @retval NVMEDIA_STATUS_BAD_PARAMETER           One of the parameters has an
+///                                                invalid value, either:
+///                                                - @a handle is NULL
+///                                                - @a ldcWarpMap is NULL.
+/// @retval NVMEDIA_STATUS_NOT_SUPPORTED           LDC operations are not
+///                                                supported on current platform.
+/// @retval NVMEDIA_STATUS_INSUFFICIENT_BUFFERING  Maximum number of warp maps
+///                                                has been created.
+/// @retval NVMEDIA_STATUS_INVALID_STATE           The function was called in
+///                                                incorrect system state.
+/// @retval NVMEDIA_STATUS_OUT_OF_MEMORY           Failed to allocate memory for
+///                                                the warp map.
+/// @retval NVMEDIA_STATUS_ERROR                   An internal failure occurred
+///                                                when trying to create the
+///                                                warp map.
+///
+/// @pre
+/// - @a handle must be valid NvMedia2D handle created with NvMedia2DCreate().
+/// - Any NvMedia2DLdcWarpMapAttributes struct passed in @a attr must have been
+///   initialized with NvMedia2DGetDefaultLdcWarpMapAttributes().
+///
+/// @usage
+/// - Allowed context for the API call
+///   - Interrupt handler: No
+///   - Signal handler: No
+///   - Thread-safe: Yes, with the following conditions:
+///     - Each thread uses different NvMedia2D handle
+///   - Re-entrant: No
+///   - Async/Sync: Sync
+/// - Required privileges: None
+/// - API group
+///   - Init: Yes
+///   - Runtime: No
+///   - De-Init: No
+///
+/// @sa NvMedia2DLdcWarpMapAttributes
+/// @sa NvMedia2DLdcWarpMap
+/// @sa NvMedia2DGetDefaultLdcWarpMapAttributes()
+/// @sa NvMedia2DDestroyLdcWarpMap()
+///
+NvMediaStatus
+NvMedia2DCreateLdcWarpMap(NvMedia2D const * const handle,
+                          NvMedia2DLdcWarpMapAttributes const * const ldcWarpMapAttr,
+                          NvMedia2DLdcWarpMap * const ldcWarpMap);
+
+/// @brief Destroys an #NvMedia2DLdcWarpMap instance.
+///
+/// This functions destroys an NvMedia2DLdcWarpMap object.
+///
+/// @param[in] handle      Pointer to the NvMedia2D context.
+/// @param[in] ldcWarpMap  An #NvMedia2DLdcWarpMap handle.
+///
+/// @return An #NvMediaStatus return code.
+/// @retval NVMEDIA_STATUS_OK             Object destroyed successfully.
+/// @retval NVMEDIA_STATUS_BAD_PARAMETER  One of the parameters has an invalid
+///                                       value, either:
+///                                       - @a handle is NULL.
+///                                       - @a ldcWarpMap is invalid.
+/// @retval NVMEDIA_STATUS_INVALID_STATE  The function was called in incorrect
+///                                       system state.
+/// @retval NVMEDIA_STATUS_PENDING        The warp map is still being used by a
+///                                       pending operation.
+/// @retval NVMEDIA_STATUS_ERROR          An internal failure occurred when
+///                                       trying to destroy the warp map. The
+///                                       warp map is in state where the only
+///                                       valid operation is to attempt to
+///                                       destroy it again.
+///
+/// @pre
+/// - @a handle must be valid NvMedia2D handle created with NvMedia2DCreate().
+/// - @a ldcWarpMap must be valid NvMedia2DLdcWarpMap handle created with
+///   NvMedia2DCreateLdcWarpMap().
+///
+/// @usage
+/// - Allowed context for the API call
+///   - Interrupt handler: No
+///   - Signal handler: No
+///   - Thread-safe: Yes, with the following conditions:
+///     - Each thread uses different NvMedia2D handle
+///   - Re-entrant: No
+///   - Async/Sync: Sync
+/// - Required privileges: None
+/// - API group
+///   - Init: Yes
+///   - Runtime: No
+///   - De-Init: Yes
+///
+/// @sa NvMedia2DLdcWarpMap
+/// @sa NvMedia2DCreateLdcWarpMap()
+///
+NvMediaStatus
+NvMedia2DDestroyLdcWarpMap(NvMedia2D const * const handle,
+                           NvMedia2DLdcWarpMap const ldcWarpMap);
+
+/// @brief Creates and returns an #NvMedia2DLdcMaskMap instance.
+///
+/// This functions returns a handle to an NvMedia2DLdcMaskMap object. The
+/// mask map can be used to control behaviour of an LDC operation.
+///
+/// The handle returned in @a ldcMaskMap is tied to the specific NvMedia2D
+/// context instance passed in @a handle and cannot be used with other context
+/// instances.
+///
+/// The buffer instance must be destroyed with #NvMedia2DDestroyLdcMaskMap()
+/// during the De-Init stage.
+///
+/// @param[in]  handle          Pointer to the NvMedia2D context.
+/// @param[in]  ldcMaskMapAttr  Pointer to NvMedia2DLdcMaskMapAttributes struct,
+///                             or NULL for default attributes.
+/// @param[out] ldcMaskMap      Pointer to an #NvMedia2DLdcMaskMap, which will
+///                             be populated with the handle.
+///
+/// @return An #NvMediaStatus return code.
+/// @retval NVMEDIA_STATUS_OK                      Object created successfully.
+/// @retval NVMEDIA_STATUS_BAD_PARAMETER           One of the parameters has an
+///                                                invalid value, either:
+///                                                - @a handle is NULL
+///                                                - @a ldcMaskMap is NULL.
+/// @retval NVMEDIA_STATUS_NOT_SUPPORTED           LDC mask maps are not
+///                                                supported on current platform.
+/// @retval NVMEDIA_STATUS_INSUFFICIENT_BUFFERING  Maximum number of mask maps
+///                                                has been created.
+/// @retval NVMEDIA_STATUS_INVALID_STATE           The function was called in
+///                                                incorrect system state.
+/// @retval NVMEDIA_STATUS_OUT_OF_MEMORY           Failed to allocate memory for
+///                                                the mask map.
+/// @retval NVMEDIA_STATUS_ERROR                   An internal failure occurred
+///                                                when trying to create the
+///                                                buffer.
+///
+/// @pre
+/// - @a handle must be valid NvMedia2D handle created with NvMedia2DCreate().
+/// - Any NvMedia2DLdcMaskMapAttributes struct passed in @a attr must have been
+///   initialized with NvMedia2DGetDefaultLdcMaskMapAttributes().
+///
+/// @usage
+/// - Allowed context for the API call
+///   - Interrupt handler: No
+///   - Signal handler: No
+///   - Thread-safe: Yes, with the following conditions:
+///     - Each thread uses different NvMedia2D handle
+///   - Re-entrant: No
+///   - Async/Sync: Sync
+/// - Required privileges: None
+/// - API group
+///   - Init: Yes
+///   - Runtime: No
+///   - De-Init: No
+///
+/// @sa NvMedia2DLdcMaskMapAttributes
+/// @sa NvMedia2DLdcMaskMap
+/// @sa NvMedia2DGetDefaultLdcMaskMapAttributes()
+/// @sa NvMedia2DDestroyLdcMaskMap()
+///
+NvMediaStatus
+NvMedia2DCreateLdcMaskMap(NvMedia2D const * const handle,
+                          NvMedia2DLdcMaskMapAttributes const * const ldcMaskMapAttr,
+                          NvMedia2DLdcMaskMap * const ldcMaskMap);
+
+/// @brief Destroys an #NvMedia2DLdcMaskMap instance.
+///
+/// This functions destroys an NvMedia2DLdcMaskMap object.
+///
+/// @param[in] handle      Pointer to the NvMedia2D context.
+/// @param[in] ldcMaskMap  An #NvMedia2DLdcMaskMap handle.
+///
+/// @return An #NvMediaStatus return code.
+/// @retval NVMEDIA_STATUS_OK             Object destroyed successfully.
+/// @retval NVMEDIA_STATUS_BAD_PARAMETER  One of the parameters has an invalid
+///                                       value, either:
+///                                       - @a handle is NULL.
+///                                       - @a ldcMaskMap is invalid.
+/// @retval NVMEDIA_STATUS_INVALID_STATE  The function was called in incorrect
+///                                       system state.
+/// @retval NVMEDIA_STATUS_PENDING        The mask map is still being used by a
+///                                       pending operation.
+/// @retval NVMEDIA_STATUS_ERROR          An internal failure occurred when
+///                                       trying to destroy the mask map. The
+///                                       mask map is in state where the only
+///                                       valid operation is to attempt to
+///                                       destroy it again.
+///
+/// @pre
+/// - @a handle must be valid NvMedia2D handle created with NvMedia2DCreate().
+/// - @a ldcMaskMap must be valid NvMedia2DLdcMaskMap handle created with
+///   NvMedia2DCreateLdcMaskMap().
+///
+/// @usage
+/// - Allowed context for the API call
+///   - Interrupt handler: No
+///   - Signal handler: No
+///   - Thread-safe: Yes, with the following conditions:
+///     - Each thread uses different NvMedia2D handle
+///   - Re-entrant: No
+///   - Async/Sync: Sync
+/// - Required privileges: None
+/// - API group
+///   - Init: Yes
+///   - Runtime: No
+///   - De-Init: Yes
+///
+/// @sa NvMedia2DLdcMaskMap
+/// @sa NvMedia2DCreateLdcMaskMap()
+///
+NvMediaStatus
+NvMedia2DDestroyLdcMaskMap(NvMedia2D const * const handle,
+                           NvMedia2DLdcMaskMap const ldcMaskMap);
+
+/// @brief Populates an LDC warp map with content.
+///
+/// This uses the specified parameters to populate the content of the LDC warp
+/// map. The map data accessed through ldcWarpMapParams is copied to the
+/// NvMedia2DLdcWarpMap internal data structures.
+///
+/// @param[in] handle            Pointer to the NvMedia2D context.
+/// @param[in] ldcWarpMap        An #NvMedia2DLdcWarpMap handle.
+/// @param[in] ldcWarpMapParams  Pointer to #NvMedia2DLdcWarpMapParameters.
+///
+/// @return An #NvMediaStatus return code.
+/// @retval NVMEDIA_STATUS_OK               Parameters set successfully.
+/// @retval NVMEDIA_STATUS_BAD_PARAMETER    One of the parameters has an invalid
+///                                         value. This could be:
+///                                         - @a handle is NULL
+///                                         - @a ldcWarpMap is invalid
+///                                         - @a ldcWarpMapParams is NULL.
+///
+/// @pre
+/// - @a handle must be valid NvMedia2D handle created with NvMedia2DCreate().
+/// - @a ldcWarpMap must be valid NvMedia2DLdcWarpMap handle created with
+///   NvMedia2DCreateLdcWarpMap().
+///
+/// @usage
+/// - Allowed context for the API call
+///   - Interrupt handler: No
+///   - Signal handler: No
+///   - Thread-safe: Yes, with the following conditions:
+///     - Each thread uses different NvMedia2D handle
+///   - Re-entrant: No
+///   - Async/Sync: Sync
+/// - Required privileges: None
+/// - API group
+///   - Init: Yes
+///   - Runtime: Yes
+///   - De-Init: No
+///
+/// @sa NvMediai2DLdcWarpMap
+/// @sa NvMediai2DLdcWarpMapParameters
+///
+NvMediaStatus
+NvMedia2DFillLdcWarpMap(NvMedia2D const * const handle,
+                        NvMedia2DLdcWarpMap const ldcWarpMap,
+                        NvMedia2DLdcWarpMapParameters const * const lcdWarpMapParams);
+
+/// @brief Populates an LDC mask map with content.
+///
+/// This uses the specified parameters to populate the content of the LDC mask
+/// map. The map data accessed through ldcMaskMapParams is copied to the
+/// NvMedia2DLdcMaskMap internal data structures.
+///
+/// @param[in] handle            Pointer to the NvMedia2D context.
+/// @param[in] ldcMaskMap        An #NvMedia2DLdcMaskMap handle.
+/// @param[in] ldcMaskMapParams  Pointer to #NvMedia2DLdcMaskMapParameters.
+///
+/// @return An #NvMediaStatus return code.
+/// @retval NVMEDIA_STATUS_OK               Parameters set successfully.
+/// @retval NVMEDIA_STATUS_BAD_PARAMETER    One of the parameters has an invalid
+///                                         value. This could be:
+///                                         - @a handle is NULL
+///                                         - @a ldcMaskMap is invalid
+///                                         - @a ldcMaskMapParams is NULL.
+///
+/// @pre
+/// - @a handle must be valid NvMedia2D handle created with NvMedia2DCreate().
+/// - @a ldcMaskMap must be valid NvMedia2DLdcMaskMap handle created with
+///   NvMedia2DCreateLdcMaskMap().
+///
+/// @usage
+/// - Allowed context for the API call
+///   - Interrupt handler: No
+///   - Signal handler: No
+///   - Thread-safe: Yes, with the following conditions:
+///     - Each thread uses different NvMedia2D handle
+///   - Re-entrant: No
+///   - Async/Sync: Sync
+/// - Required privileges: None
+/// - API group
+///   - Init: Yes
+///   - Runtime: Yes
+///   - De-Init: No
+///
+/// @sa NvMediai2DLdcMaskMap
+/// @sa NvMediai2DLdcMaskMapParameters
+///
+NvMediaStatus
+NvMedia2DFillLdcMaskMap(NvMedia2D const * const handle,
+                        NvMedia2DLdcMaskMap const ldcMaskMap,
+                        NvMedia2DLdcMaskMapParameters const * const ldcMaskMapParams);
+
+/// @brief Creates and returns an #NvMedia2DTnrState instance.
+///
+/// This functions returns a handle to an NvMedia2DTnrState object. The
+/// TNR state can be used to control behaviour of a TNR operation.
+///
+/// The handle returned in @a tnrState is tied to the specific NvMedia2D
+/// context instance passed in @a handle and cannot be used with other context
+/// instances.
+///
+/// The TNR state instance must be destroyed with #NvMedia2DDestroyTnrState()
+/// during the De-Init stage.
+///
+/// @param[in]  handle        Pointer to the NvMedia2D context.
+/// @param[in]  tnrStateAttr  Pointer to NvMedia2DTnrStateAttributes struct,
+///                           or NULL for default attributes.
+/// @param[out] tnrState      Pointer to an #NvMedia2DTnrState, which will
+///                           be populated with the handle.
+///
+/// @return An #NvMediaStatus return code.
+/// @retval NVMEDIA_STATUS_OK                      Object created successfully.
+/// @retval NVMEDIA_STATUS_BAD_PARAMETER           One of the parameters has an
+///                                                invalid value, either:
+///                                                - @a handle is NULL
+///                                                - @a tnrState is NULL.
+/// @retval NVMEDIA_STATUS_INSUFFICIENT_BUFFERING  Maximum number of TNR states
+///                                                has been created.
+/// @retval NVMEDIA_STATUS_INVALID_STATE           The function was called in
+///                                                incorrect system state.
+/// @retval NVMEDIA_STATUS_OUT_OF_MEMORY           Failed to allocate memory for
+///                                                the TNR state.
+/// @retval NVMEDIA_STATUS_ERROR                   An internal failure occurred
+///                                                when trying to create the
+///                                                TNR state.
+///
+/// @pre
+/// - @a handle must be valid NvMedia2D handle created with NvMedia2DCreate().
+/// - Any NvMedia2DTnrStateAttributes struct passed in @a attr must have been
+///   initialized with NvMedia2DGetDefaultTnrStateAttributes().
+///
+/// @usage
+/// - Allowed context for the API call
+///   - Interrupt handler: No
+///   - Signal handler: No
+///   - Thread-safe: Yes, with the following conditions:
+///     - Each thread uses different NvMedia2D handle
+///   - Re-entrant: No
+///   - Async/Sync: Sync
+/// - Required privileges: None
+/// - API group
+///   - Init: Yes
+///   - Runtime: No
+///   - De-Init: No
+///
+/// @sa NvMedia2DTnrStateAttributes
+/// @sa NvMedia2DTnrState
+/// @sa NvMedia2DGetDefaultTnrStateAttributes()
+/// @sa NvMedia2DDestroyTnrState()
+///
+NvMediaStatus
+NvMedia2DCreateTnrState(NvMedia2D const * const handle,
+                        NvMedia2DTnrStateAttributes const * const tnrStateAttr,
+                        NvMedia2DTnrState * const tnrState);
+
+/// @brief Destroys an #NvMedia2DTnrState instance.
+///
+/// This functions destroys an NvMedia2DTnrState object.
+///
+/// @param[in] handle    Pointer to the NvMedia2D context.
+/// @param[in] tnrState  An #NvMedia2DTnrState handle.
+///
+/// @return An #NvMediaStatus return code.
+/// @retval NVMEDIA_STATUS_OK             Object destroyed successfully.
+/// @retval NVMEDIA_STATUS_BAD_PARAMETER  One of the parameters has an invalid
+///                                       value, either:
+///                                       - @a handle is NULL.
+///                                       - @a tnrState is invalid.
+/// @retval NVMEDIA_STATUS_INVALID_STATE  The function was called in incorrect
+///                                       system state.
+/// @retval NVMEDIA_STATUS_PENDING        The TNR statemap is still being used
+///                                       by a pending operation.
+/// @retval NVMEDIA_STATUS_ERROR          An internal failure occurred when
+///                                       trying to destroy the TNR state. The
+///                                       object is in state where the only
+///                                       valid operation is to attempt to
+///                                       destroy it again.
+///
+/// @pre
+/// - @a handle must be valid NvMedia2D handle created with NvMedia2DCreate().
+/// - @a tnrState must be valid NvMedia2DTnrState handle created with
+///   NvMedia2DCreateTnrState().
+///
+/// @usage
+/// - Allowed context for the API call
+///   - Interrupt handler: No
+///   - Signal handler: No
+///   - Thread-safe: Yes, with the following conditions:
+///     - Each thread uses different NvMedia2D handle
+///   - Re-entrant: No
+///   - Async/Sync: Sync
+/// - Required privileges: None
+/// - API group
+///   - Init: Yes
+///   - Runtime: No
+///   - De-Init: Yes
+///
+/// @sa NvMedia2DTnrState
+/// @sa NvMedia2DCreateTnrState()
+///
+NvMediaStatus
+NvMedia2DDestroyTnrState(NvMedia2D const * const handle,
+                         NvMedia2DTnrState const tnrState);
+
+/// @brief Sets Temporal Noise Reduction (TNR) parameters.
+///
+/// This updates the TNR state object to use the specified parameters for the
+/// TNR operation.
+///
+/// @param[in] handle     Pointer to the NvMedia2D context.
+/// @param[in] tnrState   An NvMedia2DTnrState handle.
+/// @param[in] tnrParams  Pointer to #NvMedia2DTnrParameters.
+///
+/// @return An #NvMediaStatus return code.
+/// @retval NVMEDIA_STATUS_OK               Parameters set successfully.
+/// @retval NVMEDIA_STATUS_BAD_PARAMETER    One of the parameters has an invalid
+///                                         value. This could be:
+///                                         - @a handle is NULL
+///                                         - @a tnrState is invalid
+///                                         - @a tnrParams is NULL.
+///
+/// @pre
+/// - @a handle must be valid NvMedia2D handle created with NvMedia2DCreate().
+/// - @a tnrState must be valid NvMedia2DTnrState handle created with
+///   NvMedia2DCreateTnrState().
+///
+/// @usage
+/// - Allowed context for the API call
+///   - Interrupt handler: No
+///   - Signal handler: No
+///   - Thread-safe: Yes, with the following conditions:
+///     - Each thread uses different NvMedia2D handle
+///   - Re-entrant: No
+///   - Async/Sync: Sync
+/// - Required privileges: None
+/// - API group
+///   - Init: No
+///   - Runtime: Yes
+///   - De-Init: No
+///
+/// @sa NvMedia2DTnrState
+/// @sa NvMedia2DTnrParameters
+///
+NvMediaStatus
+NvMedia2DSetTnrParameters(NvMedia2D const * const handle,
+                          NvMedia2DTnrState const tnrState,
+                          NvMedia2DTnrParameters const *const tnrParams);
+
+/// @brief Resets TNR algorithm state.
+///
+/// This function resets the internal TNR algorithm state. After a successful
+/// call to this function, the next frame submitted for TNR processing with
+/// NvMedia2DCompose() will be treated by the algorithm as the
+/// first one and no previous surface needs to be set for it with
+/// NvMedia2DSetTnrPreviousNvSciBufObj().
+///
+/// @param[in] handle    Pointer to the NvMedia2D context.
+/// @param[in] tnrState  An NvMedia2DTnrState handle.
+///
+/// @return An #NvMediaStatus return code.
+/// @retval NVMEDIA_STATUS_OK               State reset successfully.
+/// @retval NVMEDIA_STATUS_BAD_PARAMETER    One of the parameters has an invalid
+///                                         value. This could be:
+///                                         - @a handle is NULL
+///                                         - @a tnrState is invalid.
+///
+/// @pre
+/// - @a handle must be valid NvMedia2D handle created with NvMedia2DCreate().
+/// - @a params must be valid NvMedia2DTnrState handle created with
+///   NvMedia2DCreateTnrState().
+///
+/// @usage
+/// - Allowed context for the API call
+///   - Interrupt handler: No
+///   - Signal handler: No
+///   - Thread-safe: Yes, with the following conditions:
+///     - Each thread uses different NvMedia2D handle
+///   - Re-entrant: No
+///   - Async/Sync: Sync
+/// - Required privileges: None
+/// - API group
+///   - Init: No
+///   - Runtime: Yes
+///   - De-Init: No
+///
+/// @sa NvMedia2DTnrState
+///
+NvMediaStatus
+NvMedia2DResetTnr(NvMedia2D const * const handle,
+                  NvMedia2DTnrState const tnrState);
+
+/// @brief Sets checksum calculation mode.
+///
+/// This function configures the checksums to calculate for the
+/// NvMedia2DCompose() operations performed using @a params.
+///
+/// NvMedia 2D maintains the checksums from 16 most recent NvMedia2DCompose()
+/// operations that had the checksum calculation configured using this function.
+/// When more operations are performed, the oldest checksums are overwritten.
+/// The client must ensure the checksums are read with NvMedia2DGetChecksum()
+/// before they are overwritten by subsequent operations.
+///
+/// @param[in] handle        Pointer to the NvMedia2D context.
+/// @param[in] params        An NvMedia2DComposeParameters handle.
+/// @param[in] checksumMode  The checksum to calculate.
+///
+/// @return An #NvMediaStatus return code.
+/// @retval NVMEDIA_STATUS_OK             Parameters set successfully.
+/// @retval NVMEDIA_STATUS_BAD_PARAMETER  One of the parameters has an invalid
+///                                       value. This could be:
+///                                       - @a handle is NULL
+///                                       - @a params is invalid
+///                                       - @a checksumMode is invalid.
+///
+/// @pre
+/// - @a handle must be valid NvMedia2D handle created with NvMedia2DCreate().
+/// - @a params must be valid NvMedia2DComposeParameters handle created with
+///   NvMedia2DGetComposeParameters().
+///
+/// @usage
+/// - Allowed context for the API call
+///   - Interrupt handler: No
+///   - Signal handler: No
+///   - Thread-safe: Yes, with the following conditions:
+///     - Each thread uses different NvMedia2D handle
+///   - Re-entrant: No
+///   - Async/Sync: Sync
+/// - Required privileges: None
+/// - API group
+///   - Init: No
+///   - Runtime: Yes
+///   - De-Init: No
+///
+/// @sa NvMedia2DChecksumMode
+/// @sa NvMedia2DGetChecksum()
+///
+NvMediaStatus
+NvMedia2DSetChecksumMode(NvMedia2D const * const handle,
+                         NvMedia2DComposeParameters const params,
+                         NvMedia2DChecksumMode const checksumMode);
+
+/// @brief Gets a checksum calculated for an NvMedia2DCompose() operation.
+///
+/// This function gets a checksum calculated for an NvMedia2DCompose()
+/// operation. The operation must have had checksum calculation configured with
+/// NvMedia2DSetChecksumMode().
+///
+/// @param[in] handle     Pointer to the NvMedia2D context.
+/// @param[in] result     Pointer to the NvMedia2DComposeResult object of the
+///                       operation.
+/// @param[out] checksum  Pointer to an NvMedia2DChecksum object that will be
+///                       populated with the checksum.
+///
+/// @return An #NvMediaStatus return code.
+/// @retval NVMEDIA_STATUS_OK             Checksum returned successfully in
+///                                       @a checksum.
+/// @retval NVMEDIA_STATUS_BAD_PARAMETER  One of the parameters has an invalid
+///                                       value. This could be:
+///                                       - @a handle is NULL
+///                                       - @a result is NULL
+///                                       - @a result indicates no operation was
+///                                         submitted
+///                                       - No checksum was found for operation
+///                                         represented by @a result
+///                                       - @a checksum is NULL.
+/// @retval NVMEDIA_STATUS_NOT_SUPPORTED  Checksums are not supported on current
+///                                       platform.
+/// @retval NVMEDIA_STATUS_PENDING        The operation is still pending.
+/// @retval NVMEDIA_STATUS_ERROR          An internal failure occurred when
+///                                       trying to read the checksum.
+///
+/// @pre
+/// - @a handle must be valid NvMedia2D handle created with NvMedia2DCreate().
+/// - @a result must be valid NvMedia2DComposeResult handle returned by
+///   NvMedia2DCompose().
+///
+/// @usage
+/// - Allowed context for the API call
+///   - Interrupt handler: No
+///   - Signal handler: No
+///   - Thread-safe: Yes, with the following conditions:
+///     - Each thread uses different NvMedia2D handle
+///   - Re-entrant: No
+///   - Async/Sync: Sync
+/// - Required privileges: None
+/// - API group
+///   - Init: No
+///   - Runtime: Yes
+///   - De-Init: No
+///
+/// @sa NvMedia2DChecksum
+/// @sa NvMedia2DSetChecksumMode()
+///
+NvMediaStatus
+NvMedia2DGetChecksum(NvMedia2D const * const handle,
+                     NvMedia2DComposeResult const *const result,
+                     NvMedia2DChecksum *const checksum);
+
 ///
 /// @}
 ///
-
-//
-// Version History
-//
-// Version 1.1 February 1, 2016
-// - Initial release
-//
-// Version 1.2 May 11, 2016
-// - Added #NvMedia2DCheckVersion API
-//
-// Version 1.3 May 5, 2017
-// - Removed compositing, blending and alpha related defines and structures
-//
-// Version 2.0 May 11, 2017
-// - Deprecated NvMedia2DBlit API
-// - Deprecated NvMedia2DCheckVersion API
-// - Deprecated NvMedia2DColorStandard, NvMedia2DColorRange and
-//   NvMedia2DColorMatrix types
-// - Added #NvMedia2DGetVersion API
-//
-// Version 2.1 May 17, 2017
-// - Moved transformation to nvmedia_common.h
-// - Renamed NvMedia2DTransform to #NvMediaTransform
-//
-// Version 2.2 September 4, 2018
-// - Added deprecated warning message for #NvMedia2DCopyPlane,
-//   NvMedia2DWeave
-// - Added APIs #NvMedia2DCopyPlaneNew, #NvMedia2DWeaveNew
-//
-// Version 3.0 October 30, 2018
-// - Deprecated #NvMedia2DCopyPlane API
-// - Deprecated #NvMedia2DWeave API
-//
-// Version 3.1 December 11, 2018
-// - Fixed MISRA-C Rule 21.1 and 21.2 Violations
-//
-// Version 3.2 January 21, 2019
-// - Moved #NvMediaTransform from nvmedia_common.h to this header
-//
-// Version 3.3 Feb 21, 2019
-// - Changed #NvMedia2D type from void to struct
-//
-// Version 3.4 March 5, 2019
-// - Fixed MISRA-C Rule 8.13 Violations
-//
-// Version 3.5 March 14, 2019
-// - Removing NvMedia2DBlitFlags enum definition
-// - updated #NvMedia2DBlitParametersOut structure definition
-//
-// Version 3.6 March 18, 2019
-// - Added APIs #NvMedia2DImageRegister, #NvMedia2DImageUnRegister
-//
-// Version 3.7 March 22, 2019
-// - Unnecessary header include nvmedia_common.h has been removed
-//
-// Version 3.8 May 18, 2020
-// - Changes related to MISRA-C Rule 8.13 Violations fixes.
-//
-// Version 3.9 Nov 12, 2020
-// - Improved comments and documentation
-// - Introduce NvMedia2DDestroyEx, which returns an error unlike NvMedia2DDestroy
-// - NvMedia2DDestroy is marked as deprecated
-// - NVMEDIA_STATUS_UNDEFINED_STATE is returned
-//   instead of NVMEDIA_STATUS_BAD_PARAMETER if error happens
-//   after submit is started
-//
-// Version 3.10 January 25, 2021
-// - Remove NvMedia2DWeaveNew API.
-//
-// Version 4.0 September 23, 2021
-// - Remove NvMedia2DCopyPlaneNew API.
-// - Remove NvMedia2DBlitEx API.
-// - Remove NvMedia2DImageRegister API.
-// - Remove NvMedia2DImageUnregister API.
-// - Remove NvMedia2DDestroyEx API.
-// - Remove NvMedia2DNvSciSyncGetVersion API.
-// - Remove NVMEDIA_2D_NVSCISYNC_VERSION_MAJOR token.
-// - Remove NVMEDIA_2D_NVSCISYNC_VERSION_MINOR token.
-// - Change prototype for NvMedia2DCreate API.
-// - Change prototype for NvMedia2DDestroy API.
-// - Change prototype for NvMedia2DSetNvSciSyncObjforEOF API.
-// - Change prototype for NvMedia2DInsertPreNvSciSyncFence API.
-// - Change prototype for NvMedia2DGetEOFNvSciSyncFence API.
-// - Rename NvMedia2DStretchFilter to NvMedia2DFilter.
-// - Rename NvMediaTransform to NvMedia2DTransform.
-// - Add NVMEDIA_2D_VERSION_PATCH token.
-// - Add NvMedia2DCompose API.
-// - Add NvMedia2DFillNvSciBufAttrList API.
-// - Add NvMedia2DRegisterNvSciBufObj API.
-// - Add NvMedia2DUnregisterNvSciBufObj API.
-// - Add NvMedia2DSetSrcNvSciBufObj API.
-// - Add NvMedia2DSetDstNvSciBufObj API.
-// - Set default filter mode to NVMEDIA_2D_FILTER_OFF.
-//
-// Version 4.1 November 15, 2021
-// - Add NvMedia2DSetSrcBlendMode API.
-//
-// Version 4.2 November 29, 2021
-// - Add refcounting to NvMedia2DRegisterNvSciBufObj/UnregisterNvSciBufObj API.
-//
-// Version 4.3 March 8, 2022
-// - Add NvMedia2DCreateFilterBuffer API.
-// - Add NvMedia2DDestroyFilterBuffer API.
-// - Add NvMedia2DSetFilterBuffer API.
-// - Add NvMedia2DComputeFilterCoefficients5Tap API.
-// - Add NvMedia2DComputeFilterCoefficients10Tap API.
-//
-// Version 5.0.0 March 28, 2022
-// - Add support for NvSciSync task statuses
-// - Max pre-fence count changed from 32 to 16
-//
-// Version 6.0.0 June 3, 2022
-// - Change default for maxRegisteredBuffers attribute from 256 to 64
-// - Forbid registering same buffer multiple times
-// - Error codes changed for multiple APIs
-//
-// Version 7.0.0 July 8, 2022
-// - New error NVMEDIA_STATUS_INVALID_STATE added for multiple APIs
-//
-// Version 7.0.1 August 25, 2022
-// - Allow NULL context handle in NvMedia2DFillNvSciBufAttrList
-//
-// Version 7.0.2 September 2, 2022
-// - Always treat compose parameters and filter buffer handle value 0 as invalid
-//
-// Version 8.0.0 October 17, 2023
-// - Update the logic to compute the filter buffer coefficients values
-//
 
 #ifdef __cplusplus
 }

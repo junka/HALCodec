@@ -27,7 +27,7 @@ extern "C" {
 #define NVMEDIA_ENCODE_MAX_RPS_SIZE 17U
 
 /** Maximum number of region of interests */
-#define NVMEDIA_MAX_ROI_REGIONS 8U
+#define NVMEDIA_MAX_ROI_REGIONS 32U
 
 typedef struct {
     /** Region of interest rectangle */

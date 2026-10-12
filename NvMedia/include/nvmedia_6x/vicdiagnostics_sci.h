@@ -1,5 +1,5 @@
 /*
- * SPDX-FileCopyrightText: Copyright (c) 2022-2023 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+ * SPDX-FileCopyrightText: Copyright (c) 2022-2024 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
  * SPDX-License-Identifier: LicenseRef-NvidiaProprietary
  *
  * NVIDIA CORPORATION, its affiliates and licensors retain all intellectual
@@ -373,6 +373,9 @@ VicDiagnosticsInsertPreNvSciSyncFence(VicDiagnostics const * const handle,
 /// The fence returned in @a syncFence is tied to the specific VicDiagnostics
 /// context instance passed in @a handle and must not be used after the
 /// VicDiagnostics context instance has been destroyed.
+///
+/// This function will clear @a syncFence before updating and returning it's
+/// new value.
 ///
 /// @param[in]  handle     Pointer to the VicDiagnostics context.
 /// @param[in]  result     Pointer to the VicDiagnosticsResult struct.

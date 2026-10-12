@@ -508,6 +508,9 @@ NvMedia2DInsertPreNvSciSyncFence(NvMedia2D const * const handle,
 /// instance passed in @a handle and must not be used after the NvMedia2D
 /// context instance has been destroyed.
 ///
+/// This function will clear @a syncFence before updating and returning it's
+/// new value.
+///
 /// @param[in]  handle     Pointer to the NvMedia2D context.
 /// @param[in]  result     Pointer to the NvMedia2DComposeResult struct.
 /// @param[out] syncFence  Pointer to an #NvSciSyncFence that will be populated
@@ -652,6 +655,215 @@ NvMediaStatus
 NvMedia2DSetDstNvSciBufObj(NvMedia2D const * const handle,
                            NvMedia2DComposeParameters const params,
                            NvSciBufObj const dstSurface);
+
+/// @brief Sets the output surface for the TNR operation.
+///
+/// @param[in] handle            Pointer to the NvMedia2D context.
+/// @param[in] params            An NvMedia2DComposeParameters handle.
+/// @param[in] tnrOutputSurface  The #NvSciBufObj to be used for the destination
+///                              surface.
+///
+/// @return An #NvMediaStatus return code.
+/// @retval NVMEDIA_STATUS_OK             Parameters set successfully.
+/// @retval NVMEDIA_STATUS_BAD_PARAMETER  One of the parameters has an invalid
+///                                       value. This could be:
+///                                       - @a handle is NULL
+///                                       - @a params is invalid
+///                                       - @a tnrOutputSurface is invalid
+///                                       - @a tnrOutputSurface or its
+///                                         duplicate was not registered.
+/// @retval NVMEDIA_STATUS_ERROR          An internal failure occurred.
+///
+/// @pre
+/// - @a handle must be valid NvMedia2D handle created with NvMedia2DCreate().
+/// - @a params must be valid NvMedia2DComposeParameters handle created with
+///   NvMedia2DGetComposeParameters().
+/// - @a tnrOutputSurface must be valid NvSciBufObj handle.
+/// - @a tnrOutputSurface must have been previously registered with
+///   NvMedia2DRegisterNvSciBufObj().
+///
+/// @usage
+/// - Allowed context for the API call
+///   - Interrupt handler: No
+///   - Signal handler: No
+///   - Thread-safe: Yes, with the following conditions:
+///     - Each thread uses different NvMedia2D handle
+///   - Re-entrant: No
+///   - Async/Sync: Sync
+/// - Required privileges: None
+/// - API group
+///   - Init: No
+///   - Runtime: Yes
+///   - De-Init: No
+///
+/// @sa NvMedia2DComposeParameters
+/// @sa NvMedia2DCompose()
+/// @sa NvMedia2DRegisterNvSciBufObj()
+///
+NvMediaStatus
+NvMedia2DSetTnrOutputNvSciBufObj(NvMedia2D const * const handle,
+                                 NvMedia2DComposeParameters const params,
+                                 NvSciBufObj const tnrOutputSurface);
+
+/// @brief Sets the previous surface for TNR operation.
+///
+/// The previous surface is the surface used as the TNR output surface with the
+/// previous #NvMedia2DCompose() call.
+///
+/// @param[in] handle              Pointer to the NvMedia2D context.
+/// @param[in] params              An NvMedia2DComposeParameters handle.
+/// @param[in] tnrPreviousSurface  The #NvSciBufObj to be used as a previous
+///                                surface.
+///
+/// @return An #NvMediaStatus return code.
+/// @retval NVMEDIA_STATUS_OK             Parameters set successfully.
+/// @retval NVMEDIA_STATUS_BAD_PARAMETER  One of the parameters has an invalid
+///                                       value. This could be:
+///                                       - @a handle is NULL
+///                                       - @a params is invalid
+///                                       - @a tnrPreviousSurface is invalid
+///                                       - @a tnrPreviousSurface or its
+///                                         duplicate was not registered.
+/// @retval NVMEDIA_STATUS_ERROR          An internal failure occurred.
+///
+/// @pre
+/// - @a handle must be valid NvMedia2D handle created with NvMedia2DCreate().
+/// - @a params must be valid NvMedia2DComposeParameters handle created with
+///   NvMedia2DGetComposeParameters().
+/// - @a tnrPreviousSurface must be valid NvSciBufObj handle.
+/// - @a tnrPreviousSurface must have been previously registered with
+///   NvMedia2DRegisterNvSciBufObj().
+///
+/// @usage
+/// - Allowed context for the API call
+///   - Interrupt handler: No
+///   - Signal handler: No
+///   - Thread-safe: Yes, with the following conditions:
+///     - Each thread uses different NvMedia2D handle
+///   - Re-entrant: No
+///   - Async/Sync: Sync
+/// - Required privileges: None
+/// - API group
+///   - Init: No
+///   - Runtime: Yes
+///   - De-Init: No
+///
+/// @sa NvMedia2DComposeParameters
+/// @sa NvMedia2DCompose()
+/// @sa NvMedia2DRegisterNvSciBufObj()
+///
+NvMediaStatus
+NvMedia2DSetTnrPreviousNvSciBufObj(NvMedia2D const * const handle,
+                                   NvMedia2DComposeParameters const params,
+                                   NvSciBufObj const tnrPreviousSurface);
+
+/// @brief Sets the surface for XSobel output.
+///
+/// The surface must be a single-plane surface with format compatible with the
+/// first plane of the source surface. The surface dimensions must equal the
+/// destination rectangle dimensions.
+///
+/// @param[in] handle               Pointer to the NvMedia2D context.
+/// @param[in] params               An NvMedia2DComposeParameters handle.
+/// @param[in] xsobelOutputSurface  The #NvSciBufObj to be used for the
+///                                 destination XSobel surface.
+///
+/// @return An #NvMediaStatus return code.
+/// @retval NVMEDIA_STATUS_OK             Parameters set successfully.
+/// @retval NVMEDIA_STATUS_BAD_PARAMETER  One of the parameters has an invalid
+///                                       value. This could be:
+///                                       - @a handle is NULL
+///                                       - @a params is invalid
+///                                       - @a xsobelOutputSurface is invalid
+///                                       - @a xsobelOutputSurface or its
+///                                         duplicate was not registered.
+/// @retval NVMEDIA_STATUS_ERROR          An internal failure occurred.
+///
+/// @pre
+/// - @a handle must be valid NvMedia2D handle created with NvMedia2DCreate().
+/// - @a params must be valid NvMedia2DComposeParameters handle created with
+///   NvMedia2DGetComposeParameters().
+/// - @a xsobelOutputSurface must be valid NvSciBufObj handle.
+/// - @a xsobelOutputSurface must have been previously registered with
+///   NvMedia2DRegisterNvSciBufObj().
+///
+/// @usage
+/// - Allowed context for the API call
+///   - Interrupt handler: No
+///   - Signal handler: No
+///   - Thread-safe: Yes, with the following conditions:
+///     - Each thread uses different NvMedia2D handle
+///   - Re-entrant: No
+///   - Async/Sync: Sync
+/// - Required privileges: None
+/// - API group
+///   - Init: No
+///   - Runtime: Yes
+///   - De-Init: No
+///
+/// @sa NvMedia2DComposeParameters
+/// @sa NvMedia2DCompose()
+/// @sa NvMedia2DRegisterNvSciBufObj()
+///
+NvMediaStatus
+NvMedia2DSetXSobelOutputNvSciBufObj(NvMedia2D const * const handle,
+                                    NvMedia2DComposeParameters const params,
+                                    NvSciBufObj const xsobelOutputSurface);
+
+/// @brief Sets the surface for 4x4 downsampled XSobel output.
+///
+/// The surface must be a single-plane surface with format compatible with the
+/// first plane of the source surface. The surface dimensions must equal the
+/// destination rectangle dimensions rounded up to the nearest multiple of 4,
+/// and then divided by 4. For example, if the destination rectangle is 640x478
+/// pixels, the 4x4 downsampled XSobel surface must be 160x120 pixels.
+///
+/// @param[in] handle                    Pointer to the NvMedia2D context.
+/// @param[in] params                    An NvMedia2DComposeParameters handle.
+/// @param[in] xsobelDownsampledSurface  The #NvSciBufObj to be used for the
+///                                      destination downsampled XSobel surface.
+///
+/// @return An #NvMediaStatus return code.
+/// @retval NVMEDIA_STATUS_OK             Parameters set successfully.
+/// @retval NVMEDIA_STATUS_BAD_PARAMETER  One of the parameters has an invalid
+///                                       value. This could be:
+///                                       - @a handle is NULL
+///                                       - @a params is invalid
+///                                       - @a xsobelDownsampledSurface is invalid
+///                                       - @a xsobelDownsampledSurface or its
+///                                         duplicate was not registered.
+/// @retval NVMEDIA_STATUS_ERROR          An internal failure occurred.
+///
+/// @pre
+/// - @a handle must be valid NvMedia2D handle created with NvMedia2DCreate().
+/// - @a params must be valid NvMedia2DComposeParameters handle created with
+///   NvMedia2DGetComposeParameters().
+/// - @a xsobelDownsampledSurface must be valid NvSciBufObj handle.
+/// - @a xsobelDownsampledSurface must have been previously registered with
+///   NvMedia2DRegisterNvSciBufObj().
+///
+/// @usage
+/// - Allowed context for the API call
+///   - Interrupt handler: No
+///   - Signal handler: No
+///   - Thread-safe: Yes, with the following conditions:
+///     - Each thread uses different NvMedia2D handle
+///   - Re-entrant: No
+///   - Async/Sync: Sync
+/// - Required privileges: None
+/// - API group
+///   - Init: No
+///   - Runtime: Yes
+///   - De-Init: No
+///
+/// @sa NvMedia2DComposeParameters
+/// @sa NvMedia2DCompose()
+/// @sa NvMedia2DRegisterNvSciBufObj()
+///
+NvMediaStatus
+NvMedia2DSetXSobelDownsampledNvSciBufObj(NvMedia2D const * const handle,
+                                         NvMedia2DComposeParameters const params,
+                                         NvSciBufObj const xsobelDownsampledSurface);
 
 ///
 /// @}

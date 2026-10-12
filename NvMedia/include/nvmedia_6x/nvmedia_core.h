@@ -1,10 +1,14 @@
 /*
- * Copyright (c) 2017-2022, NVIDIA CORPORATION. All rights reserved. All
- * information contained herein is proprietary and confidential to NVIDIA
- * Corporation.  Any use, reproduction, or disclosure without the written
- * permission of NVIDIA Corporation is prohibited.
+ * SPDX-FileCopyrightText: Copyright (c) 2017-2024 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+ * SPDX-License-Identifier: LicenseRef-NvidiaProprietary
+ *
+ * NVIDIA CORPORATION, its affiliates and licensors retain all intellectual
+ * property and proprietary rights in and to this material, related
+ * documentation and any modifications thereto. Any use, reproduction,
+ * disclosure or distribution of this material and related documentation
+ * without an express license agreement from NVIDIA CORPORATION or
+ * its affiliates is strictly prohibited.
  */
-
 
 /**
  * \file
@@ -25,7 +29,7 @@ extern "C" {
 #include <time.h>
 
 #if !defined(NVM_DEPRECATED)
-    #if defined(__GNUC__) && (__GNUC__ >= 4) && (__GNUC_MINOR__ >= 6)
+    #if defined(__GNUC__) && (__GNUC__ > 6)
         /*
          * deprecated as build time warnings to prompt developers to migrate
          * from older API to new one gradually. Should be removed once API
@@ -226,7 +230,6 @@ typedef enum {
 
 /*
  * \brief Defines all possible access modes.
- * \note This definition is deprecated and will be removed in the next version.
  */
 typedef enum {
     /** Specifies read-only access mode. */

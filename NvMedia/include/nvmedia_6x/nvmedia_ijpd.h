@@ -1,5 +1,5 @@
 /*
- * SPDX-FileCopyrightText: Copyright (c) 2021-2023 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+ * SPDX-FileCopyrightText: Copyright (c) 2021-2024 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
  * SPDX-License-Identifier: LicenseRef-NvidiaProprietary
  *
  * NVIDIA CORPORATION, its affiliates and licensors retain all intellectual
@@ -30,6 +30,7 @@ extern "C" {
 #include "nvmedia_core.h"
 #include "nvscibuf.h"
 #include "nvscisync.h"
+#include "nvmedia_common_video.h"
 #include "nvmedia_common_encode_decode.h"
 
 /**
@@ -44,7 +45,7 @@ extern "C" {
 /** @brief Major version number */
 #define NVMEDIA_IJPD_VERSION_MAJOR   1
 /** @brief Minor version number */
-#define NVMEDIA_IJPD_VERSION_MINOR   0
+#define NVMEDIA_IJPD_VERSION_MINOR   1
 /** @brief Patch version number */
 #define NVMEDIA_IJPD_VERSION_PATCH   0
 
@@ -240,7 +241,6 @@ NvMediaIJPDGetVersion(
  *      The following instances are supported:
  *      - ::NVMEDIA_JPEG_INSTANCE_0
  *      - ::NVMEDIA_JPEG_INSTANCE_1     [Supported only on T23X]
- *      - ::NVMEDIA_JPEG_INSTANCE_AUTO  [Supported only on T23X]
  * @retval NvMediaIJPD The new image JPEG decoder handle or NULL if unsuccessful.
  */
 NvMediaIJPD *
@@ -516,7 +516,6 @@ NvMediaIJPDGetInfo (
  *      The following instances are supported:
  *      - ::NVMEDIA_JPEG_INSTANCE_0
  *      - ::NVMEDIA_JPEG_INSTANCE_1     [Supported only on T23X]
- *      - ::NVMEDIA_JPEG_INSTANCE_AUTO  [Supported only on T23X]
  * @return ::NvMediaStatus The completion status of the operation.
  * Possible values are:
  * - ::NVMEDIA_STATUS_OK if successful.
@@ -601,7 +600,6 @@ NvMediaIJPDRender(
  *      The following instances are supported:
  *      - ::NVMEDIA_JPEG_INSTANCE_0
  *      - ::NVMEDIA_JPEG_INSTANCE_1     [Supported only on T23X]
- *      - ::NVMEDIA_JPEG_INSTANCE_AUTO  [Supported only on T23X]
  * @return ::NvMediaStatus The completion status of the operation.
  * Possible values are:
  * - ::NVMEDIA_STATUS_OK if successful.
@@ -768,7 +766,6 @@ NvMediaIJPDUnregisterNvSciBufObj(
  *      \inputrange The following instances are supported:
  *      - ::NVMEDIA_JPEG_INSTANCE_0
  *      - ::NVMEDIA_JPEG_INSTANCE_1     [Supported only on T23X]
- *      - ::NVMEDIA_JPEG_INSTANCE_AUTO  [Supported only on T23X]
  * @param[out] attrlist An %NvSciBufAttrList where NvMediaIJPD places the
  *      NvSciBuf attributes.
  *
@@ -1147,6 +1144,36 @@ NvMediaIJPDGetEOFNvSciSyncFence(
     NvSciSyncFence    *eofnvscisyncfence
 );
 
+/**
+ * @brief Queries the IJPD device list
+ *
+ * @pre  NvMediaIJPDGetVersion()
+ * @post NvMediaIJPDCreate()
+ *
+ * @usage
+ * - Allowed context for the API call
+ *   - Interrupt handler: No
+ *   - Signal handler: No
+ *   - Thread-safe: Yes
+ *   - Re-entrant: No
+ *   - Async/Sync: Sync
+ * - Required privileges: None
+ * - API group
+ *   - Init: Yes
+ *   - Runtime: No
+ *   - De-Init: No
+ *
+ * @param[in] version A pointer to a @ref NvMediaDeviceList structure
+ *                    of the client.
+ * @return ::NvMediaStatus The status of the operation.
+ * Possible values are:
+ * - ::NVMEDIA_STATUS_OK
+ * - ::NVMEDIA_STATUS_BAD_PARAMETER if the pointer is invalid.
+ */
+NvMediaStatus
+NvMediaIJPDQueryHWDevices(
+    NvMediaDeviceList *deviceList
+);
 
 /*
  * @defgroup 6x_history_nvmedia_ijpd History

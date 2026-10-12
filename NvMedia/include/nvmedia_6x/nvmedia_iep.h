@@ -1,5 +1,5 @@
 /*
- * SPDX-FileCopyrightText: Copyright (c) 2021-2023 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+ * SPDX-FileCopyrightText: Copyright (c) 2021-2024 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
  * SPDX-License-Identifier: LicenseRef-NvidiaProprietary
  *
  * NVIDIA CORPORATION, its affiliates and licensors retain all intellectual
@@ -29,6 +29,7 @@ extern "C" {
 #include "nvmedia_core.h"
 #include "nvscisync.h"
 #include "nvscibuf.h"
+#include "nvmedia_common_video.h"
 #include "nvmedia_common_encode.h"
 
 /**
@@ -44,9 +45,9 @@ extern "C" {
 /** @brief Major Version number */
 #define NVMEDIA_IEP_VERSION_MAJOR   1
 /** @brief Minor Version number */
-#define NVMEDIA_IEP_VERSION_MINOR   0
+#define NVMEDIA_IEP_VERSION_MINOR   1
 /** @brief Patch Version number */
-#define NVMEDIA_IEP_VERSION_PATCH   2
+#define NVMEDIA_IEP_VERSION_PATCH   0
 
 /**
  * Specifies the maximum number of times NvMediaIEPInsertPreNvSciSyncFence()
@@ -184,10 +185,10 @@ NvMediaIEPGetVersion(
  * @param[in] instanceId The ID of the NvENC HW engine instance
  *      \inputrange The following instances are supported:
  *      - ::NVMEDIA_ENCODER_INSTANCE_0
- *      - ::NVMEDIA_ENCODER_INSTANCE_1      [Supported only on T194]
- *      - ::NVMEDIA_ENCODER_INSTANCE_AUTO   [Supported only on T194]
- *      \n <b>Note</b>: @ref NVMEDIA_ENCODER_INSTANCE_AUTO initializes all
- *      supported NvENC HW engines
+ *      - ::NVMEDIA_ENCODER_INSTANCE_1
+ *      - ::NVMEDIA_ENCODER_INSTANCE_2
+ *      - ::NVMEDIA_ENCODER_INSTANCE_3
+ *      \n NVMEDIA_ENCODER_INSTANCE_AUTO is not supported
  *
  * @return The created @ref NvMediaIEP handle or NULL if unsuccessful.
  */
@@ -279,10 +280,10 @@ NvMediaIEPCreate(
  * @param[in] instanceId The ID of the NvENC HW engine instance
  *      \inputrange The following instances are supported:
  *      - ::NVMEDIA_ENCODER_INSTANCE_0
- *      - ::NVMEDIA_ENCODER_INSTANCE_1      [Supported only on T194]
- *      - ::NVMEDIA_ENCODER_INSTANCE_AUTO   [Supported only on T194]
- *      \n <b>Note</b>: @ref NVMEDIA_ENCODER_INSTANCE_AUTO initializes all
- *      supported NvENC HW engines
+ *      - ::NVMEDIA_ENCODER_INSTANCE_1
+ *      - ::NVMEDIA_ENCODER_INSTANCE_2
+ *      - ::NVMEDIA_ENCODER_INSTANCE_3
+ *      \n NVMEDIA_ENCODER_INSTANCE_AUTO is not supported
  *
  * @return The created @ref NvMediaIEP handle or NULL if unsuccessful.
  */
@@ -384,11 +385,10 @@ NvMediaIEPCreateCtx(
  * @param[in] instanceId The ID of the NvENC HW engine instance
  *      \inputrange The following instances are supported:
  *      - ::NVMEDIA_ENCODER_INSTANCE_0
- *      - ::NVMEDIA_ENCODER_INSTANCE_1      [Supported only on T194]
- *      - ::NVMEDIA_ENCODER_INSTANCE_AUTO   [Supported only on T194]
- *      \n <b>Note</b>: @ref NVMEDIA_ENCODER_INSTANCE_AUTO initializes all
- *      supported NvENC HW engines
- *
+ *      - ::NVMEDIA_ENCODER_INSTANCE_1
+ *      - ::NVMEDIA_ENCODER_INSTANCE_2
+ *      - ::NVMEDIA_ENCODER_INSTANCE_3
+ *      \n NVMEDIA_ENCODER_INSTANCE_AUTO is not supported
  * @return ::NVMEDIA_STATUS_OK
  * - ::NVMEDIA_STATUS_BAD_PARAMETER if any of the input parameters are invalid.
  * - ::NVMEDIA_STATUS_INVALID_STATE  The function was called in incorrect system state.
@@ -482,10 +482,11 @@ void NvMediaIEPDestroy(NvMediaIEP *encoder);
  *      the encoding task needs to be submitted.
  *      \inputrange The following instances are supported:
  *      - ::NVMEDIA_ENCODER_INSTANCE_0
- *      - ::NVMEDIA_ENCODER_INSTANCE_1      [Supported only on T194]
- *      \n <b>Note</b>: If @ref NVMEDIA_ENCODER_INSTANCE_AUTO was \a not passed
- *          to @ref NvMediaIEPCreate/@ref NvMediaIEPInit API, then instanceId
- *          passed to the former needs to be passed to NvMediaIEPFeedFrame.
+ *      - ::NVMEDIA_ENCODER_INSTANCE_1
+ *      - ::NVMEDIA_ENCODER_INSTANCE_2
+ *      - ::NVMEDIA_ENCODER_INSTANCE_3
+ *      \n instanceID argument will be deprecated in future. It is not getting
+ *         used in NvMediaIEPFeedFrame Api
  *
  * @return @ref NvMediaStatus The completion status of the operation.
  * Possible values are:
@@ -824,12 +825,11 @@ NvMediaIEPGetAttribute(
  *      \inputrange A valid NvSciBufObj
  *
  * @return @ref NvMediaStatus, the completion status of operation:
- * - @ref NVMEDIA_STATUS_OK if successful.
+ * - @ref NVMEDIA_STATUS_OK if successful and same bufObj is registered multiple times.
  * - @ref NVMEDIA_STATUS_BAD_PARAMETER if encoder, bufObj is invalid
  * - ::NVMEDIA_STATUS_INVALID_STATE  The function was called in incorrect system state.
  * - @ref NVMEDIA_STATUS_ERROR in following cases
- *          - user registers more than 32 bufObj.
- *          - user registers same bufObj multiple times.
+ *          - user registers more than 192 bufObj.
  * - @ref NVMEDIA_STATUS_NOT_SUPPORTED if API is not functional
  *
  **/
@@ -935,10 +935,10 @@ NvMediaIEPUnregisterNvSciBufObj(
  * @param[in] instanceId The ID of the NvENC HW engine instance
  *      \inputrange The following instances are supported:
  *      - ::NVMEDIA_ENCODER_INSTANCE_0
- *      - ::NVMEDIA_ENCODER_INSTANCE_1      [Supported only on T194]
- *      - ::NVMEDIA_ENCODER_INSTANCE_AUTO   [Supported only on T194]
- *      \n <b>Note</b>: @ref NVMEDIA_ENCODER_INSTANCE_AUTO initializes all
- *      supported NvENC HW engines
+ *      - ::NVMEDIA_ENCODER_INSTANCE_1
+ *      - ::NVMEDIA_ENCODER_INSTANCE_2
+ *      - ::NVMEDIA_ENCODER_INSTANCE_3
+ *      \n NVMEDIA_ENCODER_INSTANCE_AUTO is not supported
  * @param[out] attrlist A pointer to an %NvSciBufAttrList structure where
  *                NvMediaIEP places the NvSciBuf attributes.
  *
@@ -1323,20 +1323,54 @@ NvMediaIEPGetEOFNvSciSyncFence(
     NvSciSyncFence    *eofnvscisyncfence
 );
 
+/**
+ * @brief Queries the IEP device list 
+ *
+ * @pre  NvMediaIEPGetVersion()
+ * @post NvMediaIEPCreate()
+ *
+ * @usage
+ * - Allowed context for the API call
+ *   - Interrupt handler: No
+ *   - Signal handler: No
+ *   - Thread-safe: Yes
+ *   - Re-entrant: No
+ *   - Async/Sync: Sync
+ * - Required privileges: None
+ * - API group
+ *   - Init: Yes
+ *   - Runtime: No
+ *   - De-Init: No
+ *
+ * @param[in] version A pointer to a @ref NvMediaDeviceList structure
+ *                    of the client.
+ * @return ::NvMediaStatus The status of the operation.
+ * Possible values are:
+ * - ::NVMEDIA_STATUS_OK
+ * - ::NVMEDIA_STATUS_BAD_PARAMETER if the pointer is invalid.
+ */
+NvMediaStatus
+NvMediaIEPQueryDevices(
+    NvMediaDeviceList *deviceList
+);
+
 /*
  * @defgroup 6x_history_nvmedia_iep History
  * Provides change history for the NvMedia IEP API.
  *
  * \section 6x_history_nvmedia_iep Version History
  *
- * <b> Version 1.0 </b> September 28, 2021
+ * <b> Version 1.0.0 </b> September 28, 2021
  * - Initial release
  *
- * <b> Version 1.1 </b> August 03, 2022
+ * <b> Version 1.0.1 </b> August 03, 2022
  * - Added new quality preset API, NvMediaEncPreset
  *
- * <b> Version 1.2 </b> March 07, 2023
+ * <b> Version 1.0.2</b> March 07, 2023
  * - Added new create API NvMediaIEPCreateEx which does not depends on reconciled attribute list
+ *
+ * <b> Version 1.1.0</b> May 02, 2024
+ * - Added support for NvMediaIEPQueryDevices API
  *
  */
 

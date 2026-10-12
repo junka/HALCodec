@@ -1,5 +1,5 @@
 /*
- * SPDX-FileCopyrightText: Copyright (c) 2021-2022 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+ * SPDX-FileCopyrightText: Copyright (c) 2021-2025 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
  * SPDX-License-Identifier: LicenseRef-NvidiaProprietary
  *
  * NVIDIA CORPORATION, its affiliates and licensors retain all intellectual
@@ -208,6 +208,8 @@ typedef enum
     NvMParseAttr_h265DisableDpb,
     /** Frame management: DPB size is set to max number of reference frames */
     NvMParseAttr_DpbSize_SetTo_MaxRefFrames,
+    /** Frame management: Enable GDR decode */
+    NvMParseAttr_GDREnabled,
 
     /** Frame timing: Output timestamp in increasing order after filtering */
     NvMParseAttr_FilterTimestamps = 200,
@@ -544,6 +546,9 @@ typedef NvMediaStatus (*pfnCbNvMediaSliceDecode)(void *, NvMediaSliceDecodeData 
 typedef NvMediaStatus (*pfnCbNvMediaGetClearHdr)(void *, NvMediaParserPictureData *);
 typedef NvMediaStatus (*pfnCbNvMediaGetBackwardUpdates)(void *, NvMediaVP9BackwardUpdates *);
 typedef void          (*pfnCbNvMediaGetDpbInfoForMetadata)(void *, NvMediaRefSurface *, NvMediaDPBInfo *);
+typedef bool          (*pfncbNvMediaChooseOperatingPoint)(void *ptr, uint8_t numOperatingPoints);
+typedef void          (*pfncbNvMediaCopyBuffer) (void *ptr, NvMediaRefSurface *destbuf, NvMediaRefSurface *srcbuf);
+
 /** @} */
 
 typedef struct
@@ -600,6 +605,14 @@ typedef struct
       * use cases.
       */
     pfnCbNvMediaGetDpbInfoForMetadata  GetDpbInfoForMetadata;
+    /** callback to give option to user to choose Operating Point
+      *  in case of AV1 SVC streams
+      */
+    pfncbNvMediaChooseOperatingPoint   ChooseOperatingPoint;
+    /** callback to Copy the Source Buffer to Destination in case of AV1 Repeat Frames.
+      */
+    pfncbNvMediaCopyBuffer             CopyBuffer;
+    
 } NvMediaParserClientCb;
 
 /** Holds initialization parameters for the decoder class. */

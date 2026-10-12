@@ -477,6 +477,9 @@ typedef enum {
     NvSciSyncAttrKey_LowerBound,
     /** (bool, inout) Specifies if CPU access is required.
      *
+     * This attribute is mandatory if no Nvidia UMD was used for filling
+     * attributes.
+     *
      * During reconciliation, reconciler sets value of this key to true in the
      * reconciled NvSciSyncAttrList if any of the unreconciled
      * NvSciSyncAttrList(s) involved in reconciliation that is owned by the
@@ -940,6 +943,10 @@ NvSciError NvSciSyncAttrListIsReconciled(
 /**
  * \brief Validates a reconciled NvSciSyncAttrList against a set of input
  * unreconciled NvSciSyncAttrLists.
+ *
+ * @note Use this API ONLY if Safety software ASIL level is ASIL-B or lower.
+ * For higher level, more robust API NvSciSyncAttrListValidateReconciledAgainstAttrs
+ * must be used instead of this API.
  *
  * \param[in] reconciledAttrList Reconciled NvSciSyncAttrList to be validated.
  * \param[in] inputUnreconciledAttrListArray Array containing the unreconciled
@@ -1483,6 +1490,8 @@ NvSciError NvSciSyncAttrListDebugDump(
  *
  * @pre @id{NvSciSyncAttrListIpcExportUnreconciled_PreCond_001} @asil{QM}
  *  Valid unreconciled NvSciSyncAttrList(s) are obtained.
+ * @pre @id{NvSciSyncAttrListIpcExportUnreconciled_PreCond_002} @asil{QM}
+ *  Valid NvSciIpcEndpoint is obtained.
  * @post @id{NvSciSyncAttrListIpcExportUnreconciled_PostCond_001}
  *  When exporting an array containing multiple unreconciled
  * NvSciSyncAttrLists, the importing endpoint still imports just one unreconciled
@@ -1540,6 +1549,8 @@ NvSciError NvSciSyncAttrListIpcExportUnreconciled(
  *
  * @pre @id{NvSciSyncAttrListIpcExportReconciled_PreCond_001} @asil{QM}
  *  Valid reconciled NvSciSyncAttrList is obtained.
+ * @pre @id{NvSciSyncAttrListIpcExportReconciled_PreCond_002} @asil{QM}
+ *  Valid NvSciIpcEndpoint is obtained.
  *
  * @usage
  * - Allowed context for the API call
@@ -1593,6 +1604,8 @@ NvSciError NvSciSyncAttrListIpcExportReconciled(
  *
  * @pre @id{NvSciSyncAttrListIpcImportUnreconciled_PreCond_001} @asil{QM}
  *  Valid NvSciSyncModule is obtained.
+ * @pre @id{NvSciSyncAttrListIpcImportUnreconciled_PreCond_002} @asil{QM}
+ *  Valid NvSciIpcEndpoint is obtained.
  * @post @id{NvSciSyncAttrListIpcImportUnreconciled_PostCond_001}
  *  Imported NvSciSyncAttrList is no longer writable.
  *
@@ -1672,6 +1685,8 @@ NvSciError NvSciSyncAttrListIpcImportUnreconciled(
  *  Valid NvSciSyncModule is obtained.
  * @pre @id{NvSciSyncAttrListIpcImportReconciled_PreCond_002} @asil{QM}
  *  Valid unreconciled NvSciSyncAttrList(s) are obtained.
+ * @pre @id{NvSciSyncAttrListIpcImportReconciled_PreCond_003} @asil{QM}
+ *  Valid NvSciIpcEndpoint is obtained.
  * @post @id{NvSciSyncAttrListIpcImportReconciled_PostCond_001}
  *  NvSciSyncAttrListIpcImportReconciled() also validates that the
  * reconciled NvSciSyncAttrList to be imported will
@@ -2225,6 +2240,8 @@ void NvSciSyncObjFree(
  *
  * @pre @id{NvSciSyncObjIpcExport_PreCond_001} @asil{QM}
  *  Valid NvSciSyncObj is obtained.
+ * @pre @id{NvSciSyncObjIpcExport_PreCond_002} @asil{QM}
+ *  Valid NvSciIpcEndpoint is obtained.
  *
  * @usage
  * - Allowed context for the API call
@@ -2294,6 +2311,8 @@ NvSciError NvSciSyncObjIpcExport(
  *
  * @pre @id{NvSciSyncObjIpcImport_PreCond_001} @asil{QM}
  *  Valid reconciled NvSciSyncAttrList is obtained.
+ * @pre @id{NvSciSyncObjIpcImport_PreCond_002} @asil{QM}
+ *  Valid NvSciIpcEndpoint is obtained.
  * @arr @id{NvSciSyncObjIpcImport_REC_001} @asil{QM}
  *  NvSciSyncObjIpcImport() does not take ownership of input NvSciSyncAttrList.
  * The caller remains responsible for freeing input NvSciSyncAttrList. The caller
@@ -2348,6 +2367,8 @@ NvSciError NvSciSyncObjIpcImport(
  *
  * @pre @id{NvSciSyncIpcExportFence_PreCond_001} @asil{B}
  *  Valid NvSciSyncFence* is obtained.
+ * @pre @id{NvSciSyncIpcExportFence_PreCond_002} @asil{QM}
+ *  Valid NvSciIpcEndpoint is obtained.
  *
  * @usage
  * - Allowed context for the API call
@@ -2520,13 +2541,9 @@ NvSciError NvSciSyncObjGenerateFence(
 /**
  * \brief Signals the @ref NvSciSyncObj using the reconciled primitive that
  * was allocated along with the NvSciSyncObj.
- */
-#if (NV_IS_SAFETY == 0)
-/**
+ *
  * If the signal operation fails, then the timestamp value is undefined.
- */
-#endif
-/**
+ *
  * This function is called when the CPU is the Signaler.
  *
  * \param[in] syncObj A valid NvSciSyncObj to signal.
@@ -2629,7 +2646,11 @@ NvSciError NvSciSyncFenceWait(
  * This function can be used when the CPU is the waiter.
  *
  * \param[in] syncFence object of type NvSciSyncFence
- * \param[out] timestampUS time (in microseconds) when the NvSciSyncFence expired.
+ * \param[out] timestampUS time in microseconds when the NvSciSyncFence expired
+ *
+ * \if tegra
+ * @a timestampUS is TSC-based
+ * \endif
  *
  * \return ::NvSciError
  * - ::NvSciError_Success if successful
@@ -2762,7 +2783,7 @@ NvSciError NvSciSyncAttrListGetAttr(
  * that satisfies all the constraints specified in the reconciled
  * NvSciSyncAttrList.
  *
- * Note: This function serves as a convenience function that combines calls to
+ * @note This function serves as a convenience function that combines calls to
  * NvSciSyncAttrListReconcile and NvSciSyncObjAlloc.
  *
  * \param[in] inputArray Array containing the unreconciled NvSciSyncAttrList(s)
@@ -2844,7 +2865,7 @@ NvSciError NvSciSyncAttrListReconcileAndObjAlloc(
  * The binary descriptor can subsequently be transferred to Waiters to create
  * a matching NvSciSyncObj.
  *
- * Note: This function serves as a convenience function that combines calls to
+ * @note This function serves as a convenience function that combines calls to
  * NvSciSyncAttrListIpcExportReconciled and NvSciSyncObjIpcExport.
  *
  * \param[in] syncObj NvSciSyncObj to export.
@@ -2878,6 +2899,8 @@ NvSciError NvSciSyncAttrListReconcileAndObjAlloc(
  *
  * @pre @id{NvSciSyncIpcExportAttrListAndObj_PreCond_001} @asil{QM}
  *  Valid NvSciSyncObj obtained.
+ * @pre @id{NvSciSyncIpcExportAttrListAndObj_PreCond_002} @asil{QM}
+ *  Valid NvSciIpcEndpoint is obtained.
  *
  * @usage
  * - Allowed context for the API call
@@ -2944,7 +2967,7 @@ void NvSciSyncAttrListAndObjFreeDesc(
  * descriptor from the Signaler who has created the binary descriptor.
  * Waiter will create its own NvSciSyncObj and return as output.
  *
- * Note: This function serves as a convenience function that combines calls to
+ * @note This function serves as a convenience function that combines calls to
  * NvSciSyncAttrListIpcImportReconciled and NvSciSyncObjIpcImport.
  *
  * \param[in] module A @ref NvSciSyncModule to associate the imported
@@ -2999,6 +3022,8 @@ void NvSciSyncAttrListAndObjFreeDesc(
  *  Valid NvSciSyncModule is obtained.
  * @pre @id{NvSciSyncIpcImportAttrListAndObj_PreCond_002} @asil{QM}
  *  Valid unreconciled NvSciSyncAttrList(s) are obtained.
+ * @pre @id{NvSciSyncIpcImportAttrListAndObj_PreCond_003} @asil{QM}
+ *  Valid NvSciIpcEndpoint is obtained.
  *
  * @usage
  * - Allowed context for the API call
@@ -3159,6 +3184,14 @@ NvSciError NvSciSyncFillC2cAttrs(
  * that the user has set in the unreconciled NvSciSyncAttrList(s).
  * This API provides the safety mechanism to detect and report
  * any reconciliation errors
+ *
+ * This API offers more robust validation than
+ * NvSciSyncAttrListValidateReconciled and must be used in Safety software
+ * with level higher than ASIL-B.
+ *
+ * @note It can also be used in Safety software at ASIL-B or lower level.
+ * If this API is used, application software does NOT need to use
+ * NvSciSyncAttrListValidateReconciled
  */
 #if (NV_IS_SAFETY == 0)
 /**

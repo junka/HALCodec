@@ -1,5 +1,5 @@
 /*
- * SPDX-FileCopyrightText: Copyright (c) 2021-2023 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+ * SPDX-FileCopyrightText: Copyright (c) 2021-2025 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
  * SPDX-License-Identifier: LicenseRef-NvidiaProprietary
  *
  * NVIDIA CORPORATION, its affiliates and licensors retain all intellectual
@@ -25,7 +25,7 @@ extern "C" {
 #endif
 
 #include <stdint.h>
-
+#include "nvmedia_common_video.h"
 #include "nvmedia_common_decode.h"
 #include "nvmedia_core.h"
 #include "nvscibuf.h"
@@ -51,7 +51,7 @@ extern "C" {
 /** @brief Major Version number */
 #define NVMEDIA_IDE_VERSION_MAJOR   1
 /** @brief Minor Version number */
-#define NVMEDIA_IDE_VERSION_MINOR   0
+#define NVMEDIA_IDE_VERSION_MINOR   1
 /** @brief Patch Version number */
 #define NVMEDIA_IDE_VERSION_PATCH   0
 
@@ -60,8 +60,6 @@ extern "C" {
  * can be called before each call to NvMediaIDEFeedFrame().
  */
 #define NVMEDIA_IDE_MAX_PRENVSCISYNCFENCES  (16U)
-
-
 
 /**
  * @brief An opaque NvMediaIDE object created by
@@ -124,6 +122,20 @@ typedef struct NvMediaIDE NvMediaIDE;
 
 #define NVMEDIA_IDE_DUMP_MV     (1U<<6)
 
+/**
+ * \hideinitializer
+ * \brief Indicate INTERLACED video to decoder flag
+ */
+
+#define NVMEDIA_IDE_INTERLACED_VIDEO     (1U<<7)
+
+/**
+ * \hideinitializer
+ * \brief Indicate Chroma Format to decoder
+ */
+
+#define NVMEDIA_IDE_CHROMA_FMT_MASK     (0x3U<<8)
+
 /**@} <!-- Ends decoder_create_flag sub-group --> */
 
 /**
@@ -182,15 +194,15 @@ NvMediaIDEGetVersion(
  * @param[in] codec Codec type. The following types are supported:
  * - @ref NVMEDIA_VIDEO_CODEC_HEVC
  * - @ref NVMEDIA_VIDEO_CODEC_H264
- * - @ref NVMEDIA_VIDEO_CODEC_VC1
- * - @ref NVMEDIA_VIDEO_CODEC_VC1_ADVANCED
- * - @ref NVMEDIA_VIDEO_CODEC_MPEG1
- * - @ref NVMEDIA_VIDEO_CODEC_MPEG2
- * - @ref NVMEDIA_VIDEO_CODEC_MPEG4
- * - @ref NVMEDIA_VIDEO_CODEC_MJPEG
- * - @ref NVMEDIA_VIDEO_CODEC_VP8
- * - @ref NVMEDIA_VIDEO_CODEC_VP9
- * - @ref NVMEDIA_VIDEO_CODEC_AV1           [Supported only on T234 and further chips]
+ * - @ref NVMEDIA_VIDEO_CODEC_VC1          [For Thor Linux Non-Safety-Related (NSR), this codec is not supported on prod_nsr]
+ * - @ref NVMEDIA_VIDEO_CODEC_VC1_ADVANCED [For Thor Linux NSR, this codec is not supported on prod_nsr]
+ * - @ref NVMEDIA_VIDEO_CODEC_MPEG1        [For Thor Linux NSR, this codec is not supported on prod_nsr]
+ * - @ref NVMEDIA_VIDEO_CODEC_MPEG2        [For Thor Linux NSR, this codec is not supported on prod_nsr]
+ * - @ref NVMEDIA_VIDEO_CODEC_MPEG4        [For Thor Linux NSR, this codec is not supported on prod_nsr]
+ * - @ref NVMEDIA_VIDEO_CODEC_MJPEG        [For Thor Linux NSR, this codec is not supported on prod_nsr]
+ * - @ref NVMEDIA_VIDEO_CODEC_VP8          [For Thor Linux NSR, this codec is not supported on prod_nsr]
+ * - @ref NVMEDIA_VIDEO_CODEC_VP9          [For Thor Linux NSR, this codec is not supported on prod_nsr]
+ * - @ref NVMEDIA_VIDEO_CODEC_AV1          [Supported only on T234 and further chips][For Thor Linux NSR, this codec is not supported on prod_nsr]
  * @param[in] width Decoder width in luminance pixels.
  * @param[in] height Decoder height in luminance pixels.
  * @param[in] maxReferences The maximum number of reference frames used.
@@ -529,6 +541,10 @@ NvMediaIDEUnregisterNvSciBufObj (
  * was used in @ref NvMediaIDECreate API, else this parameter is ignored:
  * - ::NVMEDIA_DECODER_INSTANCE_0
  * - ::NVMEDIA_DECODER_INSTANCE_1      [Supported only on T194]
+ *
+ * This argument will be deprecated in future. It is not getting
+ * used in NvMediaIDEDecoderRender API
+ *
  * @return ::NvMediaStatus The completion status of the operation.
  * Possible values are:
  * - ::NVMEDIA_STATUS_OK
@@ -1117,14 +1133,48 @@ NvMediaIDEGetEOFNvSciSyncFence(
     NvSciSyncFence    *eofnvscisyncfence
 );
 
+ /**
+ * @brief Queries the HW device list for IDE
+ *
+ * @pre  None
+ * @post None
+ *
+ * @usage
+ * - Allowed context for the API call
+ *   - Interrupt handler: No
+ *   - Signal handler: No
+ *   - Thread-safe: Yes
+ *   - Re-entrant: No
+ *   - Async/Sync: Sync
+ * - Required privileges: None
+ * - API group
+ *   - Init: Yes
+ *   - Runtime: No
+ *   - De-Init: No
+ *
+ * @param[in] version A pointer to a @ref NvMediaDeviceList structure
+ *                    of the client.
+ * @return ::NvMediaStatus The status of the operation.
+ * Possible values are:
+ * - ::NVMEDIA_STATUS_OK
+ * - ::NVMEDIA_STATUS_BAD_PARAMETER if the pointer is invalid.
+ */
+
+NvMediaStatus
+NvMediaIDEQueryHWDevices(
+    NvMediaDeviceList *deviceList
+);
 /*
  * @defgroup 6x_history_nvmedia_ide History
  * Provides change history for the NvMediaIDE API.
  *
  * \section 6x_history_nvmedia_ide Version History
  *
- * <b> Version 1.0 </b> September 28, 2021
+ * <b> Version 1.0.0 </b> September 28, 2021
  * - Initial release
+ *
+ * <b> Version 1.1.0 </b> May 02, 2024
+ *  - Added interface dor device list query
  */
 /** @} <!-- Ends image_decoder_api Image Decoder --> */
 

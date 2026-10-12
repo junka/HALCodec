@@ -171,10 +171,10 @@ static const uint32_t NvSciIpcMinorVersion = 4U;
  * pulses instead of using ChannelCreate_r().
  * ~~~~~~~~~~~~~~~~~~~~~
  * struct nto_channel_config {
- *     struct sigevent event;    // initialize using SIGEV_SEM_INIT() macro
- *     unsigned num_pulses;      // threshold to trigger semaphore event
- *     unsigned rearm_threshold; // 0 ~ num_pulses
- *     unsigned options;         // _NTO_CHO_CUSTOM_EVENT
+ *     struct sigevent event;
+ *     unsigned num_pulses;
+ *     unsigned rearm_threshold;
+ *     unsigned options;
  *     unsigned reserved[3];
  * }
  * ~~~~~~~~~~~~~~~~~~~~~
@@ -249,6 +249,7 @@ static const uint32_t NvSciIpcMinorVersion = 4U;
  *
  */
 
+#ifdef __QNX__
 /*******************************************************************/
 /********************* ACCESS CONTROL ******************************/
 /*******************************************************************/
@@ -291,6 +292,7 @@ static const uint32_t NvSciIpcMinorVersion = 4U;
  *     libnvscicommon (GID: 55017), libnvscisync (GID: 55019), libnvscic2ccommon (GID: 55075),
  *     libnvscic2c (GID: 55076), libnvscic2cpcie (GID: 55077)
  */
+#endif /* __QNX___ */
 
 /*******************************************************************/
 /************************ DATA TYPES *******************************/
@@ -372,7 +374,7 @@ struct NvSciIpcEndpointInfo {
  *   - Signal handler: No
  *   - Thread-safe: Yes
  *   - Async/Sync: Sync
- * - Required Privileges: None
+ * - Required Privileges(QNX): None
  * - API Group
  *   - Init: Yes
  *   - Runtime: No
@@ -403,7 +405,7 @@ NvSciError NvSciIpcInit(void);
  *   - Signal handler: No
  *   - Thread-safe: Yes
  *   - Async/Sync: Sync
- * - Required Privileges: None
+ * - Required Privileges(QNX): None
  * - API Group
  *   - Init: Yes
  *   - Runtime: No
@@ -628,7 +630,7 @@ void NvSciIpcCloseEndpoint(NvSciIpcEndpoint handle);
  *   - Signal handler: No
  *   - Thread-safe: Yes
  *   - Async/Sync: Sync
- * - Required Privileges: None
+ * - Required Privileges(QNX): None
  * - API Group
  *   - Init: Yes
  *   - Runtime: No
@@ -681,7 +683,7 @@ void NvSciIpcResetEndpoint(NvSciIpcEndpoint handle);
  *   - Signal handler: No
  *   - Thread-safe: Yes
  *   - Async/Sync: Sync
- * - Required Privileges: None
+ * - Required Privileges(QNX): None
  * - API Group
  *   - Init: Yes
  *   - Runtime: No

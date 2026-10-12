@@ -1,5 +1,6 @@
 /*
- * Copyright (c) 2019-2023, NVIDIA CORPORATION.  All rights reserved.
+ * SPDX-FileCopyrightText: Copyright (c) 2019-2025 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+ * SPDX-License-Identifier: LicenseRef-NvidiaProprietary
  *
  * NVIDIA CORPORATION and its licensors retain all intellectual property
  * and proprietary rights in and to this software, related documentation
@@ -26,7 +27,10 @@ extern "C" {
  *
  * @brief <b> NVIDIA Software Communications Interface (SCI) : NvSci Event Service </b>
  *
- * @version 1.4
+ * @version 1.5
+ *
+ * @section 1.5 Mar/27/2025
+ * - Add NvSciEventLoopService::WaitForAnyEvent() in QNX and Linux build
  *
  * @section 1.4 Sep/05/2023
  * - Add NvSciEventLoopServiceCreateSafeX() in Linux build
@@ -66,7 +70,7 @@ extern "C" {
 static const uint32_t NvSciEventMajorVersion = 1U;
 
 /** @brief NvSciEvent API Minor version number */
-static const uint32_t NvSciEventMinorVersion = 4U;
+static const uint32_t NvSciEventMinorVersion = 5U;
 
 /**
  * @defgroup nvsci_ipc_event Event Service APIs
@@ -618,15 +622,6 @@ NvSciError NvSciEventLoopServiceCreateSafe(
  * - ::NvSciError_ResourceError       Indicates not enough system resources.
  * - ::NvSciError_NotPermitted        Indicates incorrect API group usage.
  *
- * @pre No infinite timeout with fast local event
- * - The following waiting functions of the event loop service created with
- * NvSciEventLoopServiceCreateSafeX() do not support infinite timeout and
- * will return NvSciError_BadParameter when they are called with infinite
- * timeout.
- *      - WaitForEvent()
- *      - WaitForMultipleEvents()
- *      - WaitForMultipleEventsExt()
- *
  * @usage
  * - Allowed context for the API call
  *   - Interrupt handler: No
@@ -673,7 +668,7 @@ struct NvSciEventLoopService {
      * notification, servicing events with configured callbacks in the interim.
      *
      * Any asynchronous event notifiers that are pending before calling
-     * this function will be claimed by some thread for handling before
+     * this function will be claimed by the current thread for handling before
      * this function returns.
      *
      * @a eventNotifier must have been created through EventService.
@@ -726,7 +721,7 @@ struct NvSciEventLoopService {
      * callbacks in the interim.
      *
      * Any asynchronous event notifiers that are pending before calling
-     * this function will be claimed by some thread for handling before
+     * this function will be claimed by the current thread for handling before
      * this function returns.
      *
      * Each event notifier in @a eventNotifierArray must have been created
@@ -789,7 +784,7 @@ struct NvSciEventLoopService {
      * callbacks in the interim.
      *
      * Any asynchronous event notifiers that are pending before calling
-     * this function will be claimed by some thread for handling before
+     * this function will be claimed by the current thread for handling before
      * this function returns.
      *
      * Each event notifier in @a eventNotifierArray must have been created
@@ -858,6 +853,74 @@ struct NvSciEventLoopService {
             size_t eventNotifierCount,
             int64_t microseconds,
             bool* newEventArray);
+
+    /**
+     * \brief Waits up to a configurable timeout for the
+     * first occurence of any of a set of particular event notifications
+     * Any asynchronous event notifiers that are pending before calling
+     * this function will be claimed by some thread for handling before
+     * this function returns. */
+#ifndef __QNX__
+    /* Since an array is used to notify what events have occured or not,
+     * the index of array becomes the default priority for handling of
+     * events. In such a case, the possibility for event starvation might
+     * arise. The user should keep in mind this possibility before calling
+     * this API.
+     */
+#endif /* __QNX__ */
+     /*
+     * Each event notifier in @a eventNotifierArray must have been created
+     * through EventService.
+     *
+     * On a successful return, for all integer `i` in the range
+     * `[0, eventNotifierCount-1]`, there will be only one `newEventArray[i]`
+     * true.
+     *
+     * @param[in]  eventNotifierArray Array of NvSciEventNotifier object
+     *                                pointers. If it is NULL,
+     *                                @a eventNotifierCount should be zero and
+     *                                @a newEventArray should be NULL together.
+     * @param[in]  eventNotifierCount Event notifier count in eventNotifierArray.
+     * @param[in]  microseconds  A 64-bit integer timeout in microsecond.
+     *                           Set to -1 for infinite timeout, for example,
+     *                           the value @ref NV_SCI_EVENT_INFINITE_WAIT.
+     *                           Timeout must be 2msec or greater as high
+     *                           precision timer is not supported in DRIVE OS.
+     * @param[out] newEventArray Array of event occurrence.
+     *
+     * @return ::NvSciError, the completion code of operations:
+     * - ::NvSciError_Success            Indicates a successful operation.
+     * - ::NvSciError_BadParameter       Indicates an invalid input parameter.
+     * - ::NvSciError_InvalidState       Indicates an invalid operation state.
+     * - ::NvSciError_NotSupported       Indicates another thread already
+     *                                   waiting for events.
+     * - ::NvSciError_Timeout            Indicates a timeout occurrence.
+     * - ::NvSciError_ResourceError      Indicates not enough system resources.
+     * - ::NvSciError_InterruptedCall    Indicates an interrupt occurred.
+     *
+     * @pre NvSciEventLoopServiceCreateSafe() must be called.
+     *      NvSciIpcGetEventNotifier() must be called for NvSciNativeEvent.
+     *      NvSciEventService::CreateLocalEvent() must be called
+     *      for NvSciLocalEvent.
+     *
+     * @usage
+     * - Allowed context for the API call
+     *   - Interrupt handler: No
+     *   - Signal handler: No
+     *   - Thread-safe: Yes
+     *   - Async/Sync: Sync
+     * - Required Privileges(QNX): None
+     * - API Group
+     *   - Init: No
+     *   - Runtime: Yes
+     *   - De-Init: No
+     */
+    NvSciError (*WaitForAnyEvent)(
+            NvSciEventNotifier* const * eventNotifierArray,
+            size_t eventNotifierCount,
+            int64_t microseconds,
+            bool* newEventArray);
+
 };
 
 #ifdef __QNX__

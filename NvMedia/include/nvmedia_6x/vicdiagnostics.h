@@ -35,34 +35,6 @@ extern "C" {
 /// @{
 ///
 
-/// @brief Major version number of VIC Diagnostics header.
-///
-/// This defines the major version of the API defined in this header. This
-/// is intended to be used when validating the version number returned by the
-/// #VicDiagnosticsGetVersion() function.
-///
-/// @sa VicDiagnosticsGetVersion()
-///
-#define VICDIAGNOSTICS_VERSION_MAJOR   1
-
-/// @brief Minor version number of VIC Diagnostics header.
-///
-/// This defines the minor version of the API defined in this header. This
-/// is intended to be used when validating the version number returned by the
-/// #VicDiagnosticsGetVersion() function.
-///
-/// @sa VicDiagnosticsGetVersion()
-///
-#define VICDIAGNOSTICS_VERSION_MINOR   0
-
-/// @brief Patch version number of VIC Diagnostics header.
-///
-/// This defines the patch version of the API defined in this header.
-///
-/// @sa VicDiagnosticsGetVersion()
-///
-#define VICDIAGNOSTICS_VERSION_PATCH   1
-
 /// @brief Attributes structure for #VicDiagnosticsCreate().
 ///
 /// This type holds the attributes to control the behaviour of the
@@ -136,49 +108,6 @@ typedef struct
     ///
     uint64_t operationId;
 } VicDiagnosticsResult;
-
-/// @brief Returns the version number of the NvMedia Vic Diagnostics library.
-///
-/// This function returns the major and minor version number of the
-/// Vic Diagnostics library. The client must pass an #NvMediaVersion struct
-/// to this function, and the version information will be returned in this
-/// struct.
-///
-/// This allows the client to verify that the version of the library matches
-/// and is compatible with the the version number of the header file they are
-/// using.
-///
-/// @param[out] version  Pointer to an #NvMediaVersion struct that will be
-///                      populated with the version information.
-///
-/// @return An #NvMediaStatus return code.
-/// @retval NVMEDIA_STATUS_OK             Version information returned
-///                                       successfully.
-/// @retval NVMEDIA_STATUS_BAD_PARAMETER  @a version is NULL.
-///
-/// @pre None.
-///
-/// @usage
-/// - Allowed context for the API call
-///   - Interrupt handler: No
-///   - Signal handler: No
-///   - Thread-safe: Yes, with the following conditions:
-///     - Each thread uses different NvMediaVersion object
-///   - Re-entrant: No
-///   - Async/Sync: Sync
-/// - Required privileges: None
-/// - API group
-///   - Init: Yes
-///   - Runtime: Yes
-///   - De-Init: Yes
-///
-/// @sa VICDIAGNOSTICS_VERSION_MAJOR
-/// @sa VICDIAGNOSTICS_VERSION_MINOR
-/// @sa VICDIAGNOSTICS_VERSION_PATCH
-/// @sa NvMediaVersion
-///
-NvMediaStatus
-VicDiagnosticsGetVersion(NvMediaVersion * const version);
 
 /// @brief VicDiagnostics Context.
 ///
@@ -548,16 +477,6 @@ VicDiagnosticsSetTest(VicDiagnostics const * const handle,
 ///
 /// @}
 ///
-
-//
-// Version History
-//
-// Version 1.0 August 10, 2022
-// - Initial release
-//
-// Version 1.0.1 September 2, 2022
-// - Always treat parameters handle value 0 as invalid
-//
 
 #ifdef __cplusplus
 }

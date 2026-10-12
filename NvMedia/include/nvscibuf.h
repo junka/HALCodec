@@ -1,13 +1,15 @@
 /*
  * Header file for NvSciBuf APIs
  *
- * Copyright (c) 2018-2024, NVIDIA CORPORATION. All rights reserved.
+ * SPDX-FileCopyrightText: Copyright (c) 2018-2025 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+ * SPDX-License-Identifier: LicenseRef-NvidiaProprietary
  *
- * NVIDIA Corporation and its licensors retain all intellectual property
- * and proprietary rights in and to this software, related documentation
- * and any modifications thereto.  Any use, reproduction, disclosure or
- * distribution of this software and related documentation without an express
- * license agreement from NVIDIA Corporation is strictly prohibited.
+ * NVIDIA CORPORATION, its affiliates and licensors retain all intellectual
+ * property and proprietary rights in and to this material, related
+ * documentation and any modifications thereto. Any use, reproduction,
+ * disclosure or distribution of this material and related documentation
+ * without an express license agreement from NVIDIA CORPORATION or
+ * its affiliates is strictly prohibited.
  */
 /**
  * @file
@@ -78,6 +80,12 @@ extern "C"
  * members of a structure if the structure is taken as an input parameter.
  * - NvSciBufModule is not sharable accross processes. User must create a new
  * NvSciBufModule using NvSciBufModuleOpen() in every process.
+ * - Applications need to pass attribute values in the valid range when setting attributes
+ * in an NvSciBufAttrList.
+ * - Applications need to ensure that any non-NULL NvSciBuf structures, such as
+ * NvSciBufModule, NvSciBufAttrList, NvSciBufObj, and NvSciBuf AttrList/Object, transport descriptors
+ * passed as an input parameter to NvSciBuf APIs were returned as an output parameter by a prior successful
+ * invocation of an NvSciBuf API and those structures were not freed.
  *
  * \section nvscibuf_out_params Output parameters
  * - In general, output parameters are passed by reference through pointers.
@@ -690,15 +698,17 @@ typedef enum {
      * The policy specified above is applied for ALL the GPU IDs specified in
      * NvSciBufGeneralAttrKey_GpuId.
      *
-     * |----------|---------------|-----------|---------------|
+     * <pre>
+     * +----------+---------------+-----------+---------------+
      * | GPU TYPE | MEMORY DOMAIN | PLATFORM  | DEFAULT VALUE |
-     * |----------|---------------|-----------|---------------|
+     * +==========+===============+===========+===============+
      * | iGPU     | Sysmem        | Tegra     | TRUE          |
-     * |----------|---------------|-----------|---------------|
+     * +----------+---------------+-----------+---------------+
      * | dGPU     | Sysmem        | Tegra/X86 | FALSE         |
-     * |----------|---------------|-----------|---------------|
+     * +----------+---------------+-----------+---------------+
      * | dGPU     | Vidmem        | Tegra/X86 | TRUE          |
-     * |----------|---------------|-----------|---------------|
+     * +----------+---------------+-----------+---------------+
+     * </pre>
      *
      * Type: Input/Output attribute
      * Presence: Optional
@@ -2747,6 +2757,419 @@ typedef enum {
 /**
  * @brief Defines the image color standard for NvSciBufType_Image.
  *
+ * NvSciBufAttrValColorFmt to NvSciBufAttrValColorStd mapping
+ *
+ * <pre>
+ * +----------------------------------+---------------------------+
+ * | NvSciBufAttrValColorFmt          | NvSciBufAttrValColorStd   |
+ * +==================================+===========================+
+ * | NvSciColor_Bayer8RGGB            | NvSciColorStd_SRGB        |
+ * +----------------------------------+---------------------------+
+ * | NvSciColor_Bayer8CCCC            | NvSciColorStd_SRGB        |
+ * +----------------------------------+---------------------------+
+ * | NvSciColor_Bayer8BGGR            | NvSciColorStd_SRGB        |
+ * +----------------------------------+---------------------------+
+ * | NvSciColor_Bayer8GBRG            | NvSciColorStd_SRGB        |
+ * +----------------------------------+---------------------------+
+ * | NvSciColor_Bayer8GRBG            | NvSciColorStd_SRGB        |
+ * +----------------------------------+---------------------------+
+ * | NvSciColor_Bayer16BGGR           | NvSciColorStd_SRGB        |
+ * +----------------------------------+---------------------------+
+ * | NvSciColor_Bayer16CCCC           | NvSciColorStd_SRGB        |
+ * +----------------------------------+---------------------------+
+ * | NvSciColor_Bayer16GBRG           | NvSciColorStd_SRGB        |
+ * +----------------------------------+---------------------------+
+ * | NvSciColor_Bayer16GRBG           | NvSciColorStd_SRGB        |
+ * +----------------------------------+---------------------------+
+ * | NvSciColor_Bayer16RGGB           | NvSciColorStd_SRGB        |
+ * +----------------------------------+---------------------------+
+ * | NvSciColor_Bayer16RCCB           | NvSciColorStd_SRGB        |
+ * +----------------------------------+---------------------------+
+ * | NvSciColor_Bayer16BCCR           | NvSciColorStd_SRGB        |
+ * +----------------------------------+---------------------------+
+ * | NvSciColor_Bayer16CRBC           | NvSciColorStd_SRGB        |
+ * +----------------------------------+---------------------------+
+ * | NvSciColor_Bayer16CBRC           | NvSciColorStd_SRGB        |
+ * +----------------------------------+---------------------------+
+ * | NvSciColor_Bayer16RCCC           | NvSciColorStd_SRGB        |
+ * +----------------------------------+---------------------------+
+ * | NvSciColor_Bayer16CCCR           | NvSciColorStd_SRGB        |
+ * +----------------------------------+---------------------------+
+ * | NvSciColor_Bayer16CRCC           | NvSciColorStd_SRGB        |
+ * +----------------------------------+---------------------------+
+ * | NvSciColor_Bayer16CCRC           | NvSciColorStd_SRGB        |
+ * +----------------------------------+---------------------------+
+ * | NvSciColor_X2Bayer14GBRG         | NvSciColorStd_SRGB        |
+ * +----------------------------------+---------------------------+
+ * | NvSciColor_X4Bayer12GBRG         | NvSciColorStd_SRGB        |
+ * +----------------------------------+---------------------------+
+ * | NvSciColor_X4Bayer12RCCB         | NvSciColorStd_SRGB        |
+ * +----------------------------------+---------------------------+
+ * | NvSciColor_X4Bayer12BCCR         | NvSciColorStd_SRGB        |
+ * +----------------------------------+---------------------------+
+ * | NvSciColor_X4Bayer12CRBC         | NvSciColorStd_SRGB        |
+ * +----------------------------------+---------------------------+
+ * | NvSciColor_X4Bayer12CBRC         | NvSciColorStd_SRGB        |
+ * +----------------------------------+---------------------------+
+ * | NvSciColor_X4Bayer12RCCC         | NvSciColorStd_SRGB        |
+ * +----------------------------------+---------------------------+
+ * | NvSciColor_X4Bayer12CCCR         | NvSciColorStd_SRGB        |
+ * +----------------------------------+---------------------------+
+ * | NvSciColor_X4Bayer12CRCC         | NvSciColorStd_SRGB        |
+ * +----------------------------------+---------------------------+
+ * | NvSciColor_X4Bayer12CCRC         | NvSciColorStd_SRGB        |
+ * +----------------------------------+---------------------------+
+ * | NvSciColor_X6Bayer10GBRG         | NvSciColorStd_SRGB        |
+ * +----------------------------------+---------------------------+
+ * | NvSciColor_X2Bayer14GRBG         | NvSciColorStd_SRGB        |
+ * +----------------------------------+---------------------------+
+ * | NvSciColor_X4Bayer12GRBG         | NvSciColorStd_SRGB        |
+ * +----------------------------------+---------------------------+
+ * | NvSciColor_X6Bayer10GRBG         | NvSciColorStd_SRGB        |
+ * +----------------------------------+---------------------------+
+ * | NvSciColor_X2Bayer14BGGR         | NvSciColorStd_SRGB        |
+ * +----------------------------------+---------------------------+
+ * | NvSciColor_X4Bayer12BGGR         | NvSciColorStd_SRGB        |
+ * +----------------------------------+---------------------------+
+ * | NvSciColor_X6Bayer10BGGR         | NvSciColorStd_SRGB        |
+ * +----------------------------------+---------------------------+
+ * | NvSciColor_X2Bayer14RGGB         | NvSciColorStd_SRGB        |
+ * +----------------------------------+---------------------------+
+ * | NvSciColor_X4Bayer12RGGB         | NvSciColorStd_SRGB        |
+ * +----------------------------------+---------------------------+
+ * | NvSciColor_X4Bayer12RGGB_RJ      | NvSciColorStd_SRGB        |
+ * +----------------------------------+---------------------------+
+ * | NvSciColor_X6Bayer10RGGB         | NvSciColorStd_SRGB        |
+ * +----------------------------------+---------------------------+
+ * | NvSciColor_X2Bayer14CCCC         | NvSciColorStd_SRGB        |
+ * +----------------------------------+---------------------------+
+ * | NvSciColor_X4Bayer12CCCC         | NvSciColorStd_SRGB        |
+ * +----------------------------------+---------------------------+
+ * | NvSciColor_X6Bayer10CCCC         | NvSciColorStd_SRGB        |
+ * +----------------------------------+---------------------------+
+ * | NvSciColor_Signed_X2Bayer14CCCC  | NvSciColorStd_SRGB        |
+ * +----------------------------------+---------------------------+
+ * | NvSciColor_Signed_X4Bayer12CCCC  | NvSciColorStd_SRGB        |
+ * +----------------------------------+---------------------------+
+ * | NvSciColor_Signed_X12Bayer20CCCC | NvSciColorStd_SRGB        |
+ * +----------------------------------+---------------------------+
+ * | NvSciColor_Signed_X6Bayer10CCCC  | NvSciColorStd_SRGB        |
+ * +----------------------------------+---------------------------+
+ * | NvSciColor_Signed_Bayer16CCCC    | NvSciColorStd_SRGB        |
+ * +----------------------------------+---------------------------+
+ * | NvSciColor_FloatISP_Bayer16CCCC  | NvSciColorStd_SRGB        |
+ * +----------------------------------+---------------------------+
+ * | NvSciColor_FloatISP_Bayer16RGGB  | NvSciColorStd_SRGB        |
+ * +----------------------------------+---------------------------+
+ * | NvSciColor_FloatISP_Bayer16BGGR  | NvSciColorStd_SRGB        |
+ * +----------------------------------+---------------------------+
+ * | NvSciColor_FloatISP_Bayer16GRBG  | NvSciColorStd_SRGB        |
+ * +----------------------------------+---------------------------+
+ * | NvSciColor_FloatISP_Bayer16GBRG  | NvSciColorStd_SRGB        |
+ * +----------------------------------+---------------------------+
+ * | NvSciColor_FloatISP_Bayer16RCCB  | NvSciColorStd_SRGB        |
+ * +----------------------------------+---------------------------+
+ * | NvSciColor_FloatISP_Bayer16BCCR  | NvSciColorStd_SRGB        |
+ * +----------------------------------+---------------------------+
+ * | NvSciColor_FloatISP_Bayer16CRBC  | NvSciColorStd_SRGB        |
+ * +----------------------------------+---------------------------+
+ * | NvSciColor_FloatISP_Bayer16CBRC  | NvSciColorStd_SRGB        |
+ * +----------------------------------+---------------------------+
+ * | NvSciColor_FloatISP_Bayer16RCCC  | NvSciColorStd_SRGB        |
+ * +----------------------------------+---------------------------+
+ * | NvSciColor_FloatISP_Bayer16CCCR  | NvSciColorStd_SRGB        |
+ * +----------------------------------+---------------------------+
+ * | NvSciColor_FloatISP_Bayer16CRCC  | NvSciColorStd_SRGB        |
+ * +----------------------------------+---------------------------+
+ * | NvSciColor_FloatISP_Bayer16CCRC  | NvSciColorStd_SRGB        |
+ * +----------------------------------+---------------------------+
+ * | NvSciColor_X12Bayer20CCCC        | NvSciColorStd_SRGB        |
+ * +----------------------------------+---------------------------+
+ * | NvSciColor_X12Bayer20BGGR        | NvSciColorStd_SRGB        |
+ * +----------------------------------+---------------------------+
+ * | NvSciColor_X12Bayer20RGGB        | NvSciColorStd_SRGB        |
+ * +----------------------------------+---------------------------+
+ * | NvSciColor_X12Bayer20GRBG        | NvSciColorStd_SRGB        |
+ * +----------------------------------+---------------------------+
+ * | NvSciColor_X12Bayer20GBRG        | NvSciColorStd_SRGB        |
+ * +----------------------------------+---------------------------+
+ * | NvSciColor_X12Bayer20RCCB        | NvSciColorStd_SRGB        |
+ * +----------------------------------+---------------------------+
+ * | NvSciColor_X12Bayer20BCCR        | NvSciColorStd_SRGB        |
+ * +----------------------------------+---------------------------+
+ * | NvSciColor_X12Bayer20CRBC        | NvSciColorStd_SRGB        |
+ * +----------------------------------+---------------------------+
+ * | NvSciColor_X12Bayer20CBRC        | NvSciColorStd_SRGB        |
+ * +----------------------------------+---------------------------+
+ * | NvSciColor_X12Bayer20RCCC        | NvSciColorStd_SRGB        |
+ * +----------------------------------+---------------------------+
+ * | NvSciColor_X12Bayer20CCCR        | NvSciColorStd_SRGB        |
+ * +----------------------------------+---------------------------+
+ * | NvSciColor_X12Bayer20CRCC        | NvSciColorStd_SRGB        |
+ * +----------------------------------+---------------------------+
+ * | NvSciColor_X12Bayer20CCRC        | NvSciColorStd_SRGB        |
+ * +----------------------------------+---------------------------+
+ * | NvSciColor_U8V8                  | NvSciColorStd_REC601_SR   |
+ * |                                  | NvSciColorStd_REC601_ER   |
+ * |                                  | NvSciColorStd_REC709_SR   |
+ * |                                  | NvSciColorStd_REC709_ER   |
+ * |                                  | NvSciColorStd_REC2020_SR  |
+ * +----------------------------------+---------------------------+
+ * | NvSciColor_U8_V8                 | NvSciColorStd_REC601_ER   |
+ * |                                  | NvSciColorStd_REC709_SR   |
+ * |                                  | NvSciColorStd_REC709_ER   |
+ * |                                  | NvSciColorStd_REC2020_SR  |
+ * +----------------------------------+---------------------------+
+ * | NvSciColor_V8U8                  | NvSciColorStd_REC601_SR   |
+ * |                                  | NvSciColorStd_REC601_ER   |
+ * |                                  | NvSciColorStd_REC709_SR   |
+ * |                                  | NvSciColorStd_REC709_ER   |
+ * |                                  | NvSciColorStd_REC2020_SR  |
+ * +----------------------------------+---------------------------+
+ * | NvSciColor_V8_U8                 | NvSciColorStd_REC601_ER   |
+ * |                                  | NvSciColorStd_REC709_SR   |
+ * |                                  | NvSciColorStd_REC709_ER   |
+ * |                                  | NvSciColorStd_REC2020_SR  |
+ * +----------------------------------+---------------------------+
+ * | NvSciColor_U10V10                | NvSciColorStd_REC601_SR   |
+ * |                                  | NvSciColorStd_REC601_ER   |
+ * |                                  | NvSciColorStd_REC709_SR   |
+ * |                                  | NvSciColorStd_REC709_ER   |
+ * |                                  | NvSciColorStd_REC2020_SR  |
+ * +----------------------------------+---------------------------+
+ * | NvSciColor_V10U10                | NvSciColorStd_REC601_SR   |
+ * |                                  | NvSciColorStd_REC601_ER   |
+ * |                                  | NvSciColorStd_REC709_SR   |
+ * |                                  | NvSciColorStd_REC709_ER   |
+ * |                                  | NvSciColorStd_REC2020_SR  |
+ * +----------------------------------+---------------------------+
+ * | NvSciColor_U12V12                | NvSciColorStd_REC601_SR   |
+ * |                                  | NvSciColorStd_REC601_ER   |
+ * |                                  | NvSciColorStd_REC709_SR   |
+ * |                                  | NvSciColorStd_REC709_ER   |
+ * |                                  | NvSciColorStd_REC2020_SR  |
+ * +----------------------------------+---------------------------+
+ * | NvSciColor_V12U12                | NvSciColorStd_REC601_SR   |
+ * |                                  | NvSciColorStd_REC601_ER   |
+ * |                                  | NvSciColorStd_REC709_SR   |
+ * |                                  | NvSciColorStd_REC709_ER   |
+ * |                                  | NvSciColorStd_REC2020_SR  |
+ * +----------------------------------+---------------------------+
+ * | NvSciColor_U16V16                | NvSciColorStd_REC601_SR   |
+ * |                                  | NvSciColorStd_REC2020_ER  |
+ * |                                  | NvSciColorStd_REC709_ER   |
+ * +----------------------------------+---------------------------+
+ * | NvSciColor_V16U16                | NvSciColorStd_REC601_SR   |
+ * |                                  | NvSciColorStd_REC2020_ER  |
+ * |                                  | NvSciColorStd_REC709_ER   |
+ * +----------------------------------+---------------------------+
+ * | NvSciColor_Y8                    | NvSciColorStd_REC601_SR   |
+ * |                                  | NvSciColorStd_REC601_ER   |
+ * |                                  | NvSciColorStd_REC709_SR   |
+ * |                                  | NvSciColorStd_REC709_ER   |
+ * |                                  | NvSciColorStd_REC2020_SR  |
+ * +----------------------------------+---------------------------+
+ * | NvSciColor_Y10                   | NvSciColorStd_REC601_SR   |
+ * |                                  | NvSciColorStd_REC601_ER   |
+ * |                                  | NvSciColorStd_REC709_SR   |
+ * |                                  | NvSciColorStd_REC709_ER   |
+ * |                                  | NvSciColorStd_REC2020_SR  |
+ * +----------------------------------+---------------------------+
+ * | NvSciColor_Y12                   | NvSciColorStd_REC601_SR   |
+ * |                                  | NvSciColorStd_REC601_ER   |
+ * |                                  | NvSciColorStd_REC709_SR   |
+ * |                                  | NvSciColorStd_REC709_ER   |
+ * |                                  | NvSciColorStd_REC2020_SR  |
+ * +----------------------------------+---------------------------+
+ * | NvSciColor_Y16                   | NvSciColorStd_REC601_SR   |
+ * |                                  | NvSciColorStd_REC2020_ER  |
+ * |                                  | NvSciColorStd_REC709_ER   |
+ * +----------------------------------+---------------------------+
+ * | NvSciColor_U8                    | NvSciColorStd_REC601_SR   |
+ * |                                  | NvSciColorStd_REC601_ER   |
+ * |                                  | NvSciColorStd_REC709_SR   |
+ * |                                  | NvSciColorStd_REC709_ER   |
+ * |                                  | NvSciColorStd_REC2020_SR  |
+ * +----------------------------------+---------------------------+
+ * | NvSciColor_V8                    | NvSciColorStd_REC601_SR   |
+ * |                                  | NvSciColorStd_REC601_ER   |
+ * |                                  | NvSciColorStd_REC709_SR   |
+ * |                                  | NvSciColorStd_REC709_ER   |
+ * |                                  | NvSciColorStd_REC2020_SR  |
+ * +----------------------------------+---------------------------+
+ * | NvSciColor_U10                   | NvSciColorStd_REC601_SR   |
+ * |                                  | NvSciColorStd_REC601_ER   |
+ * |                                  | NvSciColorStd_REC709_SR   |
+ * |                                  | NvSciColorStd_REC709_ER   |
+ * |                                  | NvSciColorStd_REC2020_SR  |
+ * +----------------------------------+---------------------------+
+ * | NvSciColor_V10                   | NvSciColorStd_REC601_SR   |
+ * |                                  | NvSciColorStd_REC601_ER   |
+ * |                                  | NvSciColorStd_REC709_SR   |
+ * |                                  | NvSciColorStd_REC709_ER   |
+ * |                                  | NvSciColorStd_REC2020_SR  |
+ * +----------------------------------+---------------------------+
+ * | NvSciColor_U12                   | NvSciColorStd_REC601_SR   |
+ * |                                  | NvSciColorStd_REC601_ER   |
+ * |                                  | NvSciColorStd_REC709_SR   |
+ * |                                  | NvSciColorStd_REC709_ER   |
+ * |                                  | NvSciColorStd_REC2020_SR  |
+ * +----------------------------------+---------------------------+
+ * | NvSciColor_V12                   | NvSciColorStd_REC601_SR   |
+ * |                                  | NvSciColorStd_REC601_ER   |
+ * |                                  | NvSciColorStd_REC709_SR   |
+ * |                                  | NvSciColorStd_REC709_ER   |
+ * |                                  | NvSciColorStd_REC2020_SR  |
+ * +----------------------------------+---------------------------+
+ * | NvSciColor_U16                   | NvSciColorStd_REC601_SR   |
+ * |                                  | NvSciColorStd_REC2020_ER  |
+ * |                                  | NvSciColorStd_REC709_ER   |
+ * +----------------------------------+---------------------------+
+ * | NvSciColor_V16                   | NvSciColorStd_REC601_SR   |
+ * |                                  | NvSciColorStd_REC2020_ER  |
+ * |                                  | NvSciColorStd_REC709_ER   |
+ * +----------------------------------+---------------------------+
+ * | NvSciColor_A8Y8U8V8              | NvSciColorStd_REC601_SR   |
+ * |                                  | NvSciColorStd_REC601_ER   |
+ * |                                  | NvSciColorStd_REC709_SR   |
+ * |                                  | NvSciColorStd_REC709_ER   |
+ * +----------------------------------+---------------------------+
+ * | NvSciColor_Y8U8Y8V8              | NvSciColorStd_REC601_SR   |
+ * |                                  | NvSciColorStd_REC601_ER   |
+ * |                                  | NvSciColorStd_REC709_SR   |
+ * |                                  | NvSciColorStd_REC709_ER   |
+ * +----------------------------------+---------------------------+
+ * | NvSciColor_Y8V8Y8U8              | NvSciColorStd_REC601_SR   |
+ * |                                  | NvSciColorStd_REC601_ER   |
+ * |                                  | NvSciColorStd_REC709_SR   |
+ * |                                  | NvSciColorStd_REC709_ER   |
+ * +----------------------------------+---------------------------+
+ * | NvSciColor_U8Y8V8Y8              | NvSciColorStd_REC601_SR   |
+ * |                                  | NvSciColorStd_REC601_ER   |
+ * |                                  | NvSciColorStd_REC709_SR   |
+ * |                                  | NvSciColorStd_REC709_ER   |
+ * +----------------------------------+---------------------------+
+ * | NvSciColor_V8Y8U8Y8              | NvSciColorStd_REC601_SR   |
+ * |                                  | NvSciColorStd_REC601_ER   |
+ * |                                  | NvSciColorStd_REC709_SR   |
+ * |                                  | NvSciColorStd_REC709_ER   |
+ * +----------------------------------+---------------------------+
+ * | NvSciColor_A16Y16U16V16          | NvSciColorStd_REC601_SR   |
+ * |                                  | NvSciColorStd_REC601_ER   |
+ * |                                  | NvSciColorStd_REC709_SR   |
+ * |                                  | NvSciColorStd_REC709_ER   |
+ * +----------------------------------+---------------------------+
+ * | NvSciColor_A8                    | NvSciColorStd_SRGB        |
+ * +----------------------------------+---------------------------+
+ * | NvSciColor_Signed_A8             | NvSciColorStd_SRGB        |
+ * +----------------------------------+---------------------------+
+ * | NvSciColor_B8G8R8A8              | NvSciColorStd_SRGB        |
+ * |                                  | NvSciColorStd_REC2020_RGB |
+ * +----------------------------------+---------------------------+
+ * | NvSciColor_A8R8G8B8              | NvSciColorStd_SRGB        |
+ * |                                  | NvSciColorStd_REC2020_RGB |
+ * +----------------------------------+---------------------------+
+ * | NvSciColor_A8B8G8R8              | NvSciColorStd_SRGB        |
+ * |                                  | NvSciColorStd_REC2020_RGB |
+ * +----------------------------------+---------------------------+
+ * | NvSciColor_A2R10G10B10           | NvSciColorStd_SRGB        |
+ * |                                  | NvSciColorStd_REC2020_RGB |
+ * +----------------------------------+---------------------------+
+ * | NvSciColor_A16                   | NvSciColorStd_SRGB        |
+ * +----------------------------------+---------------------------+
+ * | NvSciColor_Signed_A16            | NvSciColorStd_SRGB        |
+ * +----------------------------------+---------------------------+
+ * | NvSciColor_Signed_R16G16         | NvSciColorStd_SRGB        |
+ * +----------------------------------+---------------------------+
+ * | NvSciColor_A16B16G16R16          | NvSciColorStd_SRGB        |
+ * |                                  | NvSciColorStd_REC2020_RGB |
+ * +----------------------------------+---------------------------+
+ * | NvSciColor_Signed_A16B16G16R16   | NvSciColorStd_SRGB        |
+ * |                                  | NvSciColorStd_REC2020_RGB |
+ * +----------------------------------+---------------------------+
+ * | NvSciColor_Float_A16B16G16R16    | NvSciColorStd_SRGB        |
+ * |                                  | NvSciColorStd_SENSOR_RGBA |
+ * +----------------------------------+---------------------------+
+ * | NvSciColor_A32                   | NvSciColorStd_SRGB        |
+ * +----------------------------------+---------------------------+
+ * | NvSciColor_Signed_A32            | NvSciColorStd_SRGB        |
+ * +----------------------------------+---------------------------+
+ * | NvSciColor_Signed_X12Bayer20GBRG | NvSciColorStd_SRGB        |
+ * +----------------------------------+---------------------------+
+ * | NvSciColor_Float_A16             | NvSciColorStd_SRGB        |
+ * +----------------------------------+---------------------------+
+ * | NvSciColor_X6Bayer10BGGI_RGGI    | NvSciColorStd_SRGB        |
+ * +----------------------------------+---------------------------+
+ * | NvSciColor_X6Bayer10GBIG_GRIG    | NvSciColorStd_SRGB        |
+ * +----------------------------------+---------------------------+
+ * | NvSciColor_X6Bayer10GIBG_GIRG    | NvSciColorStd_SRGB        |
+ * +----------------------------------+---------------------------+
+ * | NvSciColor_X6Bayer10IGGB_IGGR    | NvSciColorStd_SRGB        |
+ * +----------------------------------+---------------------------+
+ * | NvSciColor_X6Bayer10RGGI_BGGI    | NvSciColorStd_SRGB        |
+ * +----------------------------------+---------------------------+
+ * | NvSciColor_X6Bayer10GRIG_GBIG    | NvSciColorStd_SRGB        |
+ * +----------------------------------+---------------------------+
+ * | NvSciColor_X6Bayer10GIRG_GIBG    | NvSciColorStd_SRGB        |
+ * +----------------------------------+---------------------------+
+ * | NvSciColor_X6Bayer10IGGR_IGGB    | NvSciColorStd_SRGB        |
+ * +----------------------------------+---------------------------+
+ * | NvSciColor_X4Bayer12BGGI_RGGI    | NvSciColorStd_SRGB        |
+ * +----------------------------------+---------------------------+
+ * | NvSciColor_X4Bayer12GBIG_GRIG    | NvSciColorStd_SRGB        |
+ * +----------------------------------+---------------------------+
+ * | NvSciColor_X4Bayer12GIBG_GIRG    | NvSciColorStd_SRGB        |
+ * +----------------------------------+---------------------------+
+ * | NvSciColor_X4Bayer12IGGB_IGGR    | NvSciColorStd_SRGB        |
+ * +----------------------------------+---------------------------+
+ * | NvSciColor_X4Bayer12RGGI_BGGI    | NvSciColorStd_SRGB        |
+ * +----------------------------------+---------------------------+
+ * | NvSciColor_X4Bayer12GRIG_GBIG    | NvSciColorStd_SRGB        |
+ * +----------------------------------+---------------------------+
+ * | NvSciColor_X4Bayer12GIRG_GIBG    | NvSciColorStd_SRGB        |
+ * +----------------------------------+---------------------------+
+ * | NvSciColor_X4Bayer12IGGR_IGGB    | NvSciColorStd_SRGB        |
+ * +----------------------------------+---------------------------+
+ * | NvSciColor_X2Bayer14BGGI_RGGI    | NvSciColorStd_SRGB        |
+ * +----------------------------------+---------------------------+
+ * | NvSciColor_X2Bayer14GBIG_GRIG    | NvSciColorStd_SRGB        |
+ * +----------------------------------+---------------------------+
+ * | NvSciColor_X2Bayer14GIBG_GIRG    | NvSciColorStd_SRGB        |
+ * +----------------------------------+---------------------------+
+ * | NvSciColor_X2Bayer14IGGB_IGGR    | NvSciColorStd_SRGB        |
+ * +----------------------------------+---------------------------+
+ * | NvSciColor_X2Bayer14RGGI_BGGI    | NvSciColorStd_SRGB        |
+ * +----------------------------------+---------------------------+
+ * | NvSciColor_X2Bayer14GRIG_GBIG    | NvSciColorStd_SRGB        |
+ * +----------------------------------+---------------------------+
+ * | NvSciColor_X2Bayer14GIRG_GIBG    | NvSciColorStd_SRGB        |
+ * +----------------------------------+---------------------------+
+ * | NvSciColor_X2Bayer14IGGR_IGGB    | NvSciColorStd_SRGB        |
+ * +----------------------------------+---------------------------+
+ * | NvSciColor_Bayer16BGGI_RGGI      | NvSciColorStd_SRGB        |
+ * +----------------------------------+---------------------------+
+ * | NvSciColor_Bayer16GBIG_GRIG      | NvSciColorStd_SRGB        |
+ * +----------------------------------+---------------------------+
+ * | NvSciColor_Bayer16GIBG_GIRG      | NvSciColorStd_SRGB        |
+ * +----------------------------------+---------------------------+
+ * | NvSciColor_Bayer16IGGB_IGGR      | NvSciColorStd_SRGB        |
+ * +----------------------------------+---------------------------+
+ * | NvSciColor_Bayer16RGGI_BGGI      | NvSciColorStd_SRGB        |
+ * +----------------------------------+---------------------------+
+ * | NvSciColor_Bayer16GRIG_GBIG      | NvSciColorStd_SRGB        |
+ * +----------------------------------+---------------------------+
+ * | NvSciColor_Bayer16GIRG_GIBG      | NvSciColorStd_SRGB        |
+ * +----------------------------------+---------------------------+
+ * | NvSciColor_Bayer16IGGR_IGGB      | NvSciColorStd_SRGB        |
+ * +----------------------------------+---------------------------+
+ * | NvSciColor_R8                    | NvSciColorStd_SRGB        |
+ * +----------------------------------+---------------------------+
+ * | NvSciColor_G8                    | NvSciColorStd_SRGB        |
+ * +----------------------------------+---------------------------+
+ * | NvSciColor_B8                    | NvSciColorStd_SRGB        |
+ * +----------------------------------+---------------------------+
+ * </pre>
+ *
  * @implements{18840084}
  */
 typedef enum {
@@ -3019,6 +3442,8 @@ typedef enum {
     NvSciBufPlatformName_PG189,
     /** Late attaching peer(s) runs on x86 PG199 platform **/
     NvSciBufPlatformName_PG199,
+    /** Late attaching peer(s) runs on DRIVEOS Thor platform **/
+    NvSciBufPlatformName_Thor,
     NvSciBufPlatformName_UpperBound
 } NvSciBufPlatformName;
 
@@ -3028,12 +3453,10 @@ typedef enum {
  */
 PACK_BUF(typedef struct {
     /** Hardware engine identifier which will access the buffer from late
-     * attaching peer(s).
-     */
+     * attaching peer(s). */
     NvSciBufHwEngName engName;
     /** Platform identifier which will access the buffer from late attaching
-     * peer(s).
-     */
+     * peer(s). */
     NvSciBufPlatformName platName;
 }) NvSciBufPeerHwEngine;
 
@@ -3174,7 +3597,13 @@ PACK_BUF(typedef struct {
  *
  * @return NvSciError, the completion status of the operation:
  * - NvSciError_Success if successful.
+ */
+#if (defined(NV_QNX))
+/*
  * - NvSciError_InvalidState If the Init Mode API is called in Runtime Mode.
+ */
+#endif
+/*
  * - NvSciError_BadParameter if any of the following occurs:
  *      - @a module is NULL
  *      - @a newAttrList is NULL
@@ -3260,7 +3689,13 @@ void NvSciBufAttrListFree(
  *
  * @return:NvSciError, the completion status of the operation:
  * - NvSciError_Success if successful.
+ */
+#if (defined(NV_QNX))
+/*
  * - NvSciError_InvalidState If the Init Mode API is called in Runtime Mode.
+ */
+#endif
+/*
  * - NvSciError_BadParameter if any of the following occurs:
  *      - @a attrList is NULL
  *      - @a attrList is reconciled
@@ -3476,7 +3911,13 @@ NvSciError NvSciBufAttrListSlotGetAttrs(
  *
  * @return NvSciError, the completion code of the operation:
  * - NvSciError_Success if successful.
+ */
+#if (defined(NV_QNX))
+/*
  * - NvSciError_InvalidState If the Init Mode API is called in Runtime Mode.
+ */
+#endif
+/*
  * - NvSciError_BadParameter if @a attrList is invalid.
  *
  * @note This API is deprecated and will be removed in a future version. This
@@ -3538,17 +3979,17 @@ NvSciError NvSciBufAttrListDebugDump(
  *
  * @return NvSciError, the completion code of the operation:
  * - NvSciError_Success if successful.
+ */
+#if (defined(NV_QNX))
+/*
  * - NvSciError_InvalidState If the Init Mode API is called in Runtime Mode.
+ */
+#endif
+/*
  * - NvSciError_BadParameter if any of the following occurs:
  *      - @a inputArray[] is NULL
  *      - @a inputCount is 0
- *      - @a newReconciledAttrList is NULL
- *      - any of the NvSciBufAttrList in @a inputArray is reconciled.
- *      - not all the NvSciBufAttrLists in @a inputArray are bound to the
- *        same NvSciBufModule.
- *      - an NvSciBufAttrList appears multiple times in @a inputArray[]
- *      - an attribute key necessary for reconciling against the given data
- *        type(s) of the NvSciBufAttrList(s) involved in reconciliation is
+ *      -conciliation is
  *        unset
  *      - an attribute key is set to an unsupported value considering the data
  *        type(s) of the NvSciBufAttrList(s) involved in reconciliation
@@ -3609,7 +4050,13 @@ NvSciError NvSciBufAttrListReconcile(
  *
  * @return NvSciError, the completion code of the operation:
  * - NvSciError_Success if successful.
+ */
+#if (defined(NV_QNX))
+/*
  * - NvSciError_InvalidState If the Init Mode API is called in Runtime Mode.
+ */
+#endif
+/*
  * - NvSciError_BadParameter if any of the following occurs:
  *      - @a origAttrList is NULL
  *      - @a newAttrList is NULL
@@ -3666,7 +4113,13 @@ NvSciError NvSciBufAttrListClone(
  *
  * @return NvSciError, the completion code of the operation:
  * - NvSciError_Success if successful.
+ */
+#if (defined(NV_QNX))
+/*
  * - NvSciError_InvalidState if the Init Mode API is called in Runtime Mode.
+ */
+#endif
+/*
  * - NvSciError_BadParameter if any of the following occurs:
  *      - @a inputUnreconciledAttrListArray is NULL
  *      - @a inputUnreconciledAttrListCount is 0
@@ -3719,7 +4172,13 @@ NvSciError NvSciBufAttrListAppendUnreconciled(
  *
  * @return NvSciError, the completion code of the operation:
  * - NvSciError_Success if successful.
+ */
+#if (defined(NV_QNX))
+/*
  * - NvSciError_InvalidState If the Init Mode API is called in Runtime Mode.
+ */
+#endif
+/*
  * - NvSciError_BadParameter if any of the following occurs:
  *      - @a attrList is NULL
  *      - @a isReconciled is NULL
@@ -3762,7 +4221,13 @@ NvSciError NvSciBufAttrListIsReconciled(
  *             unreconciled NvSciBufAttrList(s).
  * @return NvSciError, the completion code of the operation:
  * - NvSciError_Success if successful.
+ */
+#if (defined(NV_QNX))
+/*
  * - NvSciError_InvalidState If the Init Mode API is called in Runtime Mode.
+ */
+#endif
+/*
  * - NvSciError_BadParameter if any of the following occurs:
  *         - @a reconciledAttrList is NULL or
  *         - @a unreconciledAttrListArray[] is NULL or
@@ -3829,7 +4294,13 @@ NvSciError NvSciBufAttrListValidateReconciled(
  *
  * @return NvSciError, the completion code of the operation:
  * - NvSciError_Success if successful.
+ */
+#if (defined(NV_QNX))
+/*
  * - NvSciError_InvalidState if the Init Mode API is called in Runtime Mode.
+ */
+#endif
+/*
  * - NvSciError_BadParameter if any of the following occurs:
  *      - @a bufObj is NULL
  *      - @a dupObj is NULL
@@ -3895,7 +4366,13 @@ NvSciError NvSciBufObjDup(
 /**
  * @return NvSciError, the completion code of this operation:
  * - NvSciError_Success if successful.
+ */
+#if (defined(NV_QNX))
+/*
  * - NvSciError_InvalidState If the Init Mode API is called in Runtime Mode.
+ */
+#endif
+/*
  * - NvSciError_BadParameter if any of the following occurs:
  *      - @a attrListCount is 0
  *      - @a attrListArray is NULL
@@ -4169,7 +4646,13 @@ NvSciError NvSciBufObjFlushCpuCacheRange(
  *
  * @return NvSciError, the completion code of this operation:
  * - NvSciError_Success if successful.
+ */
+#if (defined(NV_QNX))
+/*
  * - NvSciError_InvalidState if the Init Mode API is called in Runtime Mode.
+ */
+#endif
+/*
  * - NvSciError_BadParameter if any of the following occurs:
  *      - @a reconciledAttrList is NULL
  *      - @a reconciledAttrList is not a reconciled NvSciBufAttrList
@@ -4194,11 +4677,16 @@ NvSciError NvSciBufObjFlushCpuCacheRange(
  * The caller may free the reconciled NvSciBufAttrList any time after this
  * function is called.
  * @arr @id{NvSciBufObjAlloc_RES_003} @asil{D}
- *  It is not guaranteed that the input reconciled NvSciBufAttrList in this API is the same
- * NvSciBufAttrList that is associated with the allocated NvSciBufObj. If the user needs to
- * query attributes from reconciled NvSciBufAttrList associated with an NvSciBufObj after
- * allocation, they must first obtain the reconciled NvSciBufAttrList from the NvSciBufObj
- * using NvSciBufObjGetAttrList().
+ *  It is not guaranteed that the input reconciled NvSciBufAttrList in this
+ *  API is the same NvSciBufAttrList that is associated with the allocated
+ *  NvSciBufObj. However, the attributes describing CPU accessibility and
+ *  buffer size are guaranteed to be the same in both NvSciBufAttrLists.
+ *
+ *  However, in general, it is recommended that in order to query the
+ *  value(s) of attribute(s) from the reconciled NvSciBufAttrList associated
+ *  with an NvSciBufObj after allocation, they must first obtain the reconciled
+ *  NvSciBufAttrList from the NvSciBufObj using NvSciBufObjGetAttrList()
+ *  rather than using a saved NvSciBufAttrList.
  *
  * @usage
  * - Allowed context for the API call
@@ -4243,7 +4731,13 @@ NvSciError NvSciBufObjAlloc(
  *
  * @return NvSciError, the completion code of this operation:
  * - NvSciError_Success if successful.
+ */
+#if (defined(NV_QNX))
+/*
  * - NvSciError_InvalidState if the Init Mode API is called in Runtime Mode.
+ */
+#endif
+/*
  * - NvSciError_BadParameter if any of the following occurs:
  *      - @a bufObj is NULL
  *      - @a newBufObj is NULL
@@ -4331,7 +4825,7 @@ NvSciError NvSciBufObjDupWithReducePerm(
  * is the second plane, and B is the third plane)
  * Valid value: @a dstPtrs must be non-NULL. Every array member of @a dstPtrs
  * must be non-NULL.
- * @a param[in] dstPtrSizes an array of plane's sizes. Each size in the
+ * @param[in] dstPtrSizes an array of plane's sizes. Each size in the
  * @a dstPtrSizes array shall correspond to the plane at the same index in
  * @a dstPtrs.
  * Valid value: @a dstPtrSizes must be non-NULL. Each array member of the
@@ -4443,9 +4937,9 @@ NvSciError NvSciBufObjGetPixels(
  * with three planes, it is assumed that user provides separate
  * plane pointers for R, G and B planes (where R is the first plane, G
  * is the second plane, and B is the third plane)
-* Valid value: @a srcPtrs must be non-NULL. Every array member of srcPtrs must
+ * Valid value: @a srcPtrs must be non-NULL. Every array member of srcPtrs must
  * be non-NULL.
- * @a param[in] srcPtrSizes an array of plane's sizes. Each size in the
+ * @param[in] srcPtrSizes an array of plane's sizes. Each size in the
  * @a srcPtrSizes array shall correspond to the plane at the same index in
  * @a srcPtrs.
  * Valid value: @a srcPtrSizes must be non-NULL. Each array member of the
@@ -4557,7 +5051,13 @@ NvSciError NvSciBufObjPutPixels(
  *
  * @return NvSciError, the completion code of this operation:
  * - NvSciError_Success if successful.
+ */
+#if (defined(NV_QNX))
+/*
  * - NvSciError_InvalidState if the Init Mode API is called in Runtime Mode.
+ */
+#endif
+/*
  * - NvSciError_BadParameter if any of the following occurs:
  *      - @a attrListAndObjDesc is NULL
  *      - @a attrListAndObjDescSize is NULL
@@ -4583,6 +5083,8 @@ NvSciError NvSciBufObjPutPixels(
  *
  * @pre @id{NvSciBufIpcExportAttrListAndObj_PreCond_001} @asil{QM}
  *  Valid NvSciBufObj obtained.
+ * @pre @id{NvSciBufIpcExportAttrListAndObj_PreCond_002} @asil{QM}
+ *  Valid NvSciIpcEndpoint is obtained.
  *
  * @usage
  * - Allowed context for the API call
@@ -4638,7 +5140,13 @@ NvSciError NvSciBufIpcExportAttrListAndObj(
  *
  * @return NvSciError, the completion code of this operation:
  * - NvSciError_Success if successful.
+ */
+#if (defined(NV_QNX))
+/*
  * - NvSciError_InvalidState if the Init Mode API is called in Runtime Mode.
+ */
+#endif
+/*
  * - NvSciError_BadParameter if any of the following occurs:
  *      - @a module is NULL
  *      - @a ipcEndpoint is invalid
@@ -4680,6 +5188,8 @@ NvSciError NvSciBufIpcExportAttrListAndObj(
  *  Valid NvSciBufModule is obtained.
  * @pre @id{NvSciBufIpcImportAttrListAndObj_PreCond_002} @asil{QM}
  *  Valid unreconciled NvSciBufAttrList(s) are obtained.
+ * @pre @id{NvSciBufIpcImportAttrListAndObj_PreCond_003} @asil{QM}
+ *  Valid NvSciIpcEndpoint is obtained.
  *
  * @usage
  * - Allowed context for the API call
@@ -4756,12 +5266,21 @@ void NvSciBufAttrListAndObjFreeDesc(
  *            permission. Additionally, NvSciBufAccessPerm_Auto value is
  *            unconditionally valid.
  * @param[in] ipcEndpoint NvSciIpcEndpoint.
+ *            Valid value: The NvSciIpcEndpoint should be obtained from a
+ *            successful call to NvSciIpcOpenEndpoint() and has not yet been
+ *            freed using NvSciIpcCloseEndpointSafe().
  * \param[out] exportData NvSciBuf populates the return value with exportable
  *             form of NvSciBufObj shared across an NvSciIpc channel.
  *
  * @return NvSciError, the completion code of this operation:
  * - NvSciError_Success if successful.
+ */
+#if (defined(NV_QNX))
+/*
  * - NvSciError_InvalidState if the Init Mode API is called in Runtime Mode.
+ */
+#endif
+/*
  * - NvSciError_BadParameter if any of the following occurs:
  *      - @a bufObj is NULL
  *      - @a accPerm takes value other than NvSciBufAccessPerm_Readonly,
@@ -4784,6 +5303,8 @@ void NvSciBufAttrListAndObjFreeDesc(
  *
  * @pre @id{NvSciBufObjIpcExport_PreCond_001} @asil{QM}
  *  Valid NvSciBufObj is obtained.
+ * @pre @id{NvSciBufObjIpcExport_PreCond_002} @asil{QM}
+ *  Valid NvSciIpcEndpoint is obtained.
  *
  * @usage
  * - Allowed context for the API call
@@ -4816,6 +5337,9 @@ NvSciError NvSciBufObjIpcExport(
  * NvSciBufObjGetAttrList().
  *
  * @param[in] ipcEndpoint NvSciIpcEndpoint.
+ *            Valid value: The NvSciIpcEndpoint should be obtained from a
+ *            successful call to NvSciIpcOpenEndpoint() and has not yet been
+ *            freed using NvSciIpcCloseEndpointSafe().
  * @param[in] desc A pointer to an NvSciBufObjIpcExportDescriptor. The valid
  *            value is non-NULL that points to descriptor received on NvSciIpc
  *            channel.
@@ -4834,7 +5358,13 @@ NvSciError NvSciBufObjIpcExport(
  *
  * @return NvSciError, the completion code of this operation:
  * - NvSciError_Success if successful.
+ */
+#if (defined(NV_QNX))
+/*
  * - NvSciError_InvalidState if the Init Mode API is called in Runtime Mode.
+ */
+#endif
+/*
  * - NvSciError_AccessDenied if minPermissions are greater than permissions
  *     with which object was exported
  * - NvSciError_BadParameter if any of the following occurs:
@@ -4873,6 +5403,8 @@ NvSciError NvSciBufObjIpcExport(
  *  Valid NvSciBufObjIpcExportDescriptor is obtained.
  * @pre @id{NvSciBufObjIpcImport_PreCond_002} @asil{QM}
  *  Valid reconciled NvSciBufAttrList is obtained.
+ * @pre @id{NvSciBufObjIpcImport_PreCond_003} @asil{QM}
+ *  Valid NvSciIpcEndpoint is obtained.
  * @arr @id{NvSciBufObjIpcImport_REC_001} @asil{QM}
  *  NvSciBufObjIpcImport() does not take ownership of input NvSciBufAttrList.
  * The caller remains responsible for freeing input NvSciBufAttrList. The caller
@@ -4918,7 +5450,13 @@ NvSciError NvSciBufObjIpcImport(
  *
   * @return NvSciError, the completion code of this operation:
  * - NvSciError_Success if successful.
+ */
+#if (defined(NV_QNX))
+/*
  * - NvSciError_InvalidState If the Init Mode API is called in Runtime Mode.
+ */
+#endif
+/*
  * - NvSciError_BadParameter if any of the following occurs:
  *      - @a inputArray is NULL
  *      - @a inputCount is 0
@@ -4980,6 +5518,9 @@ NvSciError NvSciBufObjAttachPeer(
  *            NvSciBufAttrList(s) in @a unreconciledAttrListArray. This value
  *            must be non-zero. For a single list, the count must be set 1.
  * @param[in] ipcEndpoint The NvSciIpcEndpoint.
+ *            Valid value: The NvSciIpcEndpoint should be obtained from a
+ *            successful call to NvSciIpcOpenEndpoint() and has not yet been
+ *            freed using NvSciIpcCloseEndpointSafe().
  * @param[out] descBuf A pointer to the new unreconciled NvSciBufAttrList
  *             descriptor, which the caller can deallocate later using
  *             NvSciBufAttrListFreeDesc().
@@ -4988,7 +5529,13 @@ NvSciError NvSciBufObjAttachPeer(
  *
  * @return NvSciError, the completion code of this operation:
  * - NvSciError_Success if successful.
+ */
+#if (defined(NV_QNX))
+/*
  * - NvSciError_InvalidState If the Init Mode API is called in Runtime Mode.
+ */
+#endif
+/*
  * - NvSciError_BadParameter if any of the following occurs:
  *      - @a unreconciledAttrListArray is NULL
  *      - any of the NvSciBufAttrLists in the @a unreconciledAttrListArray is
@@ -5009,6 +5556,8 @@ NvSciError NvSciBufObjAttachPeer(
  *
  * @pre @id{NvSciBufAttrListIpcExportUnreconciled_PreCond_001} @asil{QM}
  *  Valid unreconciled NvSciBufAttrList(s) are obtained.
+ * @pre @id{NvSciBufAttrListIpcExportUnreconciled_PreCond_002} @asil{QM}
+ *  Valid NvSciIpcEndpoint is obtained.
  * @post @id{NvSciBufAttrListIpcExportUnreconciled_PostCond_001}
  *  When exporting an array containing multiple unreconciled
  * NvSciBufAttrLists, the importing endpoint still imports just one unreconciled
@@ -5043,6 +5592,9 @@ NvSciError NvSciBufAttrListIpcExportUnreconciled(
  *
  * @param[in] reconciledAttrList The reconciled NvSciBufAttrList to be exported.
  * @param[in] ipcEndpoint NvSciIpcEndpoint.
+ *            Valid value: The NvSciIpcEndpoint should be obtained from a
+ *            successful call to NvSciIpcOpenEndpoint() and has not yet been
+ *            freed using NvSciIpcCloseEndpointSafe().
  * @param[out] descBuf A pointer to the new reconciled NvSciBufAttrList
  *             descriptor, which the caller can deallocate later using
  *             NvSciBufAttrListFreeDesc().
@@ -5051,7 +5603,13 @@ NvSciError NvSciBufAttrListIpcExportUnreconciled(
  *
  * @return NvSciError, the completion code of this operation:
  * - NvSciError_Success if successful.
+ */
+#if (defined(NV_QNX))
+/*
  * - NvSciError_InvalidState If the Init Mode API is called in Runtime Mode.
+ */
+#endif
+/*
  * - NvSciError_BadParameter if any of the following occurs:
  *      - @a reconciledAttrList is NULL
  *      - @a reconciledAttrList is unreconciled.
@@ -5067,6 +5625,8 @@ NvSciError NvSciBufAttrListIpcExportUnreconciled(
  *
  * @pre @id{NvSciBufAttrListIpcExportReconciled_PreCond_001} @asil{QM}
  *  Valid reconciled NvSciBufAttrList is obtained.
+ * @pre @id{NvSciBufAttrListIpcExportReconciled_PreCond_002} @asil{QM}
+ *  Valid NvSciIpcEndpoint is obtained.
  *
  * @usage
  * - Allowed context for the API call
@@ -5094,6 +5654,9 @@ NvSciError NvSciBufAttrListIpcExportReconciled(
  * @param[in] module NvScibufModule with which to associate the
  *            imported NvSciBufAttrList.
  * @param[in] ipcEndpoint NvSciIpcEndpoint.
+ *            Valid value: The NvSciIpcEndpoint should be obtained from a
+ *            successful call to NvSciIpcOpenEndpoint() and has not yet been
+ *            freed using NvSciIpcCloseEndpointSafe().
  * @param[in] descBuf The unreconciled NvSciBufAttrList descriptor to be
  *            translated into an unreconciled NvSciBufAttrList.  The valid value
  *            is non-NULL that points to descriptor received on NvSciIpc
@@ -5105,7 +5668,13 @@ NvSciError NvSciBufAttrListIpcExportReconciled(
  *
  * @return NvSciError, the completion code of this operation:
  * - NvSciError_Success if successful.
+ */
+#if (defined(NV_QNX))
+/*
  * - NvSciError_InvalidState If the Init Mode API is called in Runtime Mode.
+ */
+#endif
+/*
  * - NvSciError_BadParameter if any of the following occurs:
  *      - @a module is NULL
  *      - @a ipcEndpoint is invalid
@@ -5126,6 +5695,8 @@ NvSciError NvSciBufAttrListIpcExportReconciled(
  *
  * @pre @id{NvSciBufAttrListIpcImportUnreconciled_PreCond_001} @asil{QM}
  *  Valid NvSciBufModule is obtained.
+ * @pre @id{NvSciBufAttrListIpcImportUnreconciled_PreCond_002} @asil{QM}
+ *  Valid NvSciIpcEndpoint is obtained.
  * @post @id{NvSciBufAttrListAppendUnreconciled_PostCond_001}
  *  Imported NvSciBufAttrList is no longer writable.
  *
@@ -5164,6 +5735,9 @@ NvSciError NvSciBufAttrListIpcImportUnreconciled(
  * @param[in] module NvScibufModule with which to associate the
  *            imported NvSciBufAttrList.
  * @param[in] ipcEndpoint NvSciIpcEndpoint.
+ *            Valid value: The NvSciIpcEndpoint should be obtained from a
+ *            successful call to NvSciIpcOpenEndpoint() and has not yet been
+ *            freed using NvSciIpcCloseEndpointSafe().
  * @param[in] descBuf The reconciled NvSciBufAttrList descriptor to be
  *            translated into a reconciled NvSciBufAttrList.  The valid value is
  *            non-NULL that points to descriptor received on NvSciIpc channel.
@@ -5179,11 +5753,18 @@ NvSciError NvSciBufAttrListIpcImportUnreconciled(
  *            will fail with an error unless all the constraints of all the
  *            unreconciled NvSciBufAttrList(s) in inputUnreconciledAttrListArray
  *            are met by the imported reconciled NvSciBufAttrList.
+ *            This value must be non-zero.
  * @param[out] importedReconciledAttrList Imported reconciled NvSciBufAttrList.
  *
  * @return NvSciError, the completion code of this operation:
  * - NvSciError_Success if successful.
+ */
+#if (defined(NV_QNX))
+/*
  * - NvSciError_InvalidState If the Init Mode API is called in Runtime Mode.
+ */
+#endif
+/*
  * - NvSciError_BadParameter if any of the following occurs:
  *      - @a module is NULL
  *      - @a ipcEndpoint is invalid
@@ -5215,6 +5796,8 @@ NvSciError NvSciBufAttrListIpcImportUnreconciled(
  *  Valid NvSciBufModule is obtained.
  * @pre @id{NvSciBufAttrListIpcImportReconciled_PreCond_002} @asil{QM}
  *  Valid unreconciled NvSciBufAttrList(s) are obtained.
+ * @pre @id{NvSciBufAttrListIpcImportReconciled_PreCond_003} @asil{QM}
+ *  Valid NvSciIpcEndpoint is obtained.
  * @arr @id{NvSciBufAttrListIpcImportReconciled_REC_001} @asil{QM}
  *  It is recommended that the importing process validates the reconciled
  * NvSciBufAttrList against the input unreconciled NvSciBufAttrList(s),
@@ -5296,14 +5879,18 @@ void NvSciBufAttrListFreeDesc(
  *
  * @return NvSciError, the completion code of this operation:
  * - NvSciError_Success if successful.
+ */
+#if (defined(NV_QNX))
+/*
  * - NvSciError_InvalidState if the Init Mode API is called in Runtime Mode.
+ */
+#endif
+/*
  * - NvSciError_BadParameter if @a newModule is NULL.
  * - NvSciError_InsufficientMemory if memory is not available.
  * - NvSciError_ResourceError if any of the following occurs:
  *      - NVIDIA driver stack failed
  *      - system lacks resource other than memory
- *
- * @pre None
  *
  * @usage
  * - Allowed context for the API call
@@ -5379,12 +5966,20 @@ void NvSciBufModuleClose(
 /**
  *
  * @param[in] majorVer build major version.
+ * Valid value: @a majorVer is NvSciBufMajorVersion.
  * @param[in] minorVer build minor version.
+ * Valid value: [0 - <= NvSciBufMajorVersion].
  * @param[out] isCompatible boolean value stating if loaded NvSciBuf library is
  * compatible or not.
  * @return NvSciError, the completion code of the operation:
  * - NvSciError_Success if successful.
+ */
+#if (defined(NV_QNX))
+/*
  * - NvSciError_InvalidState If the Init Mode API is called in Runtime Mode.
+ */
+#endif
+/*
  * - NvSciError_BadParameter if any of the following occurs:
  *      - @a isCompatible is NULL
  */
@@ -5394,8 +5989,6 @@ void NvSciBufModuleClose(
  */
 #endif
 /**
- *
- * @pre None
  *
  * @usage
  * - Allowed context for the API call
@@ -5487,7 +6080,13 @@ NvSciError NvSciBufObjValidate(
  * Valid value: pairCount is valid input if it is non-zero.
  * @return NvSciError, the completion code of the operation:
  * - NvSciError_Success if successful.
+ */
+#if (defined(NV_QNX))
+/*
  * - NvSciError_InvalidState If the Init Mode API is called in Runtime Mode.
+ */
+#endif
+/*
  * - NvSciError_InsufficientMemory If any allocation of memory fails for validation.
  * - NvSciError_BadParameter if any of the following occurs:
  *      - @a reconciledAttrList is NULL
@@ -5526,20 +6125,6 @@ NvSciError NvSciBufAttrListValidateReconciledAgainstAttrs(
  * an NvSciBufObj is exported with NvSciBufAccessPerm_Auto, the
  * NvSciBufObj will be exported with appropriate NvSciBufAttrValAccessPerm
  * expected by the application.
- */
-#if (NV_IS_SAFETY == 0)
-/**
- * @param[in] bufObj Unused
- * @param[in] ipcEndpoint Unused
- * @param[out] accPerm Unused
- *
- * @return NvSciError, the completion code of this operation:
- * - NvSciError_Success
- *
- * @note This is a no-op.
- */
-#else
-/**
  *
  * @param[in] bufObj object for which access permissions need to be retrieved.
  * @param[in] ipcEndpoint NvSciIpcEndpoint of the peer for which the permissions
@@ -5550,7 +6135,13 @@ NvSciError NvSciBufAttrListValidateReconciledAgainstAttrs(
  * Valid Value: non NULL Pointer.
  * @return NvSciError, the completion code of the operation:
  * - NvSciError_Success if successful.
+ */
+#if (defined(NV_QNX))
+/*
  * - NvSciError_InvalidState If the Init Mode API is called in Runtime Mode.
+ */
+#endif
+/*
  * - NvSciError_BadParameter if any of the following occurs:
  *      - @a bufObj is NULL
  *      - @a ipcEndpoint is invalid
@@ -5559,10 +6150,74 @@ NvSciError NvSciBufAttrListValidateReconciledAgainstAttrs(
  *
  * @pre @id{NvSciBufObjGetMaxPerm_PreCond_001} @asil{B}
  *  Valid NvSciBufObj is obtained.
+ * @pre @id{NvSciBufObjGetMaxPerm_PreCond_002} @asil{QM}
+ *  Valid NvSciIpcEndpoint is obtained.
  *
+ * @usage
+ * - Allowed context for the API call
+ *   - Interrupt handler: No
+ *   - Signal handler: No
+ *   - Thread-safe: Yes
+ *   - Re-entrant: No
+ *   - Async/Sync: Sync
+ * - Required privileges: None
+ * - API group
+ *   - Init: No
+ *   - Runtime: Yes
+ *   - De-Init: No
+ */
+
+NvSciError NvSciBufObjGetMaxPerm(
+    const NvSciBufObj bufObj,
+    const NvSciIpcEndpoint ipcEndpoint,
+    NvSciBufAttrValAccessPerm* accPerm);
+
+
+/**
+ * @brief Generate a new dma-buf file descriptor corresponding to the provided
+ * NvSciBufObj.
+ *
+ * <b> This API is specific to Linux OS. </b>
+ *
+ * @param[in] bufObj NvSciBufObj from which new file descriptor is generated
+ * @param[out] fd dma-buf File Descriptor corresponding to the underlying
+ * memory of the NvSciBufObj. The caller owns this returned file descriptor and
+ * is responsible for closing the file descriptor.
+ * Valid Value: non NULL Pointer.
+ */
+#ifndef __QNX__
+/**
+ * @return NvSciError, the completion code of the operation:
+ * - NvSciError_Success if successful.
+ * - NvSciError_BadParameter if any of the following occurs:
+ *      - @a bufObj is NULL
+ *      - @a fd is NULL.
+ *      - @a fd is NULL.
+ *      - @a bufObj did not request for CPU access by setting
+ *        NvSciBufGeneralAttrKey_NeedCpuAccess to true
+ */
+#if (defined(NV_QNX))
+/*
+ * - NvSciError_InvalidState If the Init Mode API is called in Runtime Mode.
+ */
+#endif
+/*
+ * - NvSciError_ResourceError if system lacks resource other than memory.
+ * - panics if @a bufObj is invalid.
+ */
+#else
+/**
+ * @return NvSciError, the completion code of the operation:
+ * - NvSciError_NotSupported
  */
 #endif
 /**
+ * @pre @id{NvSciBufObjGetDmaBufFd_PreCond_001} @asil{B}
+ *  Valid NvSciBufObj is obtained.
+ * @arr @id{NvSciBufObjGetDmaBufFd_RES_001} @asil{D}
+ *  The returned file descriptor shall not be shared with another process
+ * @arr @id{NvSciBufObjGetDmaBufFd_RES_002} @asil{D}
+ *  The returned file descriptor shall not be duplicated
  *
  * @usage
  * - Allowed context for the API call
@@ -5574,14 +6229,13 @@ NvSciError NvSciBufAttrListValidateReconciledAgainstAttrs(
  * - Required privileges: None
  * - API group
  *   - Init: Yes
- *   - Runtime: Yes
+ *   - Runtime: No
  *   - De-Init: No
  */
+NvSciError NvSciBufObjGetDmaBufFd(
+    NvSciBufObj bufObj,
+    int* fd);
 
-NvSciError NvSciBufObjGetMaxPerm(
-    const NvSciBufObj bufObj,
-    const NvSciIpcEndpoint ipcEndpoint,
-    NvSciBufAttrValAccessPerm* accPerm);
 
 /**
  * @}
