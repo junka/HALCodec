@@ -4,6 +4,172 @@ Vendors provide their own hardware-specific encoders and decoders. This project
 aims to simplify the usage of hw codec by exposing one unified C++ interface
 (`halcodec`) over every vendor adapter.
 
+---
+
+# HALCodec（中文说明）
+
+各硬件厂商都提供自己的硬件编解码器。本项目把它们的差异收拢到一套统一的
+C++ 接口（`halcodec` 命名空间）之下，让你用同一套 API、同一套命令行工具驱动
+NVIDIA / AMD / Intel / Apple / NVIDIA DRIVE 的硬件编解码，无需为每个厂商单独写代码。
+
+> 本文件为双语：上方为英文原文，下方为等量中文说明。两份内容覆盖同一信息，
+> 按需阅读其一即可。
+
+## 已注册的后端
+
+| 后端 | 解码器 | 编码器 | 能力自省 | 平台 |
+|------|--------|--------|----------|------|
+| NVIDIA NVENC/NVDEC | `nvdec` | `nvenc` | `nvidia` | Linux + CUDA |
+| NVIDIA NVJPEG | `nvjpeg` | — | — | Linux + CUDA |
+| AMD AMF | `amfdec` | `amfenc` | `amf` | Linux + AMD |
+| Intel QSV | `qsvdec` | `qsvenc` | `qsv` | Linux + Intel iGPU |
+| NVIDIA DRIVE NvMedia | `nvmedia` | `nvmedia` | `nvmedia` | Linux（DRIVE OS）aarch64 |
+| Apple VideoToolbox | `vtbox` | `vtenc` | `vtbox` | macOS |
+
+- **NvMedia** 适配 NVIDIA DRIVE OS（Linux aarch64），仅当 `NvMedia/include/nvmedia_6x`
+  与 `lib-target/` 下的 SDK 头文件存在时构建。解码（H.264/HEVC）与编码（H.264/HEVC）
+  数据通路已在 nv118（T234）上 wire 并验证，详见下方 NvMedia codec 状态表。
+- **AMF** 仅当 `AMF/AMF-*/amf/public/include` 下有 SDK 头文件时构建，运行时 dlopen
+  `libamfrt64.so.1`（运行机器上需有）。
+- **QSV** 仅当 `QSV/libvpl-*/api` 下有 libvpl 头文件时构建，运行时需 `libvpl.so.2`
+  + Intel media driver。
+
+## 统一接口（`src/`）
+
+所有类型都在 `halcodec` 命名空间下：
+
+- `Encoder` / `Decoder`（`encoder.h`、`decoder.h`）—— 对称的编解码接口：
+  `Initialize(CodecParams&)`、`FillFrame` / `FillInput`、`GetFrame(CodecFrame&)`、
+  `Finalize`。解码器额外暴露 `PullFrames()`（内部源驱动）、`IsAsync()` 与
+  `SignalInputComplete()`（用于显式喂流的场景）。
+- `CodecFrame`（`frame.h`）—— 统一帧容器，携带 `data`、`size`、`width`、`height`、
+  `PixelFormat`、逐 plane 的 `strides` 与 `pts`，通过 `frame.release()` 释放。
+- `CodecParams`（`codec_config.h`）—— 参数化的初始化配置（设备序号、输入、帧格式、
+  extradata）。
+- `CapabilityProvider`（`capability.h`）—— 后端自省（设备枚举 + 解码/编码能力打印），
+  供 `codecinfo` 使用。统一 API 里**刻意没有** `Device`/context 抽象：上下文是
+  厂商相关的，留在各自后端内部。
+- `Registry<T>`（`registry.h`）—— 共享工厂模板；适配器在静态初始化期通过
+  `HALCODEC_CONNECT(Base, Name, Class)` 宏自注册。
+
+## 命令行工具（`app/`）
+
+三个工具只依赖统一接口 + 后端注册表，因此换后端无需重编译。用 `-b/--backend`
+选后端；省略时用平台默认值：
+
+| 工具 | 默认后端 | 可选后端 |
+|------|----------|----------|
+| `hal_dec` | macOS: `vtbox`；Linux aarch64: `nvmedia`；其它 Linux: `nvdec` | `nvjpeg`、`amfdec`、`qsvdec` |
+| `hal_enc` | 第一个注册的编码后端：macOS `vtenc`，Linux+CUDA `nvenc` | `amfenc`、`qsvenc`、`nvmedia` |
+| `codecinfo` | 所有注册的能力 provider | `-b` 限定单个 |
+
+常用选项（来自 `app/parse_cli.h`）：`-i/--input`、`-o/--output`、`-b/--backend`、
+`--gpu <idx>`、`-c/--codec`、`-f/--format`、`-z/--zero-copy`（解码帧留在显存）。
+跨后端转码用 `hal_transcode -b <dec>:<enc>`。
+
+## QSV codec 状态
+
+在 Arrow Lake-P iGPU（Intel Core Ultra 7 255H，iHD driver，`libmfx-gen` 24.4.4）
+上实测，`hal_dec`/`hal_enc -b qsvdec`/`qsvenc`：
+
+| codec | 解码 | 编码 |
+|-------|------|------|
+| h264  | 30/30 ✅ | 30/30 ✅ |
+| hevc  | 15/15 ✅ | 15/15 ✅ |
+| av1   | 13/13 ✅ | 13/13 ✅ |
+| jpeg  | 1/1 ✅ | 30/30 ✅ |
+| vp8   | 13/13 ✅ | — |
+| vp9   | 25/25 ✅ | 未实现 |
+| vc1   | 已 wire ✅ | — |
+| mpeg2 | 14/15（hw）| 未实现 |
+
+解码 round-trip（`hal_enc`→`hal_dec` 同 codec）满帧；零拷贝转码
+（`hal_transcode -z qsvdec:qsvenc`）30/30、0 host 帧。VP8/VP9 解码输出与 ffmpeg
+`vp8_qsv`/`vp9_qsv` 字节一致。VP8/VP9 解码需通过 `dlopen libva.so.2` 注册外部帧
+分配器（**无 libva 链接依赖**，头文件仅在 CMake 找到 `va/va.h` 时引入）。
+
+## NvMedia codec 状态（nv118 / T234）
+
+在 nv118（NVIDIA DRIVE OS 7.0.3.0，T234/tegra264，aarch64）上实测，
+`hal_dec`/`hal_enc -b nvmedia`，经 `tools/cmake/driveos-aarch64.cmake` 交叉编译、
+部署到 `~/halcodec-nv/`。板子出厂的 `/usr/lib` 里是**精简版** `libnvmedia`；
+`NvMedia/lib-target/` 里的完整版 SDK 库（同 DRIVE-OS 版本）可解锁其余 codec。
+
+| codec | 解码 | 编码 |
+|-------|------|------|
+| h264  | 30/30 ✅（已验证）| 30/30 ✅（已验证）|
+| hevc  | 30/30 ✅（已验证）| 30/30 ✅（已验证）|
+| av1   | 库接受 ⚠️ | 库接受 ⚠️ |
+| vp9   | 库接受 ⚠️ | 不支持（hw/lib）|
+| mpeg2 | 库接受 ⚠️ | — |
+| mpeg4 | 库接受 ⚠️ | — |
+| vc1   | 库接受 ⚠️ | — |
+| vp8   | 库接受 ⚠️ | — |
+| jpeg  | IDE 不收 | IJPE 仅编码 |
+
+- **已验证**（h264/hevc）：解码 + 编码数据通路完整 wire 并实测。HEVC 编码可经
+  NvMedia HEVC 解码 round-trip（30 帧 NV12），4Mbps CBR 下 PSNR ~51.8 dB。H.264
+  的 IDE→IEP 零拷贝路径已验证。
+- **库接受** ⚠️：完整版 SDK 库在 `NvMediaParserCreate` / `NvMediaIEPCreate` 处接受
+  该 codec（精简版系统库会以 "Codec Not supported" 拒绝），IDE 引擎也能跑——但框架
+  尚未为这些 codec 取帧（raw elementary 流喂给 NvMediaParser 的 demux 是另一个 gap），
+  AV1 编码也未 wire（缺 init/config/pic-params 三元组）。可用 `NvMedia/probes/` 复现
+  库版本差异。VP9 编码在两套库里都在 `NvMediaIEPCreate` 失败——是这块板子真实的
+  硬件/库限制。
+- **部署注意**：框架部署默认加载**系统** `/usr/lib` 库，因此只能用 h264/hevc。要用
+  库接受的 codec，需把 `NvMedia/lib-target/` 的完整 nv* 集合随部署带上、并放
+  `LD_LIBRARY_PATH` 最前（它 NEEDED `libnvrm_*`、`libnvparser`、`libnvvideo`、
+  `libnvos`、`libnvsocsys` 等目标板系统库，全套传递依赖必须一起带上）。
+
+## Apple M5 实测吞吐
+
+在 Apple M5 Max（macOS 26.3，`vtbox` 后端，Release 构建）上实测。Release 树相比
+Debug 树有 1.8x–3.9x 的差距（`-O0` 下 `hal_enc` 整文件输入 buffer 与解码侧逐帧拷贝
+的销毁占可观 wall time），所以下表均取 Release 树。方法：`hal_dec`/`hal_enc` 端到端
+（exec 到 exit），解码取 5 趟最优、编码取 3 趟最优；`-o /dev/null` 与 `-o <file>` 均
+测（两者是不同的数，见下）。
+
+**解码 1080p**（fps）：
+
+| feed | `/dev/null` | to file | ffmpeg |
+|------|------------:|--------:|-------:|
+| H.264 High | 695 | 600 | 2346 |
+| HEVC Main 8 | 883 | 751 | 644 |
+| HEVC Main 10 | 716 | 566 | 460 |
+| AV1 Main 8 | 822 | 704 | 1022 |
+| ProRes 422 | 938 | 591 | 1956 |
+
+**解码 4K**（fps）：H.264 High 228（to file 192），HEVC Main 8 305（249），
+HEVC Main 10 225（167）。
+
+**编码 1080p**（fps）：H.264 High 215，HEVC Main 8 200，HEVC Main 10 180，
+ProRes 422 438，JPEG q90 393 img/s。4K 80 帧：H.264 High 87，HEVC Main 8 86，
+HEVC Main 10 72。
+
+关键观察：把每帧解码结果落盘只付出"写"的代价（边际 13–19 GB/s，视频 codec 掉
+13–23%，ProRes 掉约三分之一）；ProRes 各档只差输出大小（该 session 拒绝码率控制）。
+
+## 构建
+
+```sh
+cmake -B build && cmake --build build
+```
+
+Linux + CUDA 下 NVEnc/NVJPEG 目标自动启用；macOS 下 VideoToolbox 自动启用；QSV/AMF
+按各自 SDK 头文件存在与否启用；NvMedia 仅在 aarch64 且 `NvMedia/include/nvmedia_6x`
+存在时启用。交叉编译到 DRIVE OS：
+
+```sh
+cmake -B build-drive -DCMAKE_TOOLCHAIN_FILE=tools/cmake/driveos-aarch64.cmake \
+      -DBoost_NO_BOOST_CMAKE=ON -DBOOST_ROOT=/tmp/boost-aarch64/sysroot/usr \
+      -DBoost_NO_SYSTEM_PATHS=ON
+cmake --build build-drive -j
+```
+
+详细构建说明见下方英文版 `## Build`。
+
+---
+
 ## Unified interface (`src/`)
 
 All types live in the `halcodec` namespace:
@@ -38,9 +204,9 @@ All types live in the `halcodec` namespace:
 
 The NvMedia adapter targets NVIDIA DRIVE OS (Linux aarch64) and is built only
 when the SDK headers are present under `NvMedia/include/nvmedia_6x` plus
-`lib-target/`. Its data path is currently an initialization stub (the IDE/IEP
-engines are created, decode/encode frames are not yet wired). The AMF adapter
-is built only when the AMF SDK
+`lib-target/`. Decode (H.264/HEVC) and encode (H.264/HEVC) data paths are
+wired and verified end to end on nv118 (T234); see the NvMedia codec status
+table below. The AMF adapter is built only when the AMF SDK
 headers are present under `AMF/AMF-*/amf/public/include`; the AMF runtime
 (`libamfrt64.so.1`) is dlopen'd at runtime and is required on the machine
 where the binary runs. Same for QSV: built only when libvpl headers exist
@@ -166,6 +332,45 @@ are pulled in only when CMake finds `va/va.h` (`QSV_HAS_VA`), and the whole
 allocator is compiled out on non-Linux or libva-less builds. VP9 4:4:4
 (Profile 1) is not supported by the current NV12 (YUV 4:2:0) VA surface pool;
 it would need a YUV 4:4:4 pool and matching FourCC.
+
+### NvMedia codec status
+
+Measured on nv118 (NVIDIA DRIVE OS 7.0.3.0, T234/tegra264, aarch64),
+`hal_dec`/`hal_enc -b nvmedia`, cross-compiled via
+`tools/cmake/driveos-aarch64.cmake` and deployed to `~/halcodec-nv/`. The
+board ships a **reduced** `libnvmedia` in `/usr/lib`; the full-build SDK
+lib-target (same DRIVE-OS version, in `NvMedia/lib-target/`) unlocks the rest.
+
+| codec  | decode                | encode                |
+|--------|-----------------------|-----------------------|
+| h264   | 30/30 ✅ (verified)   | 30/30 ✅ (verified)   |
+| hevc   | 30/30 ✅ (verified)   | 30/30 ✅ (verified)   |
+| av1    | lib-accepted ⚠️       | lib-accepted ⚠️       |
+| vp9    | lib-accepted ⚠️       | not supported (hw/lib)|
+| mpeg2  | lib-accepted ⚠️       | —                     |
+| mpeg4  | lib-accepted ⚠️       | —                     |
+| vc1    | lib-accepted ⚠️       | —                     |
+| vp8    | lib-accepted ⚠️       | —                     |
+| jpeg   | not via IDE           | IJPE encode-only      |
+
+- **Verified** (h264/hevc): full decode + encode data paths wired and
+  measured. HEVC encode round-trips through NvMedia HEVC decode (30 NV12
+  frames); PSNR ~51.8 dB vs the original at 4 Mbps CBR. Zero-copy
+  IDE→IEP path verified for H.264.
+- **lib-accepted** ⚠️: the full-build SDK lib accepts the codec at
+  `NvMediaParserCreate` / `NvMediaIEPCreate` (the reduced system lib rejects
+  it with "Codec Not supported"), and the IDE engine runs — but the framework
+  does not yet pull frames for these (raw-elementary feed/demux into
+  NvMediaParser is a separate gap), and AV1 encode is not wired (no init /
+  config / pic-params triple). Use `NvMedia/probes/` to reproduce the
+  lib-version difference. VP9 encode fails at `NvMediaIEPCreate` in both libs
+  — a real hardware/lib limit on this board.
+- **Deploy note**: the framework deploy loads the **system** `/usr/lib` libs
+  by default, so it sees only h264/hevc. To use the lib-accepted codecs,
+  ship the full `NvMedia/lib-target/` nv* set into the deploy dir and put it
+  first on `LD_LIBRARY_PATH` (it NEEDEDs `libnvrm_*`, `libnvparser`,
+  `libnvvideo`, `libnvos`, `libnvsocsys` from the target system, so the full
+  transitive set must travel together).
 
 ## Command-line tools (`app/`)
 
