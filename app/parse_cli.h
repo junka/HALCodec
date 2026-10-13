@@ -84,7 +84,17 @@ public:
                 // source to drive (sipl|v4l2|av). Empty = platform-native
                 // default (aarch64+DRIVE: sipl, Linux: v4l2, macOS: av).
                 ("source", po::value<std::string>(&source_),
-                 "hal_cam: camera source (sipl|v4l2|av); defaults to the platform-native source.");
+                 "hal_cam: camera source (sipl|v4l2|av|shared); defaults to the "
+                 "platform-native source. 'shared' subscribes to a FrameChannel "
+                 "produced by another camera process instead of capturing locally.")
+                // FrameChannel (layer 2) selector for --source shared.
+                ("channel-kind", po::value<std::string>(&channelKind_)->default_value("loopback"),
+                 "hal_cam --source shared: FrameChannel backend (loopback|unixfd|nvscistream).")
+                ("channel-name", po::value<std::string>(&channelName_),
+                 "hal_cam --source shared: channel endpoint name (producer and "
+                 "consumer must agree on it).")
+                ("channel-slots", po::value<int>(&channelSlots_)->default_value(4),
+                 "hal_cam --source shared: number of frame slots in the channel ring.");
 
             // Parse the command line
             po::variables_map vm;
@@ -175,6 +185,9 @@ public:
 
     // hal_cam-only.
     const std::string& getSource() const { return source_; }
+    const std::string& getChannelKind() const { return channelKind_; }
+    const std::string& getChannelName() const { return channelName_; }
+    int getChannelSlots() const { return channelSlots_; }
 
 private:
     std::vector<std::string> inputFiles_;
@@ -224,6 +237,9 @@ private:
 
     // hal_cam-only.
     std::string source_;
+    std::string channelKind_ = "loopback";
+    std::string channelName_;
+    int channelSlots_ = 4;
 };
 
 #endif // PARSE_CLI_H

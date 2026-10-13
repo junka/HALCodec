@@ -33,6 +33,15 @@ add_executable(hal_cam hal_cam.cc ${CMAKE_SOURCE_DIR}/camera/camera_source_facto
 # camera/ 源文件 include "parse_cli.h"(仍由 app/ 提供),故把 app/ 自身暴露给 hal_cam。
 target_include_directories(hal_cam PRIVATE ${CMAKE_CURRENT_SOURCE_DIR})
 
+# Layers 1-3 (platform-neutral) channel backend and fan-out: the loopback channel
+# (in-process multi-consumer), FrameRouter (producer side), SharedFrameSource
+# (consumer side). The unixfd / nvscistream backends append here per platform.
+# All register into the halcodec_core registries at static-init.
+target_sources(hal_cam PRIVATE
+    ${CMAKE_SOURCE_DIR}/camera/loopback_channel.cc
+    ${CMAKE_SOURCE_DIR}/camera/frame_router.cc
+    ${CMAKE_SOURCE_DIR}/camera/camera_source_shared.cc)
+
 if(CMAKE_SYSTEM_NAME STREQUAL "Linux")
     target_sources(hal_cam PRIVATE ${CMAKE_SOURCE_DIR}/camera/camera_source_v4l2.cc)
     target_compile_definitions(hal_cam PRIVATE HAL_CAM_HAVE_V4L2=1)

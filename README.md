@@ -15,6 +15,49 @@ NVIDIA / AMD / Intel / Apple / NVIDIA DRIVE 的硬件编解码，无需为每个
 > 本文件为双语：上方为英文原文，下方为等量中文说明。两份内容覆盖同一信息，
 > 按需阅读其一即可。
 
+## 架构
+
+```
+                ┌─────────────────── app/ (命令行工具) ──────────────┐
+                │                                                    │
+   文件/流      │  hal_dec   hal_enc   hal_transcode   codecinfo     │  相机
+   ────────────►│                                              hal_cam│◄──────────
+                │       (parse_cli.h, encode_config.h)             │  SIPL/V4L2/AV
+                └───────────────┬──────────────────────┬────────────┘
+                                 │                      │
+                  统一 C++ 接口                  CameraSource
+                  （halcodec 命名空间）          (camera/)
+                                 │                      │
+              ┌──────────────────┴──────────────────────┴──────────┐
+              │              halcodec_core（共享库）                │
+              │         Registry<Encoder/Decoder/Cap>              │
+              │           （持有进程级单例）                        │
+              └──────────────────┬──────────────────────────────────┘
+                                 │  启动时 dlopen（plugin_loader）
+                                 │  依赖缺失 ⇒ 跳过该后端
+   ┌──────────┬──────────┬───────┴────────┬───────────┬─────────────┐
+   ▼          ▼          ▼                ▼           ▼             ▼
+nvenc_     nvjpeg_    amf_layers       qsv_layers  vtbox_layers  nvmedia_
+layers     layers                         (libvpl)    (VideoTB)    layers
+(NVDEC/    (NVJPEG)   (AMF)             (Intel)     (Apple)       (DRIVE OS
+NVENC)                                                macOS)       aarch64)
+   │          │          │                │           │             │
+   ▼          ▼          ▼                ▼           ▼             ▼
+ CUDA       CUDA      libamfrt64       libmfx-gen  CoreVideo    libnvmedia
+                      (dlopen)          +libva      框架         +nvsci
+```
+
+两个设计要点：
+
+- **dlopen 而非链接期绑定。** 各厂商后端是 `*_layers.so`/`.dylib`，通过
+  `HALCODEC_CONNECT` 静态初始化器自注册。若在链接期绑进每个可执行文件，动态
+  加载器会在进程启动时解析每个后端的 `NEEDED` 项（如 `libnvidia-encode.so.1`），
+  使二进制在缺少这些驱动库的机器上无法运行。`plugin_loader` 改为启动时按需
+  dlopen 各后端：依赖缺失的后端加载失败即被跳过（打印一条警告），其余后端照常
+  工作。
+- **统一 API 里刻意没有 `Device`/context 抽象。** 上下文是厂商相关的，留在各后端
+  内部；统一接口只交换 `CodecFrame` 与 `CodecParams`。
+
 ## 已注册的后端
 
 | 后端 | 解码器 | 编码器 | 能力自省 | 平台 |
@@ -51,16 +94,22 @@ NVIDIA / AMD / Intel / Apple / NVIDIA DRIVE 的硬件编解码，无需为每个
   厂商相关的，留在各自后端内部。
 - `Registry<T>`（`registry.h`）—— 共享工厂模板；适配器在静态初始化期通过
   `HALCODEC_CONNECT(Base, Name, Class)` 宏自注册。
+- `CameraSource`（`camera/camera_source.h`）—— 统一相机采集抽象，把 SIPL
+  （DRIVE-OS，NvSciBufObj 零拷贝）、V4L2（Linux USB/UVC）、AVFoundation（macOS）
+  三类相机收拢到同一个 `Grab(CodecFrame&)` 接口下。平台实现分别在
+  `camera/camera_source_{sipl,v4l2,av}.*`，按平台编译；由 `hal_cam` 应用消费。
 
 ## 命令行工具（`app/`）
 
-三个工具只依赖统一接口 + 后端注册表，因此换后端无需重编译。用 `-b/--backend`
+各工具只依赖统一接口 + 后端注册表，因此换后端无需重编译。用 `-b/--backend`
 选后端；省略时用平台默认值：
 
 | 工具 | 默认后端 | 可选后端 |
 |------|----------|----------|
 | `hal_dec` | macOS: `vtbox`；Linux aarch64: `nvmedia`；其它 Linux: `nvdec` | `nvjpeg`、`amfdec`、`qsvdec` |
 | `hal_enc` | 第一个注册的编码后端：macOS `vtenc`，Linux+CUDA `nvenc` | `amfenc`、`qsvenc`、`nvmedia` |
+| `hal_transcode` | 由 `-b <dec>:<enc>` 指定解码+编码对；`-z` 帧留显存零拷贝 | 任意解码→编码组合 |
+| `hal_cam` | 按采集源：`sipl`→`nvmedia`、`v4l2`→`qsvenc`、`av`→`vtenc` | 任意编码后端（`-B`） |
 | `codecinfo` | 所有注册的能力 provider | `-b` 限定单个 |
 
 常用选项（来自 `app/parse_cli.h`）：`-i/--input`、`-o/--output`、`-b/--backend`、
@@ -205,6 +254,11 @@ All types live in the `halcodec` namespace:
   context handling is vendor-specific and stays inside each backend.
 - `Registry<T>` (`registry.h`) — shared factory template; adapters self-register
   via the `HALCODEC_CONNECT(Base, Name, Class)` macro at static-init time.
+- `CameraSource` (`camera/camera_source.h`) — unified camera capture abstraction
+  that folds SIPL (DRIVE-OS, NvSciBufObj zero-copy), V4L2 (Linux USB/UVC) and
+  AVFoundation (macOS) behind one `Grab(CodecFrame&)` interface. Platform
+  implementations live in `camera/camera_source_{sipl,v4l2,av}.*` and are
+  compiled in per platform; consumed by the `hal_cam` app.
 
 ## Registered backends
 
@@ -231,16 +285,63 @@ at runtime.
 ## Layout
 
 ```
-src/                 unified interface headers
+src/                 unified interface headers (Encoder/Decoder/CodecFrame/...)
+camera/              camera source abstraction (SIPL/V4L2/AVFoundation → CameraSource)
 NVEnc/layers/        NVIDIA adapter (nvenc namespace)
 NVJPEG/layers/       NVIDIA JPEG adapter (nvjpeg namespace)
 VideoToolbox/layers/ Apple adapter (vtbox namespace)
 AMF/layers/          AMD adapter (amd namespace), Linux-only
 QSV/layers/          Intel QSV/libvpl adapter (qsv namespace), Linux-only
 NvMedia/layers/      NVIDIA DRIVE OS adapter (nvmedia namespace), Linux-aarch64-only
-app/                 example CLIs
+app/                 example CLIs (hal_dec/hal_enc/hal_transcode/hal_cam/codecinfo)
 tools/               helper scripts (SDK update/import)
 ```
+
+## Architecture
+
+```
+                ┌─────────────────── app/ (CLIs) ───────────────────┐
+                │                                                    │
+   file/stream  │  hal_dec   hal_enc   hal_transcode   codecinfo     │  camera
+   ────────────►│                                              hal_cam│◄──────────
+                │       (parse_cli.h, encode_config.h)             │  SIPL/V4L2/AV
+                └───────────────┬──────────────────────┬────────────┘
+                                 │                      │
+                  unified C++ interface           CameraSource
+                   (halcodec namespace)          (camera/)
+                                 │                      │
+              ┌──────────────────┴──────────────────────┴──────────┐
+              │              halcodec_core (SHARED)                 │
+              │         Registry<Encoder/Decoder/Cap>               │
+              │              (owns process-wide singletons)         │
+              └──────────────────┬──────────────────────────────────┘
+                                 │  dlopen at startup (plugin_loader)
+                                 │  missing deps ⇒ backend skipped
+   ┌──────────┬──────────┬───────┴────────┬───────────┬─────────────┐
+   ▼          ▼          ▼                ▼           ▼             ▼
+nvenc_     nvjpeg_    amf_layers       qsv_layers  vtbox_layers  nvmedia_
+layers     layers                         (libvpl)    (VideoTB)    layers
+(NVDEC/    (NVJPEG)   (AMF)             (Intel)     (Apple)       (DRIVE OS
+NVENC)                                                macOS)       aarch64)
+   │          │          │                │           │             │
+   ▼          ▼          ▼                ▼           ▼             ▼
+ CUDA       CUDA      libamfrt64       libmfx-gen  CoreVideo    libnvmedia
+                      (dlopen)          +libva      frameworks   +nvsci
+```
+
+Two design choices to note:
+
+- **dlopen, not link-time binding.** Vendor backends are `*_layers.so`/`.dylib`
+  that self-register via `HALCODEC_CONNECT` static initializers. Linking them
+  into every executable would force the dynamic loader to resolve each backend's
+  `NEEDED` entries (e.g. `libnvidia-encode.so.1`) at process start, making the
+  binary unusable on machines lacking those driver libraries. `plugin_loader`
+  dlopens each backend lazily at startup instead; a backend whose deps are
+  missing simply fails to load and is skipped with a warning, while the rest
+  keep working.
+- **No `Device`/context abstraction in the unified API.** Context handling is
+  vendor-specific, so it stays inside each backend. The unified interface only
+  trades `CodecFrame`s and `CodecParams`.
 
 ## SDK updates (`tools/update_sdks.sh`)
 
@@ -412,14 +513,16 @@ lib-target (same DRIVE-OS version, in `NvMedia/lib-target/`) unlocks the rest.
 
 ## Command-line tools (`app/`)
 
-All three tools exercise only the unified interface plus the backend registry,
-so they work against any registered backend without recompilation. Pick a
-backend with `-b/--backend`; when omitted, the platform default is used:
+The CLIs exercise only the unified interface plus the backend registry, so they
+work against any registered backend without recompilation. Pick a backend with
+`-b/--backend`; when omitted, the platform default is used:
 
 | Tool      | Default backend         | Alternative backends |
 |-----------|-------------------------|----------------------|
 | `hal_dec` | macOS: `vtbox`; Linux aarch64: `nvmedia`; other Linux: `nvdec` | `nvjpeg`, `amfdec`, `qsvdec` |
 | `hal_enc` | the first registered encoder backend: `vtenc` on macOS, `nvenc` on Linux + CUDA | `amfenc`, `qsvenc`, `nvmedia` |
+| `hal_transcode` | decode+encode pair from `-b <dec>:<enc>`; `-z` keeps frames in device memory | any decode→encode combo |
+| `hal_cam` | per source: `sipl`→`nvmedia`, `v4l2`→`qsvenc`, `av`→`vtenc` | any encoder backend (`-B`) |
 | `codecinfo` | all registered capability providers | `-b` restricts to one |
 
 Common options (from `app/parse_cli.h`):

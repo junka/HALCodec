@@ -126,6 +126,22 @@ set_target_properties(registry_test PROPERTIES CXX_STANDARD 17)
 add_test(NAME registry COMMAND registry_test)
 
 # ---------------------------------------------------------------------------
+# frame_channel_test — the layer-1/layer-2 abstractions with no camera, no GPU
+# and no transport: it links halcodec_core (which owns the channel-factory
+# registry) plus the loopback backend, which registers itself at static-init.
+# Covers fan-out to independent consumers, zero-copy identity of a slot,
+# retention while a frame is held, and that a stalled consumer caps the
+# producer instead of blocking it.
+# ---------------------------------------------------------------------------
+add_executable(frame_channel_test
+    frame_channel_test.cc
+    ${CMAKE_SOURCE_DIR}/camera/loopback_channel.cc)
+target_link_libraries(frame_channel_test PRIVATE halcodec_core)
+target_include_directories(frame_channel_test PRIVATE ${CMAKE_SOURCE_DIR}/camera)
+set_target_properties(frame_channel_test PROPERTIES CXX_STANDARD 17)
+add_test(NAME frame_channel COMMAND frame_channel_test)
+
+# ---------------------------------------------------------------------------
 # CLI surface: app/parse_cli.h is shared by every tool, and boost rejects a short
 # option two long ones claim only at parse time -- nothing fails to build. Scan
 # the letters each built app advertises and run `-c` on it. Self-discovering, so

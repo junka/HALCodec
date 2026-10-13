@@ -174,6 +174,11 @@ int main(int argc, char* argv[]) {
 #if defined(HAL_CAM_HAVE_AV)
         {"av", "vtenc", camera::CreateAVF},
 #endif
+        // "shared" (layer 3 consumer) is platform-neutral: it subscribes to a
+        // FrameChannel produced by another process. Listed last so the
+        // platform-native source stays the default when --source is omitted.
+        // Empty defaultEncoder = inherit the platform default (handled below).
+        {"shared", "", camera::CreateShared},
     };
     const int numAvailable =
         static_cast<int>(sizeof(available) / sizeof(available[0]));
@@ -208,6 +213,11 @@ int main(int argc, char* argv[]) {
     // --- Encoder 后端:默认按源,`-B qsv` 别名兼容 qsvenc ---
     std::string encoderBackend = cli.getEncoderBackend();
     if (encoderBackend.empty()) encoderBackend = entry->defaultEncoder;
+    if (encoderBackend.empty()) {
+        // "shared" inherits the platform-native source's default encoder.
+        encoderBackend = available[0].defaultEncoder;
+    }
+    if (encoderBackend.empty()) encoderBackend = "nvmedia";
     if (encoderBackend == "qsv") encoderBackend = "qsvenc";
     if (source == "sipl" && encoderBackend != "nvmedia") {
         // 零拷贝 NvSciBuf 帧只能被 nvmedia(基于 NvMedia IEP)消费。

@@ -21,7 +21,12 @@ add_library(halcodec_core SHARED
     ${CMAKE_SOURCE_DIR}/src/registry.cc
     ${CMAKE_SOURCE_DIR}/src/session.cc
     ${CMAKE_SOURCE_DIR}/src/frame.cc
-    ${CMAKE_SOURCE_DIR}/src/metrics.cc)
+    ${CMAKE_SOURCE_DIR}/src/metrics.cc
+    # Layer-1/Layer-2 backend registries (camera/frame_share.h, frame_channel.h):
+    # live in core so the process-wide tables are shared with the camera/*.cc
+    # compiled into hal_cam, which register into them at static-init.
+    ${CMAKE_SOURCE_DIR}/src/frame_share.cc
+    ${CMAKE_SOURCE_DIR}/src/channel_factory.cc)
 set_target_properties(halcodec_core PROPERTIES
     CXX_VISIBILITY_PRESET hidden
     VISIBILITY_INLINES_HIDDEN ON)

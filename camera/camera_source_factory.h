@@ -19,6 +19,11 @@ bool CreateV4L2(const CommandLineParser& cli,
 bool CreateAVF(const CommandLineParser& cli,
                std::vector<std::unique_ptr<halcodec::CameraSource>>& out);
 
+// 层 3 消费端工厂:按 --channel-kind/--channel-name 建一条订阅通道,包成
+// CameraSource。平台无关(依赖已注册的 FrameChannel backend),始终可编。
+bool CreateShared(const CommandLineParser& cli,
+                  std::vector<std::unique_ptr<halcodec::CameraSource>>& out);
+
 } // namespace camera
 
 #endif // CAMERA_CAMERA_SOURCE_FACTORY_H
