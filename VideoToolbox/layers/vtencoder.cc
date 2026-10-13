@@ -38,6 +38,9 @@ CMVideoCodecType MapCodecType(const std::string& codec) {
     if (codec == "jpeg" || codec == "mjpeg") {
         return kCMVideoCodecType_JPEG;
     }
+    if (codec == "h263") {
+        return kCMVideoCodecType_H263;
+    }
     if (codec == "prores") {
         // ProRes's bitrate tiers are selected by profile, so this is only the
         // default tier (ProRes 422); Initialize replaces it with whatever
@@ -102,14 +105,31 @@ CFStringRef MapProfileLevel(CMVideoCodecType codecType,
             return kVTProfileLevel_HEVC_Monochrome10_AutoLevel;
         }
         return nullptr;
+    } else if (codecType == kCMVideoCodecType_H263) {
+        // VT 只给了三种 Profile/Level: Profile0 Level10(默认), Profile0 Level45,
+        // 与 Profile3 Level45(H.263+ 的高级 profile)。用户给 level 即可。
+        if (profile == "profile0-level10" || profile == "level10" ||
+            profile.empty()) {
+            return kVTProfileLevel_H263_Profile0_Level10;
+        }
+        if (profile == "profile0-level45" || profile == "level45") {
+            return kVTProfileLevel_H263_Profile0_Level45;
+        }
+        if (profile == "profile3-level45" || profile == "level45-pro" ||
+            profile == "pro") {
+            return kVTProfileLevel_H263_Profile3_Level45;
+        }
+        return nullptr;
+    } else {
+        // H.264 —— 默认 Main AutoLevel,空或拼错都走这里,不会 silent 降级。
+        if (profile == "baseline") {
+            return kVTProfileLevel_H264_Baseline_AutoLevel;
+        }
+        if (profile == "high") {
+            return kVTProfileLevel_H264_High_AutoLevel;
+        }
+        return kVTProfileLevel_H264_Main_AutoLevel;
     }
-    if (profile == "baseline") {
-        return kVTProfileLevel_H264_Baseline_AutoLevel;
-    }
-    if (profile == "high") {
-        return kVTProfileLevel_H264_High_AutoLevel;
-    }
-    return kVTProfileLevel_H264_Main_AutoLevel;
 }
 
 // 源像素缓冲的 fourcc:位宽由输入格式决定。10-bit 走 FullRange 变体,与本文件
@@ -247,6 +267,23 @@ bool VTEncoder::Initialize(const CodecParams& params) {
             std::cerr << "VTEncoder: ProRes takes none of" << asked
                       << "; its quality is the bitrate tier, chosen with "
                          "--profile (proxy/lt/standard/hq/4444/xq)" << std::endl;
+            return false;
+        }
+    } else if (codecType_ == kCMVideoCodecType_H263) {
+        // H.263 没有 10-bit profile,只有 8-bit 4:2:0 输入可用(NV12/I420)。
+        // 10-bit 池给 H.263 要么 PrepareToEncodeFrames 报错(-12902),
+        // 要么吐出全零码流——拒绝而不是让会话静默失败。
+        if (inputFormat_ != PixelFormat::NV12 &&
+            inputFormat_ != PixelFormat::I420) {
+            std::cerr << "VTEncoder: H.263 needs 8-bit 4:2:0 input (-f nv12 "
+                         "or -f yuv/i420), not 10-bit" << std::endl;
+            return false;
+        }
+        // profile/level 可选空值(默认 Profile0 Level10)。
+        if (!profile.empty() && !MapProfileLevel(codecType_, profile)) {
+            std::cerr << "VTEncoder: unknown H.263 profile/level \""
+                      << profile << "\"; options: level10, level45, pro"
+                         "(Profile0Level10/45, Profile3Level45)" << std::endl;
             return false;
         }
     } else if (codecType_ == kCMVideoCodecType_HEVC) {
@@ -644,11 +681,16 @@ void VTEncoder::emitSample(CMSampleBufferRef sampleBuffer, bool isKeyframe) {
         return;
     }
 
-    if (codecType_ == kCMVideoCodecType_JPEG || IsProResType(codecType_)) {
-        // JPEG 与 ProRes 都原样透传:一个 sample 就是一条完整码流 —— 一张 JFIF
-        // 图,或一帧自带 32 位长度计数的 ProRes(首尾相接即成元素流,不需要转
-        // Annex-B,也没有参数集要前置)。用 CopyDataBytes 而不是 GetDataPointer,
-        // 是因为块缓冲不连续时后者会失败,而一条码流完全可能被拆成几块。
+    if (codecType_ == kCMVideoCodecType_JPEG ||
+        IsProResType(codecType_) ||
+        codecType_ == kCMVideoCodecType_H263) {
+        // JPEG、ProRes 与 H.263 都原样透传:
+        // - JPEG 一个 sample 就是一条完整 JFIF 图;
+        // - ProRes 一帧自带 32 位长度计数,首尾相接即成元素流;
+        // - H.263 VT 直接吐出 Annex-B 帧(00 00 8x 起始码),参数集内嵌帧头,
+        //   不需要 AVCC->Annex-B 转换,也不需要从 format description 抽 SPS。
+        // CopyDataBytes 而不是 GetDataPointer,是因为块缓冲不连续时后者会
+        // 失败,而一条码流完全可能被拆成几块。
         std::vector<uint8_t> out(len);
         if (CMBlockBufferCopyDataBytes(dataBuffer, 0, len, out.data()) != noErr) {
             std::cerr << "VTEncoder: could not read the encoded image"
