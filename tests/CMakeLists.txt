@@ -142,6 +142,24 @@ set_target_properties(frame_channel_test PROPERTIES CXX_STANDARD 17)
 add_test(NAME frame_channel COMMAND frame_channel_test)
 
 # ---------------------------------------------------------------------------
+# unixfd_channel_test — the Linux cross-process backend, driven from one process
+# with two independent Channel objects over the same abstract-socket endpoint
+# (the fd across SCM_RIGHTS is a real fd; the ring is real shared memory). It
+# pins the handshake, zero-copy identity (consumer's hostData is inside its own
+# mmap), and that a consumer which goes away does not lock a slot forever.
+# Linux-only, like the backend.
+# ---------------------------------------------------------------------------
+if(CMAKE_SYSTEM_NAME STREQUAL "Linux")
+    add_executable(unixfd_channel_test
+        unixfd_channel_test.cc
+        ${CMAKE_SOURCE_DIR}/camera/unixfd_channel.cc)
+    target_link_libraries(unixfd_channel_test PRIVATE halcodec_core)
+    target_include_directories(unixfd_channel_test PRIVATE ${CMAKE_SOURCE_DIR}/camera)
+    set_target_properties(unixfd_channel_test PROPERTIES CXX_STANDARD 17)
+    add_test(NAME unixfd_channel COMMAND unixfd_channel_test)
+endif()
+
+# ---------------------------------------------------------------------------
 # CLI surface: app/parse_cli.h is shared by every tool, and boost rejects a short
 # option two long ones claim only at parse time -- nothing fails to build. Scan
 # the letters each built app advertises and run `-c` on it. Self-discovering, so

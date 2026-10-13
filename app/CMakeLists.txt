@@ -42,6 +42,13 @@ target_sources(hal_cam PRIVATE
     ${CMAKE_SOURCE_DIR}/camera/frame_router.cc
     ${CMAKE_SOURCE_DIR}/camera/camera_source_shared.cc)
 
+# Layer 2, Linux cross-process backend: POSIX shared ring (memfd) + AF_UNIX
+# SCM_RIGHTS fd passing. Linux-only by construction (memfd/SCM_RIGHTS), so the
+# kind "unixfd" is absent elsewhere and the factory says so.
+if(CMAKE_SYSTEM_NAME STREQUAL "Linux")
+    target_sources(hal_cam PRIVATE ${CMAKE_SOURCE_DIR}/camera/unixfd_channel.cc)
+endif()
+
 if(CMAKE_SYSTEM_NAME STREQUAL "Linux")
     target_sources(hal_cam PRIVATE ${CMAKE_SOURCE_DIR}/camera/camera_source_v4l2.cc)
     target_compile_definitions(hal_cam PRIVATE HAL_CAM_HAVE_V4L2=1)
