@@ -1183,7 +1183,8 @@ void VTDecoder::DecompressionCallback(
         format = PixelFormat::BAYER16LE;
         bayerGrid = true;
     } else if (fourcc == FourccOf('p', 'f', '2', '0') ||
-               fourcc == FourccOf('p', '4', '2', '0')) {
+               fourcc == FourccOf('p', '4', '2', '0') ||
+               fourcc == FourccOf('x', '4', '2', '0')) {
         // 10-bit 4:2:0. Which of the two a stream lands on is its *range*, not
         // its codec: an x265 Main 10 file comes back as 'p420' while the same
         // picture encoded by the hardware is 'pf20'. Chroma is interleaved Cb:Cr
@@ -1202,6 +1203,15 @@ void VTDecoder::DecompressionCallback(
         format = PixelFormat::P210;
         chromaRows = h;
         packed10 = true;
+    } else if (fourcc == kCVPixelFormatType_422YpCbCr8 ||
+               fourcc == kCVPixelFormatType_422YpCbCr8FullRange) {
+        // 8-bit 4:2:2 packed ('2vuy'/'yuv2'). Two planes like NV12: luma row is
+        // w bytes, chroma row is 2*w bytes of interleaved CbCr -- only chroma
+        // rows match luma rows (4:2:2 vs 4:2:0). Walks the plain memcpy path at
+        // the end, so its output strides are the VT pitch (with padding), same
+        // as NV12/P010. Decodes H.264 High 4:2:2 and HEVC Main422 8-bit.
+        format = PixelFormat::NV16;
+        chromaRows = h;
     } else if (fourcc == kCVPixelFormatType_OneComponent8 ||
                fourcc == kCVPixelFormatType_OneComponent10) {
         // HEVC Main Monochrome and Main 10 Monochrome ('L008', 'L010'): one
