@@ -84,11 +84,17 @@ if(NVMEDIA_DRIVE_SDK_DIR AND CMAKE_SYSTEM_PROCESSOR MATCHES "aarch64|arm64")
     # SIPL runtime libs live in the SDK lib-target alongside the NvMedia libs.
     # Link by absolute path (see NvMedia/layers/CMakeLists.txt for why: -l +
     # link_directories() silently drops -L under cross-compile root paths).
+    # nvsciipc/nvscibuf frame_share_sipl.cc: 与 nvsciipc_channel.cc 必须编在同一个
+    # 可执行文件里(共享 NvSciBufModule 与端点状态),故都在本块内。
+    target_sources(hal_cam PRIVATE
+        ${CMAKE_SOURCE_DIR}/camera/nvsciipc_channel.cc
+        ${CMAKE_SOURCE_DIR}/camera/frame_share_sipl.cc)
     target_link_libraries(hal_cam PUBLIC
         ${NVMEDIA_DRIVE_SDK_DIR}/lib-target/libnvsipl.so
         ${NVMEDIA_DRIVE_SDK_DIR}/lib-target/libnvsipl_query.so
         ${NVMEDIA_DRIVE_SDK_DIR}/lib-target/libnvscibuf.so
         ${NVMEDIA_DRIVE_SDK_DIR}/lib-target/libnvscisync.so
+        ${NVMEDIA_DRIVE_SDK_DIR}/lib-target/libnvsciipc.so
         ${NVMEDIA_DRIVE_SDK_DIR}/lib-target/libnvmedia_iep_sci.so)
 endif()
 

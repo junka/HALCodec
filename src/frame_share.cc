@@ -17,6 +17,7 @@ namespace {
 struct Entry {
     FrameExportFn exportFn;
     FrameImportFn importFn;
+    FrameTransportCloseFn closeFn;
 };
 
 // 每 locality 一格。locality 是小枚举,固定数组足够,免去 map。
@@ -42,6 +43,28 @@ void RegisterFrameShare(FrameLocality locality, FrameExportFn e, FrameImportFn i
     if (idx >= table().size()) return;
     table()[idx].exportFn = std::move(e);
     table()[idx].importFn = std::move(i);
+}
+
+// 与 RegisterFrameShare 分开:多数 backend 无需在端点关闭时做清理,把 close 做成
+// 独立注册可避免为它们强塞一个空函数(maintainer 只需在真有缓存时安装)。
+__attribute__((visibility("default")))
+void RegisterFrameTransportClose(FrameLocality locality, FrameTransportCloseFn f) {
+    std::lock_guard<std::mutex> lk(mu());
+    size_t idx = index(locality);
+    if (idx >= table().size()) return;
+    table()[idx].closeFn = std::move(f);
+}
+
+__attribute__((visibility("default")))
+void CloseSharedTransport(FrameLocality locality, uint64_t transport) {
+    FrameTransportCloseFn fn;
+    {
+        std::lock_guard<std::mutex> lk(mu());
+        size_t idx = index(locality);
+        if (idx >= table().size()) return;
+        fn = table()[idx].closeFn;
+    }
+    if (fn) fn(transport);  // 未注册 = 该 backend 无传输态需要释放
 }
 
 __attribute__((visibility("default")))

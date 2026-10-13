@@ -43,8 +43,12 @@ bool SharedFrameSource::Grab(halcodec::CodecFrame& frame) {
         frame.data = recv->hostData();
         frame.size = recv->hostSize();
     } else {
-        // 设备帧:经已注册的 import 还原设备句柄(零拷贝)。
-        if (!halcodec::ImportSharedFrame(d, frame)) {
+        // 设备帧:经已注册的 import 还原设备句柄(零拷贝)。导入需要通道自身的
+        // 传输句柄(层 1 在它上面做 attr list 握手/对象导入),通道层不写 desc,
+        // 由这里补上。
+        halcodec::SharedFrameDesc owned = d;
+        owned.transport = ch_->transportHandle();
+        if (!halcodec::ImportSharedFrame(owned, frame)) {
             std::cerr << "shared_source: ImportSharedFrame failed\n";
             return false;
         }
@@ -91,7 +95,11 @@ bool CreateShared(const CommandLineParser& cli,
     ChannelConfig cfg;
     cfg.name = name;
     cfg.producer = false;
-    cfg.locality = halcodec::FrameLocality::Host;
+    // 订阅端的 locality 必须与生产端一致,否则 Grab 会按 Host 路径去读一块设备
+    // buffer。这条信息不在 CLI 里(消费者看不到生产端的 --source),由 backend 的
+    // kind 决定:设备搬运类的 backend 报自己的设备 locality,其余(Host 槽)按
+    // Host。kind 未注册已在上方拦下。
+    cfg.locality = ChannelLocalityForKind(kind);
     cfg.width = w;
     cfg.height = h;
     cfg.numSlots = cli.getChannelSlots();

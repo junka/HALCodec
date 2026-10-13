@@ -95,6 +95,9 @@ void FrameRouter::Loop() {
                 desc.locality = halcodec::FrameLocality::Host;
                 ch->Publish(desc);
             } else {
+                // 设备句柄的导出需要一条已建立的 IPC 通道(层 1 用它交换 attr list
+                // 与对象描述符);句柄由通道交出来,层 1 不自己去开(见 frame.h)。
+                desc.transport = ch->transportHandle();
                 if (!halcodec::ExportSharedFrame(frame, desc)) continue;
                 ch->Publish(desc);
             }
