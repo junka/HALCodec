@@ -96,9 +96,15 @@ int main(int argc, char* argv[]) {
     } else {
         params.inputFormat = halcodec::PixelFormat::I420; // yuv/iyuv default
     }
-    if (std::regex_search(input, match, pattern)) {
-        params.width = std::stoi(match[1].str());
-        params.height = std::stoi(match[2].str());
+    if (cli.getWidth() > 0)  params.width  = cli.getWidth();
+    if (cli.getHeight() > 0) params.height = cli.getHeight();
+    // Without an explicit --width/--height, fall back to the WxH pattern in the
+    // input filename (the historical convention for raw YUV/RGB inputs).
+    if (params.width <= 0 || params.height <= 0) {
+        if (std::regex_search(input, match, pattern)) {
+            params.width = std::stoi(match[1].str());
+            params.height = std::stoi(match[2].str());
+        }
     }
 
     // Encoder tuning: load JSON config (if any), then apply CLI single-item

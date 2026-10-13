@@ -46,6 +46,13 @@ public:
                 ("fps", po::value<int>(&fps_), "Frame rate (numerator; denominator=1)")
                 ("profile", po::value<std::string>(&profile_), "Codec profile (baseline/main/high)")
                 ("level", po::value<std::string>(&level_), "Codec level (auto/4.0/4.1...)")
+                ("width", po::value<int>(&width_),
+                 "Frame width in pixels. hal_enc: overrides the WxH parsed from "
+                 "the input filename. hal_transcode: overrides the geometry "
+                 "inherited from the first decoded frame. hal_dec ignores this "
+                 "(decode dimensions come from the stream's SPS/PPS).")
+                ("height", po::value<int>(&height_),
+                 "Frame height in pixels. Same semantics as --width.")
                 ("lowdelay", po::bool_switch(&lowDelay_), "Low-delay mode (0 B-frames, short GOP)")
                 ("zero-copy,z", po::bool_switch(&zeroCopy_), "Keep decoded frames in device memory (NvMedia NvSciBuf / NVDEC CUDA) instead of copying to host; the output writer downloads on demand. Backend support is opt-in.")
                 ("metrics-interval", po::value<int>(&metricsInterval_)->default_value(1000),
@@ -142,6 +149,10 @@ public:
     int getFps() const { return fps_; }
     const std::string& getProfile() const { return profile_; }
     const std::string& getLevel() const { return level_; }
+    // Raw-input encode dimensions. Sentinel -1 = "not set on CLI"; hal_enc
+    // then falls back to the WxH filename pattern. >=0 means explicit override.
+    int getWidth() const { return width_; }
+    int getHeight() const { return height_; }
     bool getLowDelay() const { return lowDelay_; }
     bool getZeroCopy() const { return zeroCopy_; }
     // Metrics print interval in ms (0 = no periodic printing; the final
@@ -192,6 +203,8 @@ private:
     std::string profile_;
     std::string level_;
     bool lowDelay_ = false;
+    int width_ = -1;   // raw-input encode; -1 = fall back to filename WxH
+    int height_ = -1;  // raw-input encode; -1 = fall back to filename WxH
     bool zeroCopy_ = false;
     int metricsInterval_ = 1000;  // ms; 0 disables periodic metrics
 

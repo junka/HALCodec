@@ -287,8 +287,15 @@ int main(int argc, char* argv[]) {
     // parsed the stream headers.
     auto feedEncoder = [&](halcodec::CodecFrame& f) -> bool {
         if (!encReady) {
-            eparams.width = f.width;
-            eparams.height = f.height;
+            // Geometry comes from the first decoded frame (the decoder parsed
+            // it from the stream headers). --width/--height, when given,
+            // override that — useful when the decoder reports 16-aligned coded
+            // size but the encoder should target the display size, or to force
+            // a geometry the stream header got wrong. Note a mismatch with the
+            // actual frame bytes is backend-defined (host path may misread;
+            // zero-copy device frames will likely reject the import).
+            eparams.width = cli.getWidth() > 0 ? cli.getWidth() : f.width;
+            eparams.height = cli.getHeight() > 0 ? cli.getHeight() : f.height;
             if (eparams.inputFormat == halcodec::PixelFormat::Unknown) {
                 eparams.inputFormat = f.format;
             }
