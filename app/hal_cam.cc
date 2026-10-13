@@ -39,6 +39,8 @@
 
 #include "camera_source.h"
 #include "camera_source_factory.h"
+#include "frame_channel.h"
+#include "frame_router.h"
 #include "encoder.h"
 #include "encode_config.h"
 #include "parse_cli.h"
@@ -231,6 +233,76 @@ int main(int argc, char* argv[]) {
     if (!entry->create(cli, sources) || sources.empty()) {
         std::cerr << "hal_cam: camera source '" << source << "' setup failed\n";
         return 1;
+    }
+
+    // --- Publish 模式(层 3 生产端):采集 → FrameRouter → FrameChannel。
+    // 本进程不做本地编码,只把采集流放到通道上,供别的进程 --source shared 订阅。
+    // FrameRouter 本身就是"采集源 + 本地 sink + N 条通道"的扇出器:这里加一条
+    // 生产通道,不加本地 sink,于是这条路就是纯相机 → 通道。---
+    const std::string publishChannel = cli.getPublishChannel();
+    if (!publishChannel.empty()) {
+        if (!camera::FrameChannelFactoryRegistered(cli.getChannelKind())) {
+            std::cerr << "hal_cam: no FrameChannel backend registered for kind '"
+                      << cli.getChannelKind() << "' (--channel-kind)\n";
+            return 1;
+        }
+        std::vector<std::unique_ptr<camera::FrameRouter>> routers;
+        for (size_t i = 0; i < sources.size(); ++i) {
+            // 多路相机:每路一条同名通道会撞端点名,故第 2 路起加 _camN 后缀
+            // (与输出文件派生同一约定;单路保持调用方给的名字不变)。
+            const std::string chName = sources.size() == 1
+                ? publishChannel
+                : publishChannel + "_cam" + std::to_string(i);
+            camera::ChannelConfig cfg;
+            cfg.name = chName;
+            cfg.producer = true;
+            // 通道承载的 locality 由采集源决定:SIPL 出 NvSciBufObj 设备帧
+            // (走 ExportSharedFrame),其余源出 host NV12(走共享槽 memcpy)。
+            cfg.locality = source == "sipl" ? halcodec::FrameLocality::NvSciBufObj
+                                            : halcodec::FrameLocality::Host;
+            cfg.width = static_cast<int>(sources[i]->width());
+            cfg.height = static_cast<int>(sources[i]->height());
+            cfg.numSlots = cli.getChannelSlots();
+
+            auto ch = camera::CreateFrameChannel(cli.getChannelKind(), cfg);
+            if (!ch) {
+                std::cerr << "hal_cam: CreateFrameChannel('" << cli.getChannelKind()
+                          << "', '" << chName << "') failed\n";
+                return 1;
+            }
+            auto router = std::make_unique<camera::FrameRouter>(std::move(sources[i]));
+            router->setCamId(static_cast<uint32_t>(i));
+            router->AddChannel(std::shared_ptr<camera::FrameChannel>(std::move(ch)));
+            routers.push_back(std::move(router));
+        }
+
+        // 先全部 Open/Start,再报"已发布",避免消费者在通道还没绑定时连上来。
+        for (size_t i = 0; i < routers.size(); ++i) {
+            if (!routers[i]->Start()) {
+                std::cerr << "hal_cam: publish router " << i << " Start failed\n";
+                return 1;
+            }
+        }
+        std::cout << "hal_cam: '" << source << "' publishing on '" << publishChannel
+                  << "' (" << cli.getChannelKind() << ", " << routers.size()
+                  << " camera(s)); waiting for consumers\n";
+
+        const int publishFrames = cli.getPublishFrames();
+        while (!g_stop.load()) {
+            if (publishFrames > 0) {
+                uint64_t total = 0;
+                for (auto& r : routers) total += r->framesCaptured();
+                if (total >= static_cast<uint64_t>(publishFrames)) break;
+            }
+            std::this_thread::sleep_for(std::chrono::milliseconds(50));
+        }
+
+        for (auto& r : routers) r->Stop();
+        for (size_t i = 0; i < routers.size(); ++i) {
+            std::cout << "hal_cam: publish cam " << i << " captured "
+                      << routers[i]->framesCaptured() << " frames\n";
+        }
+        return 0;
     }
 
     // --- 每源一个 CaptureUnit:Open 后的尺寸初始化 encoder ---

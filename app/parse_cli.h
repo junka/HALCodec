@@ -89,12 +89,22 @@ public:
                  "produced by another camera process instead of capturing locally.")
                 // FrameChannel (layer 2) selector for --source shared.
                 ("channel-kind", po::value<std::string>(&channelKind_)->default_value("loopback"),
-                 "hal_cam --source shared: FrameChannel backend (loopback|unixfd|nvscistream).")
+                 "hal_cam: FrameChannel backend (loopback|unixfd|nvscistream). Used "
+                 "by --source shared (subscribe) and by --publish (produce).")
                 ("channel-name", po::value<std::string>(&channelName_),
                  "hal_cam --source shared: channel endpoint name (producer and "
                  "consumer must agree on it).")
                 ("channel-slots", po::value<int>(&channelSlots_)->default_value(4),
-                 "hal_cam --source shared: number of frame slots in the channel ring.");
+                 "hal_cam: number of frame slots in the channel ring.")
+                // Producer side (layer 3): capture locally, publish instead of encode.
+                ("publish", po::value<std::string>(&publishChannel_),
+                 "hal_cam: publish the captured stream on a FrameChannel of this "
+                 "name instead of encoding it locally (the producer half of "
+                 "--source shared; --channel-kind selects the backend). No encoder "
+                 "is created in this mode.")
+                ("publish-frames", po::value<int>(&publishFrames_)->default_value(0),
+                 "hal_cam --publish: stop after N frames published (0 = run until "
+                 "Ctrl-C).");
 
             // Parse the command line
             po::variables_map vm;
@@ -188,6 +198,9 @@ public:
     const std::string& getChannelKind() const { return channelKind_; }
     const std::string& getChannelName() const { return channelName_; }
     int getChannelSlots() const { return channelSlots_; }
+    // Producer side: non-empty = publish mode (capture then fan out, no encoder).
+    const std::string& getPublishChannel() const { return publishChannel_; }
+    int getPublishFrames() const { return publishFrames_; }
 
 private:
     std::vector<std::string> inputFiles_;
@@ -240,6 +253,8 @@ private:
     std::string channelKind_ = "loopback";
     std::string channelName_;
     int channelSlots_ = 4;
+    std::string publishChannel_;
+    int publishFrames_ = 0;
 };
 
 #endif // PARSE_CLI_H
