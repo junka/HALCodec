@@ -1,5 +1,5 @@
-#ifndef SRC_CAMERA_SOURCE_H
-#define SRC_CAMERA_SOURCE_H
+#ifndef CAMERA_CAMERA_SOURCE_H
+#define CAMERA_CAMERA_SOURCE_H
 
 #include "frame.h"
 
@@ -52,4 +52,4 @@ public:
 
 } // namespace halcodec
 
-#endif // SRC_CAMERA_SOURCE_H
+#endif // CAMERA_CAMERA_SOURCE_H

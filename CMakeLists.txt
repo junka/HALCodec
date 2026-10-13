@@ -8,6 +8,10 @@ set(CMAKE_CXX_EXTENSIONS OFF)
 
 # Add src directory to include paths
 include_directories(${CMAKE_SOURCE_DIR}/src)
+# Camera source abstraction (SIPL/V4L2/AVFoundation) lives in camera/. Its
+# headers are consumed by app/hal_cam; its platform-specific .cc are compiled
+# into the hal_cam target directly (see app/CMakeLists.txt).
+include_directories(${CMAKE_SOURCE_DIR}/camera)
 
 # Core library: owns the process-wide Registry singletons. Backends (linked or
 # dlopen'd) and executables all depend on it so a backend registered at runtime

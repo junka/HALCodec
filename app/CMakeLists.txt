@@ -24,13 +24,17 @@ add_executable(hal_transcode hal_transcode.cc parse_cli.h)
 
 # hal_cam:统一相机→编码应用(归并 hal_camera/hal_camera_v4l2)。源实现按平台
 # 编译,逐源打 HAL_CAM_HAVE_* 宏,hal_cam.cc 据此路由 --source:
-#   camera_source_sipl.cc  aarch64 + NVMEDIA_DRIVE_SDK_DIR(SIPL 直接链接)
-#   camera_source_v4l2.cc  Linux(需 <linux/videodev2.h>)
-#   camera_source_av.mm    APPLE(AVFoundation,ObjC++),链系统框架
-add_executable(hal_cam hal_cam.cc camera_source_factory.h)
+#   camera/camera_source_sipl.cc  aarch64 + NVMEDIA_DRIVE_SDK_DIR(SIPL 直接链接)
+#   camera/camera_source_v4l2.cc  Linux(需 <linux/videodev2.h>)
+#   camera/camera_source_av.mm    APPLE(AVFoundation,ObjC++),链系统框架
+# 相机源抽象独立在 camera/ 目录(平行于 app/),头文件经顶层 include_directories
+# 暴露,平台源文件按需编入 hal_cam。
+add_executable(hal_cam hal_cam.cc ${CMAKE_SOURCE_DIR}/camera/camera_source_factory.h)
+# camera/ 源文件 include "parse_cli.h"(仍由 app/ 提供),故把 app/ 自身暴露给 hal_cam。
+target_include_directories(hal_cam PRIVATE ${CMAKE_CURRENT_SOURCE_DIR})
 
 if(CMAKE_SYSTEM_NAME STREQUAL "Linux")
-    target_sources(hal_cam PRIVATE camera_source_v4l2.cc)
+    target_sources(hal_cam PRIVATE ${CMAKE_SOURCE_DIR}/camera/camera_source_v4l2.cc)
     target_compile_definitions(hal_cam PRIVATE HAL_CAM_HAVE_V4L2=1)
 elseif(APPLE)
     enable_language(OBJCXX)
@@ -39,9 +43,9 @@ elseif(APPLE)
     find_library(CORE_FOUNDATION_FRAMEWORK CoreFoundation REQUIRED)
     find_library(CORE_MEDIA_FRAMEWORK CoreMedia REQUIRED)
     find_library(CORE_VIDEO_FRAMEWORK CoreVideo REQUIRED)
-    target_sources(hal_cam PRIVATE camera_source_av.mm)
+    target_sources(hal_cam PRIVATE ${CMAKE_SOURCE_DIR}/camera/camera_source_av.mm)
     # ObjC++ + ARC:delegate 与 session 对象由 ARC 管理,CF 类型仍手动。
-    set_source_files_properties(camera_source_av.mm PROPERTIES
+    set_source_files_properties(${CMAKE_SOURCE_DIR}/camera/camera_source_av.mm PROPERTIES
         LANGUAGE OBJCXX COMPILE_OPTIONS "-fobjc-arc")
     target_compile_definitions(hal_cam PRIVATE HAL_CAM_HAVE_AV=1)
     target_link_libraries(hal_cam PUBLIC
@@ -53,7 +57,7 @@ elseif(APPLE)
 endif()
 # SIPL 源:aarch64 + DRIVE-OS SDK 存在时启用(条件与顶层 NvMedia 相同)。
 if(NVMEDIA_DRIVE_SDK_DIR AND CMAKE_SYSTEM_PROCESSOR MATCHES "aarch64|arm64")
-    target_sources(hal_cam PRIVATE camera_source_sipl.cc)
+    target_sources(hal_cam PRIVATE ${CMAKE_SOURCE_DIR}/camera/camera_source_sipl.cc)
     target_include_directories(hal_cam PRIVATE
         ${NVMEDIA_INCLUDE_DIR}
         ${NVMEDIA_INCLUDE_6X_DIR})

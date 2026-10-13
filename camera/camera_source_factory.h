@@ -1,5 +1,5 @@
-#ifndef APP_CAMERA_SOURCE_FACTORY_H
-#define APP_CAMERA_SOURCE_FACTORY_H
+#ifndef CAMERA_CAMERA_SOURCE_FACTORY_H
+#define CAMERA_CAMERA_SOURCE_FACTORY_H
 
 #include <memory>
 #include <vector>
@@ -21,4 +21,4 @@ bool CreateAVF(const CommandLineParser& cli,
 
 } // namespace camera
 
-#endif // APP_CAMERA_SOURCE_FACTORY_H
+#endif // CAMERA_CAMERA_SOURCE_FACTORY_H
