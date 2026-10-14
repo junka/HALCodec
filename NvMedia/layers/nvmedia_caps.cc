@@ -24,7 +24,7 @@ public:
 
     void showDecoderCapability() const override {
         // The IDE header (nvmedia_ide.h) lists H264/HEVC/VC1/MPEG1/MPEG2/MPEG4/
-        // MJPEG/VP8/VP9/AV1, but the nv118 system libnvmedia_ide_parser runtime
+        // MJPEG/VP8/VP9/AV1, but the board's system libnvmedia_ide_parser runtime
         // (a reduced /usr/lib build) rejects every codec except H.264 and HEVC
         // at NvMediaParserCreate ("Codec Not supported"). That rejection is a
         // lib-version limit, not a hardware one: the same DRIVE-OS 7.0.3.0 SDK

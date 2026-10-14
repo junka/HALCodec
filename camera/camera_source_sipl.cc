@@ -21,6 +21,7 @@
 #include <cstdint>
 #include <iostream>
 #include <memory>
+#include <sstream>
 #include <string>
 #include <vector>
 
@@ -28,12 +29,36 @@
 #include "NvSIPLPipelineMgr.hpp"
 #include "NvSIPLQuery.hpp"
 #include "NvSIPLDeviceBlockInfo.hpp"
+#include "NvSIPLQueryTrace.hpp"
+#include "NvSIPLTrace.hpp"
+#include "NvSIPLVersion.hpp"
 
 #include "nvmedia_iep.h"
 #include "nvscibuf.h"
 #include "nvscisync.h"
 
 using namespace nvsipl;
+
+// SIPLStatus is an enum with underlying type uint8_t: `os << sts` does not pick
+// the enum overload — it converts to unsigned char and prints the raw byte. An
+// error code prints as a stray control byte and NVSIPL_STATUS_OK prints as NUL,
+// so failures are invisible on the terminal. Always print through this.
+static const char* StatusName(SIPLStatus s) {
+    switch (s) {
+        case NVSIPL_STATUS_OK: return "OK";
+        case NVSIPL_STATUS_BAD_ARGUMENT: return "BAD_ARGUMENT";
+        case NVSIPL_STATUS_NOT_SUPPORTED: return "NOT_SUPPORTED";
+        case NVSIPL_STATUS_OUT_OF_MEMORY: return "OUT_OF_MEMORY";
+        case NVSIPL_STATUS_RESOURCE_ERROR: return "RESOURCE_ERROR";
+        case NVSIPL_STATUS_TIMED_OUT: return "TIMED_OUT";
+        case NVSIPL_STATUS_INVALID_STATE: return "INVALID_STATE";
+        case NVSIPL_STATUS_EOF: return "EOF";
+        case NVSIPL_STATUS_NOT_INITIALIZED: return "NOT_INITIALIZED";
+        case NVSIPL_STATUS_FAULT_STATE: return "FAULT_STATE";
+        case NVSIPL_STATUS_ERROR: return "ERROR";
+    }
+    return "UNKNOWN";
+}
 
 namespace {
 
@@ -100,9 +125,19 @@ NvSciBufAttrList BuildCombinedAttrList(NvSciBufModule mod,
         NvSciBufAttrListFree(siplAttr);
         return nullptr;
     }
-    if (NvMediaIEPFillNvSciBufAttrList(NVMEDIA_ENCODER_INSTANCE_0, siplAttr)
-            != NVMEDIA_STATUS_OK) {
-        std::cerr << "hal_cam: NvMediaIEPFillNvSciBufAttrList failed\n";
+    // NvMediaIEPFillNvSciBufAttrList 的 @pre 是 NvMediaIEPGetVersion() —— 不先
+    // 调它,Fill 会返回 INVALID_STATE。这里只取版本号,触发 IEP 子系统的初始化。
+    NvMediaVersion iepVer{};
+    if (NvMediaIEPGetVersion(&iepVer) != NVMEDIA_STATUS_OK) {
+        std::cerr << "hal_cam: NvMediaIEPGetVersion failed\n";
+        NvSciBufAttrListFree(siplAttr);
+        return nullptr;
+    }
+    NvMediaStatus iepSt = NvMediaIEPFillNvSciBufAttrList(
+        NVMEDIA_ENCODER_INSTANCE_0, siplAttr);
+    if (iepSt != NVMEDIA_STATUS_OK) {
+        std::cerr << "hal_cam: NvMediaIEPFillNvSciBufAttrList failed: "
+                  << static_cast<int>(iepSt) << "\n";
         NvSciBufAttrListFree(siplAttr);
         return nullptr;
     }
@@ -154,6 +189,34 @@ bool ResolveSensorResolution(const PlatformCfg& cfg, uint32_t sensorIndex,
 class SIPLPlatform {
 public:
     bool Init(const CommandLineParser& cli) {
+        // 版本与 trace 是两件事,但都要在 ParseDatabase/SetPlatformCfg 之前。
+        // trace 是唯一能让 SIPL 自己解释"为什么这个 platform cfg 被拒"的开关:
+        // 厂商 nvsipl_camera 的 7 个 SIPL import 里就有这两个 trace 单例,而我们
+        // 此前一个都没碰过。级别取自 --sipl-verbose,默认 0(不开)。
+        NvSIPLVersion ver{};
+        NvSIPLGetVersion(ver);
+        std::cout << "hal_cam: NvSIPL version " << ver.uMajor << "."
+                  << ver.uMinor << "." << ver.uPatch << "\n";
+
+        queryTrace_ = INvSIPLQueryTrace::GetInstance();
+        sipTrace_ = INvSIPLTrace::GetInstance();
+        const int verbose = cli.getSiplVerbose();
+        if (verbose > 0) {
+            if (queryTrace_) {
+                const auto lvl = verbose >= 6
+                    ? INvSIPLQueryTrace::LevelAll
+                    : static_cast<INvSIPLQueryTrace::TraceLevel>(verbose);
+                queryTrace_->SetLevel(lvl);
+            }
+            if (sipTrace_) {
+                const auto lvl = verbose >= 4
+                    ? INvSIPLTrace::LevelDebug
+                    : static_cast<INvSIPLTrace::TraceLevel>(verbose);
+                sipTrace_->SetLevel(lvl);
+            }
+            std::cout << "hal_cam: SIPL trace level " << verbose << "\n";
+        }
+
         query_ = INvSIPLQuery::GetInstance();
         if (!query_) {
             std::cerr << "hal_cam: INvSIPLQuery::GetInstance failed\n";
@@ -163,37 +226,162 @@ public:
             ? query_->ParseDatabase()
             : query_->ParseJsonFile(cli.getSiplDb());
         if (sts != NVSIPL_STATUS_OK) {
-            std::cerr << "hal_cam: ParseDatabase/JsonFile failed: " << sts << "\n";
+            std::cerr << "hal_cam: ParseDatabase/JsonFile failed: "
+                  << StatusName(sts) << "\n";
             return false;
         }
+        // 取平台配置有两条路:GetPlatformCfg(name, &out) 按"名字"拷贝,
+        // GetPlatformCfgList() 返回 lib 自持的 const PlatformCfg* 列表。实测在这块
+        // 板子上两者给出的 numDeviceBlocks 不一致 —— by-name 返回 3(已按平台默认
+        // mask 裁剪过),list 返回 4(未裁剪的完整拓扑)。而 ApplyMask 的契约是
+        // "mask 个数必须等于 deserializer 数",厂商 nvsipl_camera 传 4 个 mask、
+        // 走 list 路径拿到 4 块,ApplyMask 把第 4 块(mask=0)裁掉,得到 3 块。
+        // 我们此前走 by-name 拿到 3 块再传 4 个 mask,precondition 不满足,ApplyMask
+        // 行为未定义,SetPlatformCfg 随后以 BAD_ARGUMENT 拒绝。所以这里一律走 list
+        // 路径,按 platformConfig 名字匹配,与厂商样例对齐。
         PlatformCfg platCfg;
-        if (!cli.getSiplPlatform().empty()) {
-            if (query_->GetPlatformCfg(cli.getSiplPlatform(), platCfg)
-                    != NVSIPL_STATUS_OK) {
-                std::cerr << "hal_cam: GetPlatformCfg("
-                          << cli.getSiplPlatform() << ") failed\n";
-                return false;
-            }
-        } else {
-            auto cfgList = query_->GetPlatformCfgList();
-            if (cfgList.empty()) {
-                std::cerr << "hal_cam: no SIPL platform configs available\n";
-                return false;
-            }
-            platCfg = *cfgList.front();
+        const std::string& want = cli.getSiplPlatform();
+        auto cfgList = query_->GetPlatformCfgList();
+        const PlatformCfg* found = nullptr;
+        for (auto* pc : cfgList) {
+            if (!pc) continue;
+            if (!want.empty() && pc->platformConfig == want) { found = pc; break; }
+            if (!want.empty() && pc->platform == want)       { found = pc; break; }
         }
-        config_ = platCfg;
-        std::cout << "hal_cam: platform=" << platCfg.platform
-                  << " numDeviceBlocks=" << platCfg.numDeviceBlocks << "\n";
+        if (!found) {
+            if (want.empty()) {
+                if (cfgList.empty()) {
+                    std::cerr << "hal_cam: no SIPL platform configs available\n";
+                    return false;
+                }
+                found = cfgList.front();
+            } else {
+                // 兜底:列表里没匹配到名字,退回 by-name(某些 SDK 版本只认这条路径)。
+                if (query_->GetPlatformCfg(want, platCfg) != NVSIPL_STATUS_OK) {
+                    std::cerr << "hal_cam: GetPlatformCfg(" << want << ") failed\n";
+                    return false;
+                }
+                found = &platCfg;
+            }
+        }
+        if (found != &platCfg) {
+            platCfg = *found;  // 仅供下方诊断 dump 读取;SetPlatformCfg 用 found
+        }
+        // 关键:厂商 nvsipl_camera 把"lib 自持的 PlatformCfg*"一路传到
+        // SetPlatformCfg,ApplyMask 也在同一个对象上就地修改。我们此前拷贝到栈上
+        // 的 platCfg 再传给 SetPlatformCfg,会被 SIPL 判定为"陌生结构体"而走另一条
+        // 校验路径(重新 FindFirstLibPath/LoadDriversLibraries,并把 camera-module
+        // 驱动当 deser 驱动加载),最终 BAD_ARGUMENT。所以这里 ApplyMask 与
+        // SetPlatformCfg 都作用于 lib 自持对象(const_cast 去掉 const,与厂商行为一致)。
+        PlatformCfg* cfgForSet = const_cast<PlatformCfg*>(found);
+        // 平台配置里的 deserializer link mask 描述的是"该平台能挂什么",不是"这台
+        // 车挂了什么"。板子上只有部分 link 有串行器时,未裁剪的平台会被
+        // SetPlatformCfg 以 BAD_ARGUMENT 拒绝 —— 必须先 ApplyMask 收敛到实际
+        // 在位的 link(与 sensor_camera.yaml 的 platform_mask 同义)。
+        // mask 的分隔符:厂商 CLI(-m)用空格,我们的历史写法用逗号 —— 两种都收,
+        // 免得把"格式写错"误认成"平台不支持"。掩码个数必须等于平台配置里的
+        // deserializer 数(见 INvSIPLQuery::ApplyMask 的 @param vMasks)。
+        std::vector<uint32_t> masks;
+        if (!cli.getSiplMask().empty()) {
+            std::string tok;
+            std::istringstream is(cli.getSiplMask());
+            while (is >> tok) {
+                std::string::size_type pos = 0;
+                while (pos <= tok.size()) {
+                    auto comma = tok.find(',', pos);
+                    std::string field = tok.substr(
+                        pos, comma == std::string::npos ? std::string::npos
+                                                        : comma - pos);
+                    pos = comma == std::string::npos ? tok.size() + 1 : comma + 1;
+                    if (field.empty()) continue;
+                    masks.push_back(
+                        static_cast<uint32_t>(std::stoul(field, nullptr, 0)));
+                }
+            }
+            if (masks.empty() ||
+                query_->ApplyMask(*cfgForSet, masks) != NVSIPL_STATUS_OK) {
+                std::cerr << "hal_cam: SIPL ApplyMask('" << cli.getSiplMask()
+                          << "') failed\n";
+                return false;
+            }
+            std::cout << "hal_cam: applied link masks to " << masks.size()
+                      << " deserializer(s)\n";
+        }
+        config_ = *cfgForSet;
+        // 同时打印 mask 值 + GetPlatformCfgList 里同名配置的 numDeviceBlocks,
+        // 用来判断"是 GetPlatformCfg(name,out) 的拷贝把尾部块写坏了,还是
+        // 平台配置本身在这个库里就是 4 模组"。厂商 nvsipl_camera 走的是 list
+        // 路径(它持有 lib 分配的 const PlatformCfg*),我们走的是 by-name 拷贝
+        // 路径 —— 两者若不一致,根因就在这次拷贝。
+        std::cout << "hal_cam: masks=";
+        for (size_t i = 0; i < masks.size(); ++i) {
+            std::cout << (i ? " " : "") << "0x" << std::hex << masks[i] << std::dec;
+        }
+        std::cout << " (n=" << masks.size() << ")\n";
+        std::cout << "hal_cam: [cfg] platform='" << cfgForSet->platform
+                  << "' platformConfig='" << cfgForSet->platformConfig
+                  << "' numDeviceBlocks=" << cfgForSet->numDeviceBlocks
+                  << " sizeof(PlatformCfg)=" << sizeof(PlatformCfg) << "\n";
+        {
+            auto cfgList = query_->GetPlatformCfgList();
+            for (auto* pc : cfgList) {
+                if (pc && pc->platformConfig == platCfg.platformConfig) {
+                    std::cout << "hal_cam: [list]    platformConfig='"
+                              << pc->platformConfig << "' numDeviceBlocks="
+                              << pc->numDeviceBlocks << "\n";
+                    for (uint32_t b = 0; b < pc->numDeviceBlocks; ++b) {
+                        std::cout << "hal_cam: [list]    block " << b
+                                  << " numCameraModules="
+                                  << pc->deviceBlockList[b].numCameraModules
+                                  << "\n";
+                    }
+                    break;
+                }
+            }
+        }
+        // 逐块列出 SIPL 真正拿到的拓扑。SetPlatformCfg 返回 BAD_ARGUMENT 时,
+        // 唯一能自查的就是"我们递进去的结构体里到底写了什么"—— 设备块编号、I2C
+        // 总线、每块的模组数、每个模组的 sensor 名与分辨率。sizeof(PlatformCfg)
+        // 同时暴露 NV_IS_SAFETY 的 ABI(6 块 vs 4 块)对不对得上板子上的库。
+        for (uint32_t b = 0; b < cfgForSet->numDeviceBlocks; ++b) {
+            const DeviceBlockInfo& db = cfgForSet->deviceBlockList[b];
+            std::cout << "hal_cam:   block " << b
+                      << " csiPort=" << static_cast<int>(db.csiPort)
+                      << " phyMode=" << static_cast<int>(db.phyMode)
+                      << " i2cBus=" << db.i2cDevice
+                      << " deser='" << db.deserInfo.name << "'"
+                      << " deserI2cAddr=0x" << std::hex
+                      << static_cast<int>(db.deserInfo.i2cAddress) << std::dec
+                      << " numCameraModules=" << db.numCameraModules << "\n";
+            for (uint32_t m = 0; m < db.numCameraModules; ++m) {
+                const CameraModuleInfo& cm = db.cameraModuleInfoList[m];
+                const SensorInfo& si = cm.sensorInfo;
+                std::cout << "hal_cam:     module " << m
+                          << " name='" << cm.name << "'"
+                          << " linkIndex=" << cm.linkIndex
+                          << " sensor='" << si.name << "'"
+                          << " i2cAddr=0x" << std::hex
+                          << static_cast<int>(si.i2cAddress) << std::dec
+                          << " resolution=" << si.vcInfo.resolution.width << "x"
+                          << si.vcInfo.resolution.height << "\n";
+            }
+        }
 
         camera_ = INvSIPLCamera::GetInstance();
         if (!camera_) {
             std::cerr << "hal_cam: INvSIPLCamera::GetInstance failed\n";
             return false;
         }
-        sts = camera_->SetPlatformCfg(&platCfg);
+        // 用两参数重载 SetPlatformCfg(cfg, queues):厂商 nvsipl_camera 走的就是
+        // 这条路径(它要拿 devblk 事件通知队列)。单参数重载在这块板子上会触发
+        // CDevBlkDriverLibs::FindFirstLibPath + LoadDriversLibraries,并把
+        // camera-module 库错当 deser 驱动加载,最终 BAD_ARGUMENT。queues 里的
+        // 通知指针全部留 nullptr(我们暂时不需要 devblk 事件)。
+        NvSIPLDeviceBlockQueues dbQueues{};
+        sts = camera_->SetPlatformCfg(cfgForSet, dbQueues);
         if (sts != NVSIPL_STATUS_OK) {
-            std::cerr << "hal_cam: SetPlatformCfg failed: " << sts << "\n";
+            std::cerr << "hal_cam: SetPlatformCfg failed: " << StatusName(sts)
+                  << "\n";
             return false;
         }
         // NvSci 模块与 CPU wait context 全平台共享。
@@ -207,11 +395,61 @@ public:
         return true;
     }
 
+    // 必须在 Init 之前为平台配置里所有被 mask 选中的 sensor 都调一次
+    // SetPipelineCfg —— 实测若只配置部分 sensor,camera_->Init() 会返回
+    // INVALID_STATE(它按"已配置的 pipeline 全集"来初始化硬件探测/ISP 流水线,
+    // 缺 sensor 会让状态机停在半就绪)。与厂商 nvsipl_camera 的行为一致:它在
+    // Init 前对全部 sensor 都建了 consumer。这里只配置、不开流;真正取流的源
+    // 由 numCameras 决定。
+    std::vector<INvSIPLFrameCompletionQueue*> allCompletionQs_;
+    // sensor 索引按 blockIndex * MAX_CAMERAMODULES_PER_BLOCK + moduleIndex 编码,
+    // 空 module 槽位跳过(实测厂商 nvsipl_camera 的 sensor 序列是 0,1,2,4,5..11
+    // —— block 0 只有 3 个 module,所以 sensor 3 不存在,SetPipelineCfg(3) 会
+    // BAD_ARGUMENT)。allCompletionQs_ 按"真实 module 出现顺序"存,下标是稠密的;
+    // completionQ() 用稠密下标取回。
+    std::vector<uint32_t> allSensorIndices_;
+    bool ConfigureAllPipelines() {
+        allCompletionQs_.clear();
+        allSensorIndices_.clear();
+        const PlatformCfg& cfg = config_;
+        uint32_t sensorIdx = 0;
+        for (uint32_t b = 0; b < cfg.numDeviceBlocks; ++b) {
+            for (uint32_t m = 0; m < cfg.deviceBlockList[b].numCameraModules; ++m) {
+                NvSIPLPipelineConfiguration pipeCfg{};
+                pipeCfg.isp0OutputRequested = true;
+                NvSIPLPipelineQueues queues{};
+                SIPLStatus sts = camera_->SetPipelineCfg(
+                    sensorIdx, pipeCfg, queues);
+                if (sts != NVSIPL_STATUS_OK) {
+                    std::cerr << "hal_cam: SetPipelineCfg(sensor "
+                              << sensorIdx << ") failed: " << StatusName(sts)
+                              << "\n";
+                    return false;
+                }
+                allSensorIndices_.push_back(sensorIdx);
+                allCompletionQs_.push_back(queues.isp0CompletionQueue);
+                ++sensorIdx;
+            }
+            // 跳过本 block 内未用的 module 槽位(MAX_CAMERAMODULES_PER_BLOCK=4):
+            // sensor 索引按物理槽位编号,不是稠密编号。
+            sensorIdx = (b + 1) * MAX_CAMERAMODULES_PER_BLOCK;
+        }
+        std::cout << "hal_cam: configured " << allCompletionQs_.size()
+                  << " sensor pipeline(s)\n";
+        return true;
+    }
+
+    INvSIPLFrameCompletionQueue* completionQ(uint32_t denseIdx) const {
+        return denseIdx < allCompletionQs_.size()
+            ? allCompletionQs_[denseIdx] : nullptr;
+    }
+
     // 必须在所有源的 SetPipelineCfg(Open)完成之后调用;只执行一次。
     bool InitOnce() {
         if (inited_) return true;
-        if (camera_->Init() != NVSIPL_STATUS_OK) {
-            std::cerr << "hal_cam: SIPL Init failed\n";
+        auto sts = camera_->Init();
+        if (sts != NVSIPL_STATUS_OK) {
+            std::cerr << "hal_cam: SIPL Init failed: " << StatusName(sts) << "\n";
             return false;
         }
         inited_ = true;
@@ -260,6 +498,10 @@ private:
     // 随最后一个源释放。
     std::unique_ptr<INvSIPLQuery> query_;
     std::unique_ptr<INvSIPLCamera> camera_;
+    // Trace 单例由库持有(GetInstance 返回裸指针,不是 unique_ptr):这里只存
+    // 借用指针,用于 --sipl-verbose 时在 Init 前打开日志级别。
+    INvSIPLQueryTrace* queryTrace_ = nullptr;
+    INvSIPLTrace* sipTrace_ = nullptr;
     NvSciBufModule bufModule_ = nullptr;
     NvSciSyncModule syncModule_ = nullptr;
     NvSciSyncCpuWaitContext cpuWaitCtx_ = nullptr;
@@ -277,18 +519,9 @@ public:
         : platform_(std::move(platform)), sensorIndex_(sensorIndex) {}
 
     bool Open() override {
-        // SetPipelineCfg 必须在平台 Init 之前全部就绪。
-        NvSIPLPipelineConfiguration pipeCfg{};
-        pipeCfg.isp0OutputRequested = true;
-        NvSIPLPipelineQueues queues{};
-        SIPLStatus sts = platform_->camera()->SetPipelineCfg(
-            sensorIndex_, pipeCfg, queues);
-        if (sts != NVSIPL_STATUS_OK) {
-            std::cerr << "hal_cam: SetPipelineCfg(sensor "
-                      << sensorIndex_ << ") failed: " << sts << "\n";
-            return false;
-        }
-        completionQ_ = queues.isp0CompletionQueue;
+        // SetPipelineCfg 已在平台 ConfigureAllPipelines() 里对全部 sensor 统一
+        // 配置完毕(见其注释)。这里只取回本 sensor 的 isp0 完成队列。
+        completionQ_ = platform_->completionQ(sensorIndex_);
         if (!completionQ_) {
             std::cerr << "hal_cam: no isp0CompletionQueue for sensor "
                       << sensorIndex_ << "\n";
@@ -323,7 +556,7 @@ public:
             sensorIndex_, INvSIPLClient::ConsumerDesc::OutputType::ISP0, pool_);
         if (sts != NVSIPL_STATUS_OK) {
             std::cerr << "hal_cam: sensor " << sensorIndex_
-                      << " RegisterImages failed: " << sts << "\n";
+                      << " RegisterImages failed: " << StatusName(sts) << "\n";
             return false;
         }
         // ISP 输出需要 auto-control plugin(AEC/AWB);示例插件缺失时 ISP 仍可
@@ -365,7 +598,7 @@ public:
             if (sts != NVSIPL_STATUS_OK || !item) {
                 // 超时:重试(RequestStop 后由循环条件退出)。
                 std::cerr << "hal_cam: sensor " << sensorIndex_
-                          << " queue Get timeout (" << sts << ")\n";
+                          << " queue Get timeout (" << StatusName(sts) << ")\n";
                 continue;
             }
             auto* nvm = dynamic_cast<INvSIPLClient::INvSIPLNvMBuffer*>(item);
@@ -429,7 +662,11 @@ bool CreateSIPL(const CommandLineParser& cli,
     if (numCameras < 1) numCameras = 1;
     int baseSensor = cli.getSensorIndex();
 
-    // 阶段 1:全部 Open(SetPipelineCfg)完成,才能 Init。
+    // 阶段 1:为平台里所有被 mask 选中的 sensor 配置 pipeline(必须全部配完
+    // 才能 Init)。只取前 numCameras 个作为对外输出源。
+    if (!platform->ConfigureAllPipelines()) return false;
+
+    // 阶段 1b:构造请求的源(仅 Open = 取回 completion queue + 解析分辨率)。
     std::vector<std::unique_ptr<SIPLCameraSource>> sources;
     sources.reserve(static_cast<size_t>(numCameras));
     for (int i = 0; i < numCameras; ++i) {

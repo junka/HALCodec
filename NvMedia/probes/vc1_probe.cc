@@ -15,7 +15,7 @@
 //       -L/opt/gwm/nv_sdk/thoru/thoru-aarch64/drive-linux/lib-target \
 //       -lnvmedia_ide_parser -lnvvideo -lnvscibuf -lnvscisync \
 //       -lnvrm_surface -lnvos -lnvsocsys -ldl
-// Run on nv118:
+// Run on the board:
 //   LD_LIBRARY_PATH=$HOME/sdk_libs /tmp/vc1_probe input.rcv [maxFrames]
 #include <cstdint>
 #include <cstdio>

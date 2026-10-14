@@ -1,6 +1,6 @@
 // Minimal NvMedia codec-support probe: calls NvMediaParserCreate for every
 // NvMediaVideoCodec and reports which the runtime accepts vs rejects with
-// "Codec Not supported". Used to compare the nv118 system libnvmedia tree
+// "Codec Not supported". Used to compare the board's system libnvmedia tree
 // against the /opt/gwm/.../drive-linux SDK lib-target without touching the
 // running framework.
 //
@@ -10,7 +10,7 @@
 //       codec_probe.cc -o codec_probe \
 //       -L/opt/gwm/nv_sdk/thoru/thoru-aarch64/drive-linux/lib-target \
 //       -lnvmedia_ide_parser -ldl
-// Run on nv118:
+// Run on orin:
 //   ./codec_probe                          # against system libs
 //   LD_LIBRARY_PATH=<sdk-lib-target> ./codec_probe   # against SDK libs
 #include <cstdint>

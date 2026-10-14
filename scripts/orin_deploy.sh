@@ -13,19 +13,31 @@ set -euo pipefail
 
 root=$(cd "$(dirname "$0")/.." && pwd)
 build="$root/build-drive"
-remote=${ORIN_DIR:-halcodec-nv}
+# `remote` is the ssh alias; `destdir` is the directory on the board. The target
+# board is reached through the `orin` alias (10.49.18.118) and the tree lives in
+# ~/halcodec-nv, so both defaults line up; override either independently.
+remote=${ORIN_DIR:-orin}
+destdir=${ORIN_DEST_DIR:-halcodec-nv}
 
+# hal_cam is the camera app (SIPL / V4L2 / AV per platform) and it carries the
+# camera/ layers 1-3 plus the nvsciipc channel. hal_camera no longer exists (it
+# was merged into hal_cam), so naming it here only fails the build.
 cmake --build "$build" -j4 --target \
-    nvmedia_layers hal_dec hal_transcode hal_enc hal_camera codecinfo
+    nvmedia_layers hal_dec hal_transcode hal_enc hal_cam codecinfo
 
 cp "$build/NvMedia/layers/libnvmedia_layers.so" "$build/app/libnvmedia_layers.so"
 
-scp -q "$build/app/libnvmedia_layers.so" \
-       "$build/libhalcodec_core.so" \
-       "$build/app/hal_dec" \
-       "$build/app/hal_transcode" \
-       "$build/app/hal_enc" \
-       "$build/app/hal_camera" \
-       "$build/app/codecinfo" \
-       "orin:~/$remote/"
-echo "deployed to orin:~/$remote/"
+# The cross tree has no libboost_program_options.so (the toolchain finds it from
+# the SDK sysroot at link time); the board's deploy dir already carries the
+# matching 1.83.0 copy, resolved via LD_LIBRARY_PATH=$PWD.
+files=(
+    "$build/app/libnvmedia_layers.so"
+    "$build/libhalcodec_core.so"
+    "$build/app/hal_dec"
+    "$build/app/hal_transcode"
+    "$build/app/hal_enc"
+    "$build/app/hal_cam"
+    "$build/app/codecinfo"
+)
+scp -q "${files[@]}" "$remote:$destdir/"
+echo "deployed to $remote:$destdir/"

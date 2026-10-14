@@ -69,6 +69,18 @@ public:
                  "hal_camera: SIPL platform config name (empty = first from the built-in DB).")
                 ("sipl-db", po::value<std::string>(&siplDb_),
                  "hal_camera: path to a SIPL platform JSON DB (empty = built-in ParseDatabase).")
+                ("sipl-mask", po::value<std::string>(&siplMask_),
+                 "hal_cam: per-deserializer link enable masks, one per device block, "
+                 "whitespace- or comma-separated hex (e.g. '0x0111 0x1111 0x1111 0x0' "
+                 "for GWM_MULTIPLE_CAMERA_THORU_GROUPB). Bit i set = LINK_i of that "
+                 "deserializer is enabled (LINK_0=0x1, LINK_1=0x10, LINK_2=0x100, "
+                 "LINK_3=0x1000). Empty = no mask; the mask count must equal the "
+                 "platform's deserializer count. Matches the vendor nvsipl_camera -m.")
+                ("sipl-verbose", po::value<int>(&siplVerbose_)->default_value(0),
+                 "hal_cam: SIPL internal trace level (0 = off). 1..3 = SIPL camera "
+                 "errors/warnings/info, 4 = debug. 4..6 also raise the SIPL query "
+                 "trace to verbose/spew. Use it when SetPlatformCfg returns "
+                 "BAD_ARGUMENT - SIPL then prints the reason. (Vendor nvsipl_camera -v.)")
                 // hal_camera_v4l2-only flags. V4L2 USB/UVC camera -> QSV encode on x86.
                 ("device", po::value<std::string>(&v4l2Device_)->default_value("/dev/video0"),
                  "Camera device (v4l2: device node e.g. /dev/video0; av: camera name substring filter).")
@@ -89,7 +101,7 @@ public:
                  "produced by another camera process instead of capturing locally.")
                 // FrameChannel (layer 2) selector for --source shared.
                 ("channel-kind", po::value<std::string>(&channelKind_)->default_value("loopback"),
-                 "hal_cam: FrameChannel backend (loopback|unixfd|nvscistream). Used "
+                 "hal_cam: FrameChannel backend (loopback|unixfd|nvscipc). Used "
                  "by --source shared (subscribe) and by --publish (produce).")
                 ("channel-name", po::value<std::string>(&channelName_),
                  "hal_cam --source shared: channel endpoint name (producer and "
@@ -185,6 +197,8 @@ public:
     int getDurationFrames() const { return durationFrames_; }
     const std::string& getSiplPlatform() const { return siplPlatform_; }
     const std::string& getSiplDb() const { return siplDb_; }
+    const std::string& getSiplMask() const { return siplMask_; }
+    int getSiplVerbose() const { return siplVerbose_; }
 
     // hal_camera_v4l2-only options.
     const std::string& getV4l2Device() const { return v4l2Device_; }
@@ -240,6 +254,8 @@ private:
     int durationFrames_ = 0;
     std::string siplPlatform_;
     std::string siplDb_;
+    std::string siplMask_;
+    int siplVerbose_ = 0;  // SIPL trace level; 0 = leave SIPL's logging off
 
     // hal_camera_v4l2-only.
     std::string v4l2Device_ = "/dev/video0";

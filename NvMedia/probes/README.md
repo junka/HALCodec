@@ -6,7 +6,7 @@ a lib-version limit (reduced build) from a hardware/SKU limit.
 
 ## Why
 
-nv118 (T234) ships a **reduced** `libnvmedia_ide_parser` / `libnvmedia_iep_sci`
+The target board (T234) ships a **reduced** `libnvmedia_ide_parser` / `libnvmedia_iep_sci`
 in `/usr/lib` that rejects most codecs at create time ("Codec Not supported").
 The matching DRIVE-OS 7.0.3.0 SDK `lib-target`
 (`/opt/gwm/nv_sdk/thoru/thoru-aarch64/drive-linux/lib-target`) is the **full**
@@ -37,10 +37,10 @@ aarch64-linux-gnu-g++ -static-libstdc++ -static-libgcc \
     -lnvrm_surface -lnvos -lnvsocsys -ldl
 ```
 
-## Run on nv118
+## Run on orin
 
 ```sh
-scp codec_probe iep_probe nv118:/tmp/
+scp codec_probe iep_probe orin:/tmp/
 
 # Against the system /usr/lib (reduced build):
 /tmp/codec_probe
@@ -48,12 +48,12 @@ scp codec_probe iep_probe nv118:/tmp/
 
 # Against the full SDK lib-target (deploy first — tar preserves symlinks;
 # `scp -r *.so*` corrupts them):
-ssh nv118 'mkdir -p ~/sdk_libs'
+ssh orin 'mkdir -p ~/sdk_libs'
 tar czf - -C $SDK/lib-target libnvmedia_*.so* libnvparser*.so* \
     libnvrm_*.so* libnvos.so libnvsocsys.so libnvsci*.so* libnvvideo*.so* \
-    libnvtegrahv.so | ssh nv118 'tar xzf - -C ~/sdk_libs'
-ssh nv118 'LD_LIBRARY_PATH=$HOME/sdk_libs /tmp/codec_probe'
-ssh nv118 'LD_LIBRARY_PATH=$HOME/sdk_libs /tmp/iep_probe'
+    libnvtegrahv.so | ssh orin 'tar xzf - -C ~/sdk_libs'
+ssh orin 'LD_LIBRARY_PATH=$HOME/sdk_libs /tmp/codec_probe'
+ssh orin 'LD_LIBRARY_PATH=$HOME/sdk_libs /tmp/iep_probe'
 ```
 
 ## Expected (audited 2026-10-10)
