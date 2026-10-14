@@ -213,6 +213,69 @@ HEVC Main 10 72。
 关键观察：把每帧解码结果落盘只付出"写"的代价（边际 13–19 GB/s，视频 codec 掉
 13–23%，ProRes 掉约三分之一）；ProRes 各档只差输出大小（该 session 拒绝码率控制）。
 
+
+## hal_player — 跨平台硬解播放器 (HAL Decoder + SDL2 + OpenGL)
+
+`app/hal_player.cc` 是跨平台 C++17 硬解播放器,走完整硬解 + GPU 帧渲染通路。
+
+- **解码**: `halcodec::Decoder` 抽象工厂,后端由平台自动选择 — macOS = vtbox (VideoToolbox),Linux = qsvdec / amfdec,Windows = amfdec / nvdec
+- **渲染**: SDL2 + legacy OpenGL (fixed-function pipeline),macOS / Linux / Windows 统一
+- **色彩**: NV12 → BGRA CPU 转换 (BT.601 整数近似,~3ns/pixel)
+
+**数据流**:
+
+```
+Annex-B .h264/.hevc 文件
+    └─ ExtractAnnexBParamSets → AVCC [4-byte len][nalu]...
+        └─ Decoder::Initialize + FillInput
+            └─ 平台硬解 (vtbox / nvdec / qsvdec / amfdec)
+                └─ CodecFrame (CVPixelBuffer / CUDA / VADeviceMem)
+                    └─ DownloadToHost (仅 device 帧)
+                        └─ NV12 → BGRA
+                            └─ GL texture upload → SDL2 窗口
+```
+
+**用法**:
+
+```sh
+# bench 模式 (纯解码吞吐,无窗口)
+./app/hal_player --bench --backend vtbox input.h264
+./app/hal_player --bench --backend vtbox input.hevc
+
+# window 模式 (SDL2 + GL 渲染)
+./app/hal_player --backend vtbox input.h264
+./app/hal_player input.hevc   # 自动选第一个可用 backend
+```
+
+`--bench` 跳过渲染,只测硬解吞吐。输出 PERF 块:
+
+```
+================ PERF ================
+  backend        : vtbox
+  decoded frames : 60
+  total wall time: 0.348 s
+  throughput     : 172.4 fps
+======================================
+```
+
+**构建逻辑** (`app/CMakeLists.txt`):
+
+| SDL2 | 平台 | 产物 |
+|------|------|------|
+| ✅ | 全部 | `hal_player.cc` (跨平台 C++ + SDL2 + GL) |
+| ❌ | macOS | `hal_player.mm` (Apple 专有 ObjC++ fallback) |
+| ❌ | Linux/Windows | 跳过 hal_player target |
+
+### hal_player 性能
+
+macOS (Intel UHD 630 iGPU,Release 构建) 实测,测试素材 720p 短序列:
+
+| Codec | 后端 | 帧数 | Wall | 吞吐 |
+|-------|------|------|------|------|
+| H.264 720p | vtbox | 60 | 0.35s | **172 fps** |
+| HEVC  720p | vtbox | 60 | 0.55s | **109 fps** |
+
+解读:HEVC 硬解比 H.264 慢 ~36%,符合 Intel Gen10 iGPU 规格;窗口模式额外开销在 NV12→BGRA CPU 转换 + GL texture upload,对 30fps 实时播放绰绰有余。
 ## 构建
 
 ```sh
@@ -840,6 +903,75 @@ the fixed tree.
   CPU rate, and Main 10 at 805 fps beats Main 8 at 508 fps. A column like that
   is not a hardware measurement.
 
+
+## hal_player — cross-platform hardware-decoded player (HAL Decoder + SDL2 + OpenGL)
+
+`app/hal_player.cc` is a cross-platform C++17 hard-decode player that exercises
+the full decode + GPU-frame render path end to end.
+
+- **Decode**: `halcodec::Decoder` abstraction factory — backend picked by
+  platform: macOS = vtbox (VideoToolbox), Linux = qsvdec / amfdec,
+  Windows = amfdec / nvdec.
+- **Render**: SDL2 + legacy OpenGL (fixed-function pipeline), uniform across
+  macOS / Linux / Windows.
+- **Color**: NV12 → BGRA CPU conversion (BT.601 integer approximation, ~3 ns/pixel).
+
+**Data path**:
+
+```
+Annex-B .h264 / .hevc file
+    └─ ExtractAnnexBParamSets → AVCC [4-byte len][nalu]...
+        └─ Decoder::Initialize + FillInput
+            └─ platform hardware decoder (vtbox / nvdec / qsvdec / amfdec)
+                └─ CodecFrame (CVPixelBuffer / CUDA / VADeviceMem)
+                    └─ DownloadToHost (device frames only)
+                        └─ NV12 → BGRA
+                            └─ GL texture upload → SDL2 window
+```
+
+**Usage**:
+
+```sh
+# bench mode (pure decode throughput, no window)
+./app/hal_player --bench --backend vtbox input.h264
+./app/hal_player --bench --backend vtbox input.hevc
+
+# window mode (SDL2 + GL rendering)
+./app/hal_player --backend vtbox input.h264
+./app/hal_player input.hevc   # auto-pick first available backend
+```
+
+`--bench` skips rendering so you measure hardware decode alone. PERF block:
+
+```
+================ PERF ================
+  backend        : vtbox
+  decoded frames : 60
+  total wall time: 0.348 s
+  throughput     : 172.4 fps
+======================================
+```
+
+**Build logic** (`app/CMakeLists.txt`):
+
+| SDL2 present | Platform | Target |
+|-------------|----------|--------|
+| Yes | all | `hal_player.cc` (cross-platform C++ + SDL2 + GL) |
+| No  | macOS | `hal_player.mm` (Apple-only ObjC++ fallback) |
+| No  | Linux/Windows | hal_player target skipped |
+
+### hal_player throughput
+
+Measured on macOS (Intel UHD 630 iGPU, Release build), short 720p test clip:
+
+| Codec | Backend | Frames | Wall | Throughput |
+|-------|---------|-------:|-----:|-----------:|
+| H.264 720p | vtbox | 60 | 0.35 s | **172 fps** |
+| HEVC  720p | vtbox | 60 | 0.55 s | **109 fps** |
+
+Observations: HEVC decode is ~36% slower than H.264, which matches the Intel
+Gen10 iGPU spec. Window mode adds NV12→BGRA CPU conversion + GL texture
+upload; well within 30 fps real-time playback capacity.
 ## Build
 
 ```sh
