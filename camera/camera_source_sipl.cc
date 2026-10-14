@@ -20,6 +20,7 @@
 
 #include <atomic>
 #include <cctype>
+#include <chrono>
 #include <cstdint>
 #include <cstdio>
 #include <cstdlib>
@@ -28,6 +29,7 @@
 #include <memory>
 #include <sstream>
 #include <string>
+#include <thread>
 #include <vector>
 
 #include "NvSIPLCamera.hpp"
@@ -61,6 +63,40 @@ static const char* StatusName(SIPLStatus s) {
         case NVSIPL_STATUS_NOT_INITIALIZED: return "NOT_INITIALIZED";
         case NVSIPL_STATUS_FAULT_STATE: return "FAULT_STATE";
         case NVSIPL_STATUS_ERROR: return "ERROR";
+    }
+    return "UNKNOWN";
+}
+
+// 通知事件的枚举名。SIPL 通过 notification queue 上报 ICP/ISP/auto-control 的
+// 处理结果与错误(NOTIF_ERROR_ICP_BAD_INPUT_STREAM、NOTIF_ERROR_CDI_SET_SENSOR_CTRL_FAILURE
+// 等),厂商 nvsipl_camera 会把这些打成可读文字。不排空队列就只能看到"取帧超时",
+// 分不清是 ICP 没进流、deser/serializer 中断,还是 auto-control 写 sensor 失败。
+static const char* NotifName(NvSIPLPipelineNotifier::NotificationType t) {
+    using NT = NvSIPLPipelineNotifier;
+    switch (t) {
+        case NT::NOTIF_INFO_ICP_PROCESSING_DONE: return "INFO_ICP_PROCESSING_DONE";
+        case NT::NOTIF_INFO_ISP_PROCESSING_DONE: return "INFO_ISP_PROCESSING_DONE";
+        case NT::NOTIF_INFO_ACP_PROCESSING_DONE: return "INFO_ACP_PROCESSING_DONE";
+        case NT::NOTIF_INFO_CDI_PROCESSING_DONE: return "INFO_CDI_PROCESSING_DONE";
+        case NT::NOTIF_INFO_ICP_AUTH_SUCCESS: return "INFO_ICP_AUTH_SUCCESS";
+        case NT::NOTIF_WARN_ICP_FRAME_DROP: return "WARN_ICP_FRAME_DROP";
+        case NT::NOTIF_WARN_ICP_FRAME_DISCONTINUITY: return "WARN_ICP_FRAME_DISCONTINUITY";
+        case NT::NOTIF_WARN_ICP_CAPTURE_TIMEOUT: return "WARN_ICP_CAPTURE_TIMEOUT";
+        case NT::NOTIF_ERROR_ICP_BAD_INPUT_STREAM: return "ERROR_ICP_BAD_INPUT_STREAM";
+        case NT::NOTIF_ERROR_ICP_CAPTURE_FAILURE: return "ERROR_ICP_CAPTURE_FAILURE";
+        case NT::NOTIF_ERROR_ICP_EMB_DATA_PARSE_FAILURE: return "ERROR_ICP_EMB_DATA_PARSE_FAILURE";
+        case NT::NOTIF_ERROR_ISP_PROCESSING_FAILURE: return "ERROR_ISP_PROCESSING_FAILURE";
+        case NT::NOTIF_ERROR_ACP_PROCESSING_FAILURE: return "ERROR_ACP_PROCESSING_FAILURE";
+        case NT::NOTIF_ERROR_CDI_SET_SENSOR_CTRL_FAILURE: return "ERROR_CDI_SET_SENSOR_CTRL_FAILURE";
+        case NT::NOTIF_ERROR_DESERIALIZER_FAILURE: return "ERROR_DESERIALIZER_FAILURE";
+        case NT::NOTIF_ERROR_SERIALIZER_FAILURE: return "ERROR_SERIALIZER_FAILURE";
+        case NT::NOTIF_ERROR_SENSOR_FAILURE: return "ERROR_SENSOR_FAILURE";
+        case NT::NOTIF_ERROR_ISP_PROCESSING_FAILURE_RECOVERABLE: return "ERROR_ISP_PROCESSING_FAILURE_RECOVERABLE";
+        case NT::NOTIF_ERROR_ICP_AUTH_FAILURE: return "ERROR_ICP_AUTH_FAILURE";
+        case NT::NOTIF_ERROR_ICP_AUTH_OUT_OF_ORDER: return "ERROR_ICP_AUTH_OUT_OF_ORDER";
+        case NT::NOTIF_ERROR_INTR_LOCALIZATION_FAILURE: return "ERROR_INTR_LOCALIZATION_FAILURE";
+        case NT::NOTIF_ERROR_INTR_LOCALIZATION_TIMEOUT: return "ERROR_INTR_LOCALIZATION_TIMEOUT";
+        case NT::NOTIF_ERROR_INTERNAL_FAILURE: return "ERROR_INTERNAL_FAILURE";
     }
     return "UNKNOWN";
 }
@@ -754,12 +790,19 @@ public:
         // CDevBlkDriverLibs::FindFirstLibPath + LoadDriversLibraries,并把
         // camera-module 库错当 deser 驱动加载,最终 BAD_ARGUMENT。queues 里的
         // 通知指针全部留 nullptr(我们暂时不需要 devblk 事件)。
-        NvSIPLDeviceBlockQueues dbQueues{};
-        sts = camera_->SetPlatformCfg(cfgForSet, dbQueues);
+        // dbQueues 是出参:SetPlatformCfg 回填每块 devblk 的通知队列(deser /
+        // serializer / sensor 失败都从这里上报)。必须留成员,不能留局部 ——
+        // 排空线程在 Init 之后要用这些指针。
+        sts = camera_->SetPlatformCfg(cfgForSet, dbQueues_);
         if (sts != NVSIPL_STATUS_OK) {
             std::cerr << "hal_cam: SetPlatformCfg failed: " << StatusName(sts)
                   << "\n";
             return false;
+        }
+        for (uint32_t b = 0; b < MAX_DEVICEBLOCKS_PER_PLATFORM; ++b) {
+            if (dbQueues_.notificationQueue[b]) {
+                notifQs_.push_back(dbQueues_.notificationQueue[b]);
+            }
         }
         // NvSci 模块与 CPU wait context 全平台共享。
         if (NvSciBufModuleOpen(&bufModule_) != NvSciError_Success ||
@@ -842,6 +885,12 @@ public:
                 // (它请求的是 captureOutputRequested)。哪条非空与请求一致。
                 allCompletionQs_.push_back(hasIsp ? queues.isp0CompletionQueue
                                                   : queues.captureCompletionQueue);
+                // 这条 pipeline 的事件队列(ICP/ISP/auto-control 的处理结果与
+                // 错误)。同样必须留着并排空 —— 厂商正是靠它打印出
+                // NOTIF_ERROR_* 的。
+                if (queues.notificationQueue) {
+                    notifQs_.push_back(queues.notificationQueue);
+                }
                 ++sensorIdx;
             }
             // 跳过本 block 内未用的 module 槽位(MAX_CAMERAMODULES_PER_BLOCK=4):
@@ -1026,7 +1075,57 @@ public:
             return false;
         }
         inited_ = true;
+        StartNotifThread();
         return true;
+    }
+
+    // 排空通知队列。INvSIPLNotificationQueue::Get 的 @pre 是"Init 之后、Deinit
+    // 之前",所以线程在 Init 成功后启动、Deinit 前停掉(见 SourceStopped)。
+    // 只做日志:队列里的事件不影响取帧路径,但不排空会让 SIPL 生产端阻塞,
+    // 且我们会对错误完全失明。
+    void StartNotifThread() {
+        if (notifQs_.empty() || notifRunning_.load()) return;
+        notifRunning_.store(true);
+        notifThread_ = std::thread([this]() {
+            while (notifRunning_.load()) {
+                bool got = false;
+                for (auto* q : notifQs_) {
+                    NvSIPLPipelineNotifier::NotificationData d{};
+                    // 短超时轮询:单线程轮转多个队列,长超时会拖慢停止响应。
+                    SIPLStatus sts = q->Get(d, 100 * 1000);
+                    if (sts != NVSIPL_STATUS_OK) continue;
+                    got = true;
+                    // WARN 级事件在无 sensor 时每帧都会来(实测 90s 内 409 条
+                    // ICP_CAPTURE_TIMEOUT),全打会把日志刷满并淹没错误行。按
+                    // (类型, pipeline) 计数:首条 + 每 50 条打一次。
+                    const uint32_t key =
+                        (static_cast<uint32_t>(d.eNotifType) << 16) | d.uIndex;
+                    const uint32_t n = ++notifCounts_[key];
+                    const bool isErr = static_cast<uint16_t>(d.eNotifType) >= 200;
+                    if (!isErr && n != 1 && n % 50 != 0) continue;
+                    std::cerr << "hal_cam: notif " << NotifName(d.eNotifType)
+                              << " pipeline=" << d.uIndex
+                              << " linkMask=0x" << std::hex
+                              << static_cast<int>(d.uLinkMask) << std::dec;
+                    if (isErr) {
+                        std::cerr << " intrCode="
+                                  << static_cast<int>(d.intrCode)
+                                  << " intrData=" << d.intrData;
+                    }
+                    if (n > 1) std::cerr << " (x" << n << ")";
+                    std::cerr << "\n";
+                }
+                if (!got) std::this_thread::sleep_for(
+                    std::chrono::milliseconds(20));
+            }
+        });
+    }
+
+    void StopNotifThread() {
+        if (!notifRunning_.load()) return;
+        notifRunning_.store(false);
+        if (notifThread_.joinable()) notifThread_.join();
+        notifQs_.clear();
     }
 
     // 首个源 Start 时触发,只执行一次。
@@ -1053,6 +1152,8 @@ public:
     void SourceStopped() {
         if (activeSources_ > 0) --activeSources_;
         if (activeSources_ != 0) return;
+        // 通知队列的可用区间是 Init..Deinit,先停线程再 Stop/Deinit。
+        StopNotifThread();
         if (started_) {
             camera_->Stop();
             started_ = false;
@@ -1080,6 +1181,14 @@ private:
     NvSciSyncModule syncModule_ = nullptr;
     NvSciSyncCpuWaitContext cpuWaitCtx_ = nullptr;
     PlatformCfg config_{};
+    // SetPlatformCfg 回填的 devblk 通知队列 + 各 pipeline 的事件队列,统一存这里
+    // 交给排空线程消费(见 StartNotifThread)。
+    NvSIPLDeviceBlockQueues dbQueues_{};
+    std::vector<INvSIPLNotificationQueue*> notifQs_;
+    std::thread notifThread_;
+    std::atomic<bool> notifRunning_{false};
+    // (事件类型, pipeline) → 已见次数,用于抑制 WARN 刷屏(见 StartNotifThread)。
+    std::map<uint32_t, uint32_t> notifCounts_;
     std::atomic<int> activeSources_{0};
     std::atomic<bool> inited_{false};
     std::atomic<bool> started_{false};
