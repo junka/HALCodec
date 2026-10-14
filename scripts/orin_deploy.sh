@@ -8,7 +8,10 @@
 #
 # The board resolves libnvscibuf.so.1 / libnvscisync.so.1 from /usr/lib at
 # runtime; run with LD_LIBRARY_PATH=$PWD so the freshly deployed core lib and
-# project boost win over any system copy.
+# project boost win over any system copy. For the SIPL camera path use the
+# deployed scripts/orin_run_cam.sh instead: the nvmedia backend needs two SDK
+# libs that $PWD alone does not provide, and it stages only those two so the
+# SDK's libnvscibuf cannot shadow the system one.
 set -euo pipefail
 
 root=$(cd "$(dirname "$0")/.." && pwd)
@@ -40,4 +43,10 @@ files=(
     "$build/app/codecinfo"
 )
 scp -q "${files[@]}" "$remote:$destdir/"
+
+# The camera run script carries the library-path recipe (which sdk_libs must NOT
+# shadow, and which two SDK libs must) — it lives on the board so a run is
+# reproducible without ad-hoc /tmp state. See its header for the reasoning.
+scp -q "$root/scripts/orin_run_cam.sh" "$remote:$destdir/"
+
 echo "deployed to $remote:$destdir/"
