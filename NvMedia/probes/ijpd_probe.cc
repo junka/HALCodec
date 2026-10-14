@@ -14,7 +14,7 @@
 //       -L/opt/gwm/nv_sdk/thoru/thoru-aarch64/drive-linux/lib-target \
 //       -lnvmedia_ijpd_sci -lnvvideo -lnvscibuf -lnvscisync \
 //       -lnvrm_surface -lnvos -lnvsocsys -ldl
-// Run on nv118:
+// Run on orin:
 //   LD_LIBRARY_PATH=$HOME/sdk_libs /tmp/ijpd_probe input.jpg
 #include <cstdint>
 #include <cstdio>

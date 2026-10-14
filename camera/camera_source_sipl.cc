@@ -8,7 +8,8 @@
 //
 // 生命周期顺序(约束沿袭 self-contained 的 SIPL API):
 //   Open()   → SetPipelineCfg + 解析分辨率(必须全部 Open 完才能 Init)
-//   Prepare()→ 平台 InitOnce 之后:BuildCombinedAttr + pool 分配 + RegisterImages + EOF sync
+//   AllocatePools()→ 平台 InitOnce 之前:GetImageAttributes + ICP/ISP0 NvSciBufObj 池
+//   Prepare()→ 平台 InitOnce 之后:RegisterImages + RegisterNvSciSyncObj + EOF sync
 //   Start()  → 首个源触发平台级 camera->Start()
 //   Stop()   → 释放本源的 pool/eof/combinedAttr;最后一个源触发 camera->Stop/Deinit + 模块关闭
 //
@@ -18,8 +19,12 @@
 #include "camera_source_factory.h"
 
 #include <atomic>
+#include <cctype>
 #include <cstdint>
+#include <cstdio>
+#include <cstdlib>
 #include <iostream>
+#include <map>
 #include <memory>
 #include <sstream>
 #include <string>
@@ -61,6 +66,60 @@ static const char* StatusName(SIPLStatus s) {
 }
 
 namespace {
+
+// 读回 reconciled attr list 的实际内容并打印 —— RegisterImages 只在 SIPL 内部
+// 校验,失败时不给任何 NvSciBuf 级线索,只能由我们把 SIPL 最终接受的
+// surface 描述打出来对照。
+// @attention 对 reconciled attr list 必须用 value=nullptr/size=0 先取库内部指针
+// 再解引用(厂商 PrintISPOutputFormat 就是这么做的);传自己的栈缓冲会
+// BadParameter 且值不写回,看上去全是 0。
+// 诊断开关:设 HALCODEC_SIPL_DUMP_ATTR=1 才打印 attr list(默认关闭;
+// 排查 NvSciBuf reconcile / 引擎权限问题时打开)。
+bool DumpAttrsEnabled() {
+    static const bool on = [] {
+        const char* e = std::getenv("HALCODEC_SIPL_DUMP_ATTR");
+        return e && *e && *e != '0';
+    }();
+    return on;
+}
+
+void DumpBufAttrList(const char* tag, NvSciBufAttrList list) {
+    if (!list) { std::cerr << "  [" << tag << "] (null attr list)\n"; return; }
+    constexpr size_t kMax = 12;
+    NvSciBufAttrKey keyIds[kMax] = {
+        NvSciBufImageAttrKey_PlaneCount,
+        NvSciBufImageAttrKey_Layout,
+        NvSciBufImageAttrKey_SurfType,
+        NvSciBufImageAttrKey_SurfBPC,
+        NvSciBufImageAttrKey_SurfMemLayout,
+        NvSciBufImageAttrKey_PlaneColorFormat,
+        NvSciBufImageAttrKey_PlaneColorStd,
+        NvSciBufImageAttrKey_PlaneWidth,
+        NvSciBufImageAttrKey_PlaneHeight,
+        NvSciBufImageAttrKey_PlanePitch,
+    };
+    constexpr size_t kn = 10;
+    NvSciBufAttrKeyValuePair kv[kMax] = {};
+    for (size_t i = 0; i < kn; ++i) {
+        kv[i].key = keyIds[i];
+        kv[i].value = nullptr;
+        kv[i].len = 0;
+    }
+    NvSciError err = NvSciBufAttrListGetAttrs(list, kv, kn);
+    std::cout << "  [" << tag << "] getAttrs=" << static_cast<int>(err);
+    for (size_t i = 0; i < kn; ++i) {
+        if (!kv[i].value || kv[i].len == 0) continue;
+        // value 指向库内部存储,不归调用方释放。数组 key 只打印首元素 + 总字节数。
+        const uint8_t* p = static_cast<const uint8_t*>(kv[i].value);
+        uint32_t v = 0;
+        for (size_t b = 0; b < kv[i].len && b < 4; ++b) {
+            v |= static_cast<uint32_t>(p[b]) << (8 * b);
+        }
+        std::cout << " " << kv[i].key << "=" << v
+                  << "(n" << kv[i].len << ")";
+    }
+    std::cout << "\n";
+}
 
 // Fill an NvSciBuf attr list for an 8-bit NV12 (semi-planar YUV 4:2:0) surface
 // of the given dimensions (从 hal_camera 平移)。BlockLinear, 256-byte base
@@ -107,52 +166,110 @@ bool FillNV12SurfaceAttrs(NvSciBufAttrList list, uint32_t w, uint32_t h) {
 // Build a reconciled NvSciBuf attr list combining SIPL (ISP engine, writer) +
 // IEP (encoder engine, reader) + NV12 surface dims(从 hal_camera 平移)。返回
 // nullptr 时调用方不再持有 siplAttr 之外的内存。
+// includeIep=true 时额外把 NvMediaIEP(编码器)的引擎属性揉进同一个 attr list,
+// 让 reconcile 出来的 buffer 同时能被 ISP 写、被 IEP 读(真零拷贝)。此板系统
+// NvMedia 是缩减构建,NvMediaIEPFillNvSciBufAttrList 返回 ERROR(7),这时保持
+// false:与厂商 nvsipl_camera 一致,只声明 SIPL 侧属性(它压根不碰 IEP)。
 NvSciBufAttrList BuildCombinedAttrList(NvSciBufModule mod,
                                        uint32_t sensorIndex,
                                        INvSIPLCamera* camera,
-                                       uint32_t w, uint32_t h) {
-    NvSciBufAttrList siplAttr = nullptr, iepAttr = nullptr,
+                                       INvSIPLClient::ConsumerDesc::OutputType outType,
+                                       uint32_t w, uint32_t h,
+                                       bool includeIep = false) {
+    NvSciBufAttrList siplAttr = nullptr,
                      reconciled = nullptr, conflict = nullptr;
     if (NvSciBufAttrListCreate(mod, &siplAttr) != NvSciError_Success || !siplAttr) {
         return nullptr;
     }
+    // 必须在 GetImageAttributes 之前把 Types/RequiredPerm 填好 —— SIPL 只填"引擎
+    // 兼容性"那几个 key(PeerHwEngine/PlatformName/面格式),不会替你声明这是一块
+    // Image buffer,也不会给权限。缺了它们,reconcile 出来的 attr 不足以让 SIPL 后续
+    // 用它注册(ICP RegisterImages 返回 ERROR)。厂商 CaptureFillAttributesAllocateSciBuf
+    // 对 ICP 也是这么做的(Types=Image + RequiredPerm=ReadWrite,再 GetImageAttributes)。
+    // @attention 只填这两个通用 key;ICP 的"面类型"必须留给 SIPL 决定,不能在
+    // GetImageAttributes 之前预填(预填会被判为不支持的 surface type)。
+    {
+        NvSciBufType bufType = NvSciBufType_Image;
+        NvSciBufAttrValAccessPerm accessPerm = NvSciBufAccessPerm_ReadWrite;
+        NvSciBufAttrKeyValuePair baseKv[] = {
+            {NvSciBufGeneralAttrKey_Types, &bufType, sizeof(bufType)},
+            {NvSciBufGeneralAttrKey_RequiredPerm, &accessPerm, sizeof(accessPerm)},
+        };
+        // ICP 只填 RequiredPerm,不填 Types —— 与厂商 NvSci 路径
+        // CNvSIPLMasterNvSci::RegisterSource 一致(unreconciled list 只有
+        // RequiredPerm=ReadWrite,GetImageAttributes 自己会把 Types=Image 加进去)。
+        // 预填 Types 后 reconcile 出来的 ICP attr 格式看着对(PlaneCount=1/
+        // PitchLinear/Bayer),但 SIPL 的 ICP 注册校验仍返回 ERROR。ISP0 保持
+        // Types+RequiredPerm(厂商非 NvSci 路径就这么建,且已能过)。
+        const uint32_t baseKvCount =
+            (outType == INvSIPLClient::ConsumerDesc::OutputType::ICP)
+                ? 1u
+                : static_cast<uint32_t>(sizeof(baseKv) / sizeof(baseKv[0]));
+        if (NvSciBufAttrListSetAttrs(siplAttr, baseKv, baseKvCount)
+                != NvSciError_Success) {
+            std::cerr << "hal_cam: NvSciBufAttrListSetAttrs(Types/Perm) failed\n";
+            NvSciBufAttrListFree(siplAttr);
+            return nullptr;
+        }
+    }
     if (camera->GetImageAttributes(
             sensorIndex,
-            INvSIPLClient::ConsumerDesc::OutputType::ISP0,
+            outType,
             siplAttr) != NVSIPL_STATUS_OK) {
         std::cerr << "hal_cam: SIPL GetImageAttributes failed for sensor "
-                  << sensorIndex << "\n";
+                  << sensorIndex << " (outType "
+                  << static_cast<int>(outType) << ")\n";
         NvSciBufAttrListFree(siplAttr);
         return nullptr;
+    }
+    // 诊断:SIPL 自己往 list 里塞了什么(引擎兼容性 key)。这是 reconcile 的输入,
+    // 与 reconcile 后的结果对比能看出哪一步丢了信息。
+    if (DumpAttrsEnabled()) {
+        DumpBufAttrList(outType == INvSIPLClient::ConsumerDesc::OutputType::ICP
+                            ? "ICP attr(unrecon)" : "ISP0 attr(unrecon)", siplAttr);
     }
     // NvMediaIEPFillNvSciBufAttrList 的 @pre 是 NvMediaIEPGetVersion() —— 不先
     // 调它,Fill 会返回 INVALID_STATE。这里只取版本号,触发 IEP 子系统的初始化。
-    NvMediaVersion iepVer{};
-    if (NvMediaIEPGetVersion(&iepVer) != NVMEDIA_STATUS_OK) {
-        std::cerr << "hal_cam: NvMediaIEPGetVersion failed\n";
-        NvSciBufAttrListFree(siplAttr);
-        return nullptr;
+    // 仅对 ISP0(NV12 编码器输入)做 IEP reconcile;ICP 是 raw bayer,不喂编码器。
+    const bool isIsp0 = (outType == INvSIPLClient::ConsumerDesc::OutputType::ISP0);
+    bool iepReady = false;
+    if (isIsp0 && includeIep) {
+        NvMediaVersion iepVer{};
+        if (NvMediaIEPGetVersion(&iepVer) != NVMEDIA_STATUS_OK) {
+            std::cerr << "hal_cam: NvMediaIEPGetVersion failed"
+                      << " (zero-copy SIPL->IEP disabled, will need device copy)\n";
+        } else {
+            NvMediaStatus iepSt = NvMediaIEPFillNvSciBufAttrList(
+                NVMEDIA_ENCODER_INSTANCE_0, siplAttr);
+            if (iepSt != NVMEDIA_STATUS_OK) {
+                // orin 系统 NvMedia 是缩减构建,MSENC 引擎属性可能不可用 -> ERROR(7)。
+                // 不致命:退化为纯 SIPL attr pool(SIPL 仍能出帧,但下游 nvmediaenc
+                // 不能零拷贝读,需要 device->device 拷贝)。
+                std::cerr << "hal_cam: NvMediaIEPFillNvSciBufAttrList failed: "
+                          << static_cast<int>(iepSt)
+                          << " (zero-copy SIPL->IEP disabled, will need device copy)\n";
+            } else {
+                iepReady = true;
+            }
+        }
     }
-    NvMediaStatus iepSt = NvMediaIEPFillNvSciBufAttrList(
-        NVMEDIA_ENCODER_INSTANCE_0, siplAttr);
-    if (iepSt != NVMEDIA_STATUS_OK) {
-        std::cerr << "hal_cam: NvMediaIEPFillNvSciBufAttrList failed: "
-                  << static_cast<int>(iepSt) << "\n";
-        NvSciBufAttrListFree(siplAttr);
-        return nullptr;
-    }
-    if (!FillNV12SurfaceAttrs(siplAttr, w, h)) {
-        std::cerr << "hal_cam: FillNV12SurfaceAttrs failed\n";
-        NvSciBufAttrListFree(siplAttr);
-        return nullptr;
+    (void)iepReady;  // 保留:零拷贝是否可用,后续编码器侧用它决定拷贝路径
+    // IEP Fill 失败(系统缩减构建)时退化为纯 SIPL attr:GetImageAttributes 已经
+    // 把 ISP0 输出的格式/维度/引擎权限全填好了,不再覆盖 FillNV12SurfaceAttrs
+    // (那会与 SIPL 的 BlockLinear/色彩标准冲突 -> SetAttrs 失败)。只有 IEP
+    // 成功时才补 NV12 维度(因为那是为了让 IEP 也能读)。
+    if (iepReady) {
+        if (!FillNV12SurfaceAttrs(siplAttr, w, h)) {
+            std::cerr << "hal_cam: FillNV12SurfaceAttrs failed\n";
+            NvSciBufAttrListFree(siplAttr);
+            return nullptr;
+        }
     }
     NvSciBufAttrList arr[1] = {siplAttr};
     if (NvSciBufAttrListReconcile(arr, 1, &reconciled, &conflict)
             != NvSciError_Success || !reconciled) {
-        std::cerr << "hal_cam: SIPL+IEP attr reconcile failed for sensor "
-                  << sensorIndex
-                  << " (SIPL and IEP engine constraints conflict — zero-copy "
-                  << "needs a device->device copy fallback)\n";
+        std::cerr << "hal_cam: SIPL attr reconcile failed for sensor "
+                  << sensorIndex << "\n";
         NvSciBufAttrListFree(siplAttr);
         NvSciBufAttrListFree(conflict);
         return nullptr;
@@ -162,25 +279,273 @@ NvSciBufAttrList BuildCombinedAttrList(NvSciBufModule mod,
     return reconciled;
 }
 
+// sensor 索引编码(与 ConfigureAllPipelines 一致):sensorIndex = blockIndex *
+// MAX_CAMERAMODULES_PER_BLOCK + moduleIndex,空 module 槽位不存在。sensor 3
+// (block0 module3)即此类 —— 按物理槽位定位,不能按"出现的第几个 module"稠密计数。
+bool FindModule(const PlatformCfg& cfg, uint32_t sensorIndex,
+                const CameraModuleInfo*& out) {
+    const uint32_t b = sensorIndex / MAX_CAMERAMODULES_PER_BLOCK;
+    const uint32_t m = sensorIndex % MAX_CAMERAMODULES_PER_BLOCK;
+    if (b >= cfg.numDeviceBlocks) return false;
+    const DeviceBlockInfo& db = cfg.deviceBlockList[b];
+    if (m >= db.numCameraModules) return false;
+    out = &db.cameraModuleInfoList[m];
+    return true;
+}
+
+// 从平台配置解析 sensor 的 module 名(CameraModuleInfo::name,例如
+// "GWM_IMX728_F030_24BIT_RGGB")。ISP0 auto-control 插件要按这个名字找 NITO
+// 标定文件。
+bool ResolveSensorModuleName(const PlatformCfg& cfg, uint32_t sensorIndex,
+                             std::string& name) {
+    const CameraModuleInfo* cm = nullptr;
+    if (!FindModule(cfg, sensorIndex, cm)) return false;
+    name = cm->name;
+    return !name.empty();
+}
+
+// 按厂商 CUtils.cpp LoadNITOFile 的规则找标定文件:
+//   <dir><moduleName>.nito → <dir><小写 moduleName>.nito → <dir>default.nito
+// dir 取 HALCODEC_SIPL_NITO_DIR 环境变量,默认 /opt/nvidia/nvmedia/nit
+// (板子上 GWM_* / OX08D10_* 的 .nito 都只在这里;/usr/share/camera 只有
+// 其它模组名和 template.nito)。文件缺失不是致命错误:插件仍可注册,只是 ISP
+// 不做 AEC/AWB 标定校正 —— 与厂商"找不到就 LOG_ERR 返回 BAD_ARGUMENT"不同,
+// 这里降级为警告以便无标定也能抓帧。
+bool LoadNitoBlob(const std::string& moduleName, std::vector<uint8_t>& blob) {
+    const char* envDir = std::getenv("HALCODEC_SIPL_NITO_DIR");
+    std::string dir = (envDir && *envDir) ? envDir : "/opt/nvidia/nvmedia/nit/";
+    if (!dir.empty() && dir.back() != '/') dir.push_back('/');
+
+    std::string lower = moduleName;
+    for (char& c : lower) c = static_cast<char>(std::tolower(static_cast<unsigned char>(c)));
+
+    const std::string cands[3] = {
+        dir + moduleName + ".nito", dir + lower + ".nito", dir + "default.nito",
+    };
+    for (const std::string& path : cands) {
+        FILE* fp = std::fopen(path.c_str(), "rb");
+        if (!fp) continue;
+        std::fseek(fp, 0, SEEK_END);
+        long fsize = std::ftell(fp);
+        std::rewind(fp);
+        if (fsize <= 0) { std::fclose(fp); continue; }
+        blob.resize(static_cast<size_t>(fsize));
+        size_t got = std::fread(blob.data(), 1, blob.size(), fp);
+        std::fclose(fp);
+        if (got != blob.size()) { blob.clear(); continue; }
+        std::cout << "hal_cam: NITO '" << path << "' loaded ("
+                  << blob.size() << " bytes) for module '" << moduleName << "'\n";
+        return true;
+    }
+    std::cerr << "hal_cam: no NITO file for module '" << moduleName
+              << "' under '" << dir
+              << "' (ISP auto-control will run uncorrected)\n";
+    return false;
+}
+
+// 为一个 sensor 建 EOF sync object:SIPL 在 ISP0 帧完成时 signal 它。
+//   取 SIPL signaler attr → 与 CPU waiter reconcile → NvSciSyncObjAlloc
+// 这里只"建对象",登记要等 RegisterImages 之后(RegisterNvSciSyncObj 的 @pre)。
+// CPU 侧必须两个 key 一起给(NeedCpuAccess + RequiredPerm=WaitOnly):只写
+// NeedCpuAccess 时与 SIPL 的 signaler attr(SignalOnly)reconcile 会以
+// NotPermitted(65792 = 0x10100)失败 —— 厂商 CNvSIPLMasterNvSci::
+// SetupNvSciSync2DSignalerWaiter 也是两个一起给。我们是 consumer,只 wait。
+bool AllocEofSyncObj(INvSIPLCamera* camera, NvSciSyncModule mod,
+                     uint32_t sensorIndex, NvSciSyncObj& out) {
+    NvSciSyncAttrList siplSyncAttr = nullptr, cpuSyncAttr = nullptr,
+                      sReconciled = nullptr, sConflict = nullptr;
+    auto cleanup = [&]() {
+        if (siplSyncAttr) NvSciSyncAttrListFree(siplSyncAttr);
+        if (cpuSyncAttr) NvSciSyncAttrListFree(cpuSyncAttr);
+        if (sReconciled) NvSciSyncAttrListFree(sReconciled);
+        if (sConflict) NvSciSyncAttrListFree(sConflict);
+    };
+    NvSciSyncAttrListCreate(mod, &siplSyncAttr);
+    NvSciSyncAttrListCreate(mod, &cpuSyncAttr);
+    if (!siplSyncAttr || !cpuSyncAttr) {
+        cleanup();
+        return false;
+    }
+    bool cpuWaiter = true;
+    NvSciSyncAccessPerm cpuPerm = NvSciSyncAccessPerm_WaitOnly;
+    NvSciSyncAttrKeyValuePair cpuKv[] = {
+        {NvSciSyncAttrKey_NeedCpuAccess, &cpuWaiter, sizeof(cpuWaiter)},
+        {NvSciSyncAttrKey_RequiredPerm, &cpuPerm, sizeof(cpuPerm)},
+    };
+    NvSciSyncAttrListSetAttrs(cpuSyncAttr, cpuKv, 2);
+    SIPLStatus fillSts = camera->FillNvSciSyncAttrList(
+        sensorIndex, INvSIPLClient::ConsumerDesc::OutputType::ISP0,
+        siplSyncAttr, NvSiplNvSciSyncClientType::SIPL_SIGNALER);
+    if (fillSts != NVSIPL_STATUS_OK) {
+        std::cerr << "hal_cam: sensor " << sensorIndex
+                  << " FillNvSciSyncAttrList failed: " << StatusName(fillSts) << "\n";
+        cleanup();
+        return false;
+    }
+    NvSciSyncAttrList arr[2] = {siplSyncAttr, cpuSyncAttr};
+    if (NvSciSyncAttrListReconcile(arr, 2, &sReconciled, &sConflict)
+            != NvSciError_Success || !sReconciled) {
+        std::cerr << "hal_cam: sensor " << sensorIndex
+                  << " NvSciSyncAttrListReconcile failed\n";
+        cleanup();
+        return false;
+    }
+    if (NvSciSyncObjAlloc(sReconciled, &out) != NvSciError_Success || !out) {
+        std::cerr << "hal_cam: sensor " << sensorIndex
+                  << " NvSciSyncObjAlloc failed\n";
+        cleanup();
+        return false;
+    }
+    cleanup();
+    return true;
+}
+
+// 为一个 sensor 取 attributes 并分配 pool(厂商 CaptureFillAttributesAllocateSciBuf
+// 的等价物)。@pre 是 SetPipelineCfg 之后、Init 之前(GetImageAttributes 的 @pre
+// 只要求 SetPipelineCfg),并且必须在 RegisterImages 之前完成。
+bool AllocSensorPools(NvSciBufModule mod, INvSIPLCamera* camera,
+                      uint32_t sensorIndex, uint32_t w, uint32_t h, bool wantIsp,
+                      NvSciBufAttrList& icpAttr, std::vector<NvSciBufObj>& icpPool,
+                      NvSciBufAttrList& isp0Attr, std::vector<NvSciBufObj>& isp0Pool) {
+    // ICP pool 取 6(厂商 NUM_CAPTURE_BUFFERS_PER_POOL,合法区间 [3,40]);
+    // ISP0 pool 取 4(厂商 NUM_ISP_BUFFERS_PER_POOL)。
+    constexpr uint32_t kIspPool = 4;
+    constexpr uint32_t kIcpPool = 6;
+    icpAttr = BuildCombinedAttrList(
+        mod, sensorIndex, camera,
+        INvSIPLClient::ConsumerDesc::OutputType::ICP, w, h);
+    if (!icpAttr) {
+        std::cerr << "hal_cam: sensor " << sensorIndex
+                  << " ICP attr list build failed\n";
+        return false;
+    }
+    icpPool.reserve(kIcpPool);
+    for (uint32_t i = 0; i < kIcpPool; ++i) {
+        NvSciBufObj obj = nullptr;
+        if (NvSciBufObjAlloc(icpAttr, &obj) != NvSciError_Success) {
+            std::cerr << "hal_cam: sensor " << sensorIndex
+                      << " ICP NvSciBufObjAlloc " << i << " failed\n";
+            return false;
+        }
+        icpPool.push_back(obj);
+    }
+    if (!wantIsp) {
+        // YUV 直出模组没有 ISP 路径:不建 ISP0 池(也不登记),只登记 ICP。
+        return true;
+    }
+    isp0Attr = BuildCombinedAttrList(
+        mod, sensorIndex, camera,
+        INvSIPLClient::ConsumerDesc::OutputType::ISP0, w, h);
+    if (!isp0Attr) {
+        std::cerr << "hal_cam: sensor " << sensorIndex
+                  << " ISP0 attr list build failed\n";
+        return false;
+    }
+    isp0Pool.reserve(kIspPool);
+    for (uint32_t i = 0; i < kIspPool; ++i) {
+        NvSciBufObj obj = nullptr;
+        if (NvSciBufObjAlloc(isp0Attr, &obj) != NvSciError_Success) {
+            std::cerr << "hal_cam: sensor " << sensorIndex
+                      << " ISP0 NvSciBufObjAlloc " << i << " failed\n";
+            return false;
+        }
+        isp0Pool.push_back(obj);
+    }
+    return true;
+}
+
+// 把一个 sensor 的 pool/attr/sync 登记给 SIPL。顺序严格照厂商:
+//   1. RegisterImages(ICP)        —— @pre:ICP 必须先于 ISP 登记
+//   2. RegisterImages(ISP0)
+//   3. RegisterNvSciSyncObj(ISP0, NVSIPL_EOFSYNCOBJ) —— @pre 是 1、2 已完成
+//   4. RegisterAutoControlPlugin  —— "必须为每个启用了 ISP 输出的 pipeline 调用"
+//      (NvSIPLCamera.hpp:281),@pre 是 RegisterImages 之后、Start 之前
+// 缺任何一步,只要该 pipeline 开了 ISP 输出,Start() 就会返回 INVALID_STATE。
+bool RegisterPipeline(INvSIPLCamera* camera, const PlatformCfg& cfg,
+                      uint32_t sensorIndex, bool registerIcp,
+                      NvSciBufAttrList icpAttr, std::vector<NvSciBufObj>& icpPool,
+                      NvSciBufAttrList isp0Attr, std::vector<NvSciBufObj>& isp0Pool,
+                      NvSciSyncObj eofSyncObj, bool hasIsp) {
+    (void)isp0Attr;
+    if (registerIcp && !icpPool.empty()) {
+        SIPLStatus sts = camera->RegisterImages(
+            sensorIndex, INvSIPLClient::ConsumerDesc::OutputType::ICP, icpPool);
+        if (sts != NVSIPL_STATUS_OK) {
+            std::cerr << "hal_cam: sensor " << sensorIndex
+                      << " ICP RegisterImages failed: " << StatusName(sts) << "\n";
+            return false;
+        }
+    }
+    if (!hasIsp) {
+        // ICP-only pipeline:厂商对这类 pipeline 也只登记 ICP,不做 ISP0
+        // RegisterImages/SyncObj/AutoControl(见 /tmp/vfull.log)。
+        return true;
+    }
+    SIPLStatus sts = camera->RegisterImages(
+        sensorIndex, INvSIPLClient::ConsumerDesc::OutputType::ISP0, isp0Pool);
+    if (sts != NVSIPL_STATUS_OK) {
+        std::cerr << "hal_cam: sensor " << sensorIndex
+                  << " ISP0 RegisterImages failed: " << StatusName(sts) << "\n";
+        return false;
+    }
+    sts = camera->RegisterNvSciSyncObj(
+        sensorIndex, INvSIPLClient::ConsumerDesc::OutputType::ISP0,
+        NVSIPL_EOFSYNCOBJ, eofSyncObj);
+    if (sts != NVSIPL_STATUS_OK) {
+        std::cerr << "hal_cam: sensor " << sensorIndex
+                  << " RegisterNvSciSyncObj failed: " << StatusName(sts) << "\n";
+        return false;
+    }
+    std::string moduleName;
+    std::vector<uint8_t> blob;
+    if (ResolveSensorModuleName(cfg, sensorIndex, moduleName)) {
+        LoadNitoBlob(moduleName, blob);
+    } else {
+        std::cerr << "hal_cam: sensor " << sensorIndex
+                  << " no module name in platform cfg; NITO blob empty\n";
+    }
+    sts = camera->RegisterAutoControlPlugin(sensorIndex, NV_PLUGIN, nullptr, blob);
+    if (sts != NVSIPL_STATUS_OK) {
+        std::cerr << "hal_cam: sensor " << sensorIndex
+                  << " RegisterAutoControlPlugin failed: " << StatusName(sts)
+                  << "\n";
+        return false;
+    }
+    return true;
+}
+
+// sensor 是否走 ISP(RAW Bayer 输入)还是仅 ICP(YUV 直出)。
+// 厂商 nvsipl_camera 在同一平台配置下只对 RAW 模组(IMX728)开 ISP0 输出并注册
+// auto-control;YUV422 模组(ISX031)只请求/登记 ICP —— 因为 ISP 的输入是 RAW,
+// YUV 模组没有 ISP 路径,对它们开 ISP0 会在 RegisterAutoControlPlugin 阶段返回
+// BAD_ARGUMENT(且这些模组在板上没有 .nito 标定文件)。
+bool SensorNeedsIsp(const PlatformCfg& cfg, uint32_t sensorIndex, bool& isRaw) {
+    isRaw = true; // 保守:解析不到就当作 RAW(保持旧行为)
+    const CameraModuleInfo* cm = nullptr;
+    if (!FindModule(cfg, sensorIndex, cm)) return true;
+    switch (cm->sensorInfo.vcInfo.inputFormat) {
+    case NVSIPL_CAP_INPUT_FORMAT_TYPE_YUV422:
+    case NVSIPL_CAP_INPUT_FORMAT_TYPE_YUV422_10:
+    case NVSIPL_CAP_INPUT_FORMAT_TYPE_YUV444:
+    case NVSIPL_CAP_INPUT_FORMAT_TYPE_RGB888:
+        isRaw = false;
+        return false;
+    default:
+        isRaw = true;
+        return true;
+    }
+}
+
 // 从平台配置解析 sensor 的分辨率(从 hal_camera 平移)。
 bool ResolveSensorResolution(const PlatformCfg& cfg, uint32_t sensorIndex,
                              uint32_t& w, uint32_t& h) {
     w = 1920; h = 1080; // fallback if the config doesn't expose it
-    if (cfg.numDeviceBlocks == 0) return false;
-    uint32_t seen = 0;
-    for (uint32_t b = 0; b < cfg.numDeviceBlocks; ++b) {
-        auto& db = cfg.deviceBlockList[b];
-        for (uint32_t m = 0; m < db.numCameraModules; ++m) {
-            if (seen == sensorIndex) {
-                auto& si = db.cameraModuleInfoList[m].sensorInfo;
-                w = si.vcInfo.resolution.width;
-                h = si.vcInfo.resolution.height;
-                return true;
-            }
-            ++seen;
-        }
-    }
-    return false;
+    const CameraModuleInfo* cm = nullptr;
+    if (!FindModule(cfg, sensorIndex, cm)) return false;
+    const SensorInfo& si = cm->sensorInfo;
+    w = si.vcInfo.resolution.width;
+    h = si.vcInfo.resolution.height;
+    return true;
 }
 
 // 平台级共享状态:一个 INvSIPLCamera 实例 + NvSci 模块 + Init/Start/Stop 只执行
@@ -197,6 +562,16 @@ public:
         NvSIPLGetVersion(ver);
         std::cout << "hal_cam: NvSIPL version " << ver.uMajor << "."
                   << ver.uMinor << "." << ver.uPatch << "\n";
+
+        // 记录"对外要消费哪些 sensor":ConfigureAllPipelines() 只对这几个开 ISP0
+        // 输出。SetPipelineCfg 仍要对全部 module 调(见其注释),但 ISP 输出一旦
+        // 开启,SIPL 就要求 Start() 前把该 pipeline 的 RegisterImages +
+        // RegisterNvSciSyncObj + RegisterAutoControlPlugin 都做完 —— 只开不注册会
+        // 让 Start() 返回 INVALID_STATE(全 mask 下 11 开 1 注册即此情形)。
+        consumeBase_ = static_cast<uint32_t>(cli.getSensorIndex() < 0
+                                             ? 0 : cli.getSensorIndex());
+        int nc = cli.getNumCameras();
+        consumeCount_ = static_cast<uint32_t>(nc < 1 ? 1 : nc);
 
         queryTrace_ = INvSIPLQueryTrace::GetInstance();
         sipTrace_ = INvSIPLTrace::GetInstance();
@@ -363,7 +738,9 @@ public:
                           << " i2cAddr=0x" << std::hex
                           << static_cast<int>(si.i2cAddress) << std::dec
                           << " resolution=" << si.vcInfo.resolution.width << "x"
-                          << si.vcInfo.resolution.height << "\n";
+                          << si.vcInfo.resolution.height
+                          << " inputFormat=" << static_cast<int>(si.vcInfo.inputFormat)
+                          << " cfa=" << static_cast<int>(si.vcInfo.cfa) << "\n";
             }
         }
 
@@ -408,6 +785,24 @@ public:
     // BAD_ARGUMENT)。allCompletionQs_ 按"真实 module 出现顺序"存,下标是稠密的;
     // completionQ() 用稠密下标取回。
     std::vector<uint32_t> allSensorIndices_;
+    // sensorIndex → 该 pipeline 是否走 ISP(ConfigureAllPipelines 里按 inputFormat
+    // 判定;AllocateAllPools/PrepareAllPipelines 按它决定要不要建/登记 ISP0 池)。
+    std::map<uint32_t, bool> sensorHasIsp_;
+    // 注意区分两件事:
+    //  (a) 是否向 SIPL **请求** ICP(capture)输出 → pipelineCfg.captureOutputRequested;
+    //  (b) 是否**登记** ICP buffer 池 → source.Prepare 里的 RegisterImages(ICP)。
+    // 厂商 nvsipl_camera 默认 bDisableRaw=true → (a)=false(日志首行
+    // "Raw output: disabled"),但 RegisterBuffers 里 registerWithSipl[0] 写死 true
+    // → (b) 照样登记 6 块 ICP buffer(ICP buffer 是 ISP 的输入,必须登记)。
+    // 这块板子没有 /dev/nvhost-vi*:只要 (a)=true,ICP RegisterImages 就报 ERROR;
+    // 与厂商一致地把 (a) 关掉后即可通过。
+    bool captureRequested_ = false;   // (a) 恒为 false
+    bool registerIcp_ = true;         // (b) 恒为 true
+    bool captureEnabled() const { return registerIcp_; }
+    // 对外消费的 sensor 区间(稠密序号 [consumeBase_, consumeBase_+consumeCount_)),
+    // 来自 --sensor-index / --num-cameras;在 Init() 里从 CLI 读入。
+    uint32_t consumeBase_ = 0;
+    uint32_t consumeCount_ = 1;
     bool ConfigureAllPipelines() {
         allCompletionQs_.clear();
         allSensorIndices_.clear();
@@ -416,7 +811,22 @@ public:
         for (uint32_t b = 0; b < cfg.numDeviceBlocks; ++b) {
             for (uint32_t m = 0; m < cfg.deviceBlockList[b].numCameraModules; ++m) {
                 NvSIPLPipelineConfiguration pipeCfg{};
-                pipeCfg.isp0OutputRequested = true;
+                // 按输入格式决定这条 pipeline 走 ISP 还是只走 ICP —— 与厂商
+                // nvsipl_camera 在同一平台配置下的行为一致(见 /tmp/vfull.log):
+                // 只有 RAW 模组(IMX728)请求 ISP0 输出并注册 auto-control;YUV422
+                // 模组(ISX031)只请求 ICP。ISP 的输入是 RAW Bayer,YUV 模组没有
+                // ISP 路径;对它们开 ISP0 会让 SetPipelineCfg 的后续登记链在
+                // RegisterAutoControlPlugin 处返回 BAD_ARGUMENT。
+                bool isRaw = true;
+                SensorNeedsIsp(cfg, sensorIdx, isRaw);
+                const bool hasIsp = isRaw;
+                // (a) ICP(capture)输出请求:RAW pipeline 沿用全局策略(默认不请求,
+                // ICP 只作为 ISP 输入登记);YUV pipeline 只能靠 ICP 出数据,必须请求。
+                pipeCfg.captureOutputRequested = hasIsp ? captureRequested_ : true;
+                // isp0 只对有 ISP 路径的 pipeline 开。SetPipelineCfg 对"既无 capture
+                // 又无 ISP 输出"的 pipeline 返回 BAD_ARGUMENT,所以两条路必须二选一
+                // (非此即彼,不存在两者都为 false 的 pipeline)。
+                pipeCfg.isp0OutputRequested = hasIsp;
                 NvSIPLPipelineQueues queues{};
                 SIPLStatus sts = camera_->SetPipelineCfg(
                     sensorIdx, pipeCfg, queues);
@@ -427,21 +837,184 @@ public:
                     return false;
                 }
                 allSensorIndices_.push_back(sensorIdx);
-                allCompletionQs_.push_back(queues.isp0CompletionQueue);
+                sensorHasIsp_[sensorIdx] = hasIsp;
+                // ISP pipeline 取 ISP0 队列;ICP-only pipeline 的帧在 capture 队列上
+                // (它请求的是 captureOutputRequested)。哪条非空与请求一致。
+                allCompletionQs_.push_back(hasIsp ? queues.isp0CompletionQueue
+                                                  : queues.captureCompletionQueue);
                 ++sensorIdx;
             }
             // 跳过本 block 内未用的 module 槽位(MAX_CAMERAMODULES_PER_BLOCK=4):
             // sensor 索引按物理槽位编号,不是稠密编号。
             sensorIdx = (b + 1) * MAX_CAMERAMODULES_PER_BLOCK;
         }
+        uint32_t nIsp = 0;
+        for (auto& kv : sensorHasIsp_) { if (kv.second) ++nIsp; }
         std::cout << "hal_cam: configured " << allCompletionQs_.size()
-                  << " sensor pipeline(s)\n";
+                  << " sensor pipeline(s), " << nIsp << " with ISP0, "
+                  << (allCompletionQs_.size() - nIsp) << " ICP-only" << std::endl;
         return true;
     }
 
     INvSIPLFrameCompletionQueue* completionQ(uint32_t denseIdx) const {
         return denseIdx < allCompletionQs_.size()
             ? allCompletionQs_[denseIdx] : nullptr;
+    }
+
+    // 单个 pipeline(一个 sensor)的登记状态与它自己的 buffer 池。之所以平台级
+    // 持有而不是 source 级:全 mask 下 Start() 要求**每一条** ISP 输出启用的
+    // pipeline 都注册完,而这些 sensor 并没有对应的 SIPLCameraSource。
+    struct PipelineRes {
+        uint32_t sensorIndex = 0;
+        // 该 pipeline 是否有 ISP 路径(RAW Bayer 输入)。false 表示 YUV 直出模组,
+        // 只请求/登记 ICP;对它做 ISP0 登记链会在 RegisterAutoControlPlugin 返回
+        // BAD_ARGUMENT(板上也没有这种模组的 .nito)。见 SensorNeedsIsp()。
+        bool hasIsp = true;
+        uint32_t w = 0;
+        uint32_t h = 0;
+        NvSciBufAttrList icpAttr = nullptr;
+        std::vector<NvSciBufObj> icpPool;
+        NvSciBufAttrList isp0Attr = nullptr;
+        std::vector<NvSciBufObj> isp0Pool;
+        NvSciSyncObj eofSyncObj = nullptr;
+        bool registered = false;
+
+        PipelineRes() = default;
+        // 只可移动:析构负责释放 NvSci 句柄,若让编译器隐式生成拷贝构造,
+        // vector 扩容时"拷贝 + 析构原对象"会把副本仍在引用的句柄释放掉
+        // (实测表现为第二次 push_back 扩容时 abort)。
+        PipelineRes(const PipelineRes&) = delete;
+        PipelineRes& operator=(const PipelineRes&) = delete;
+        PipelineRes(PipelineRes&& o) noexcept { MoveFrom(std::move(o)); }
+        PipelineRes& operator=(PipelineRes&& o) noexcept {
+            if (this != &o) { Release(); MoveFrom(std::move(o)); }
+            return *this;
+        }
+        ~PipelineRes() { Release(); }
+
+    private:
+        void MoveFrom(PipelineRes&& o) {
+            sensorIndex = o.sensorIndex;
+            hasIsp = o.hasIsp;
+            w = o.w; h = o.h;
+            icpAttr = o.icpAttr; icpPool = std::move(o.icpPool);
+            isp0Attr = o.isp0Attr; isp0Pool = std::move(o.isp0Pool);
+            eofSyncObj = o.eofSyncObj;
+            registered = o.registered;
+            o.icpAttr = nullptr; o.isp0Attr = nullptr; o.eofSyncObj = nullptr;
+            o.icpPool.clear(); o.isp0Pool.clear();
+            o.registered = false;
+        }
+        void Release() {
+            for (auto o : icpPool) { if (o) NvSciBufObjFree(o); }
+            for (auto o : isp0Pool) { if (o) NvSciBufObjFree(o); }
+            if (eofSyncObj) NvSciSyncObjFree(eofSyncObj);
+            if (icpAttr) NvSciBufAttrListFree(icpAttr);
+            if (isp0Attr) NvSciBufAttrListFree(isp0Attr);
+            icpPool.clear();
+            isp0Pool.clear();
+            icpAttr = nullptr; isp0Attr = nullptr; eofSyncObj = nullptr;
+        }
+    };
+    std::vector<PipelineRes> allPipelines_;
+
+    PipelineRes* Find(uint32_t sensorIndex) {
+        for (auto& r : allPipelines_) {
+            if (r.sensorIndex == sensorIndex) return &r;
+        }
+        return nullptr;
+    }
+    const PipelineRes* Find(uint32_t sensorIndex) const {
+        for (const auto& r : allPipelines_) {
+            if (r.sensorIndex == sensorIndex) return &r;
+        }
+        return nullptr;
+    }
+
+    // 必须在 Init **之前** 调用,因为 GetImageAttributes 的 @pre 是"SetPipelineCfg
+    // 之后、RegisterImages 之前",且厂商 trace 里全部 GetImageAttributes 都出现在
+    // "Init: Entering" 之前。对平台里**每一个**被 mask 选中的 sensor 都建池。
+    bool AllocateAllPools() {
+        for (uint32_t sensorIdx : allSensorIndices_) {
+            uint32_t w = 0, h = 0;
+            ResolveSensorResolution(config_, sensorIdx, w, h);
+            PipelineRes res;
+            res.sensorIndex = sensorIdx;
+            auto it = sensorHasIsp_.find(sensorIdx);
+            res.hasIsp = (it == sensorHasIsp_.end()) ? true : it->second;
+            if (!AllocSensorPools(bufModule_, camera_.get(), sensorIdx, w, h,
+                                  res.hasIsp,
+                                  res.icpAttr, res.icpPool,
+                                  res.isp0Attr, res.isp0Pool)) {
+                return false;
+            }
+            res.w = w;
+            res.h = h;
+            allPipelines_.push_back(std::move(res));
+        }
+        return true;
+    }
+
+    // 厂商 nvsipl_camera 对"每个 ISP 输出启用的 pipeline"都做
+    //   RegisterImages(ICP) → RegisterImages(ISP0) → RegisterNvSciSyncObj →
+    //   RegisterAutoControlPlugin
+    // Start() 的 @pre 明写这四件事都要在 Start 之前完成(NvSIPLCamera.hpp:625),
+    // 而 SetPipelineCfg 又不允许把某个 pipeline 的输出全关掉(既无 capture 又无
+    // ISP 输出 → BAD_ARGUMENT)。所以全 mask 下只有两条路:要么把**全部** 11 条
+    // pipeline 都注册完(这里),要么用 ApplyMask 把平台收窄到真正要的 sensor。
+    // 我们两条都支持:这里负责前者。
+    bool PrepareAllPipelines() {
+        for (auto& res : allPipelines_) {
+            if (res.hasIsp) {
+                if (!AllocEofSyncObj(camera_.get(), syncModule_, res.sensorIndex,
+                                     res.eofSyncObj)) {
+                    return false;
+                }
+            }
+            if (!RegisterPipeline(camera_.get(), config_, res.sensorIndex,
+                                  registerIcp_, res.icpAttr, res.icpPool,
+                                  res.isp0Attr, res.isp0Pool, res.eofSyncObj,
+                                  res.hasIsp)) {
+                return false;
+            }
+            res.registered = true;
+        }
+        std::cout << "hal_cam: registered " << allPipelines_.size()
+                  << " pipeline(s) with SIPL" << std::endl;
+        return true;
+    }
+
+    // 取某个 sensor 的 pool —— 由 SIPLCameraSource::Prepare 复用,避免为消费的
+    // sensor 重复分配一套 buffer。
+    NvSciBufAttrList icpAttrOf(uint32_t sensorIndex) const {
+        const PipelineRes* r = Find(sensorIndex);
+        return r ? r->icpAttr : nullptr;
+    }
+    std::vector<NvSciBufObj>* icpPoolOf(uint32_t sensorIndex) {
+        PipelineRes* r = Find(sensorIndex);
+        return r ? &r->icpPool : nullptr;
+    }
+    NvSciBufAttrList isp0AttrOf(uint32_t sensorIndex) const {
+        const PipelineRes* r = Find(sensorIndex);
+        return r ? r->isp0Attr : nullptr;
+    }
+    std::vector<NvSciBufObj>* isp0PoolOf(uint32_t sensorIndex) {
+        PipelineRes* r = Find(sensorIndex);
+        return r ? &r->isp0Pool : nullptr;
+    }
+    NvSciSyncObj eofSyncObjOf(uint32_t sensorIndex) const {
+        const PipelineRes* r = Find(sensorIndex);
+        return r ? r->eofSyncObj : nullptr;
+    }
+    bool prepared(uint32_t sensorIndex) const {
+        const PipelineRes* r = Find(sensorIndex);
+        return r && r->registered;
+    }
+    // 该 pipeline 是否走 ISP(见 PipelineRes::hasIsp)。YUV 直出模组为 false,
+    // 它的输出帧在 ICP 队列上、格式是 YUV422 而不是 ISP 的 NV12。
+    bool hasIspOf(uint32_t sensorIndex) const {
+        const PipelineRes* r = Find(sensorIndex);
+        return r ? r->hasIsp : true;
     }
 
     // 必须在所有源的 SetPipelineCfg(Open)完成之后调用;只执行一次。
@@ -459,8 +1032,9 @@ public:
     // 首个源 Start 时触发,只执行一次。
     bool StartStreaming() {
         if (!started_) {
-            if (camera_->Start() != NVSIPL_STATUS_OK) {
-                std::cerr << "hal_cam: SIPL Start failed\n";
+            SIPLStatus sts = camera_->Start();
+            if (sts != NVSIPL_STATUS_OK) {
+                std::cerr << "hal_cam: SIPL Start failed: " << StatusName(sts) << "\n";
                 return false;
             }
             started_ = true;
@@ -520,65 +1094,50 @@ public:
 
     bool Open() override {
         // SetPipelineCfg 已在平台 ConfigureAllPipelines() 里对全部 sensor 统一
-        // 配置完毕(见其注释)。这里只取回本 sensor 的 isp0 完成队列。
+        // 配置完毕(见其注释)。这里只取回本 sensor 的 isp0 完成队列与平台为其
+        // 建好的 buffer 池(池由平台统一分配 —— 因为 Start() 要求**每一条**启用了
+        // ISP 输出的 pipeline 都注册,不只是对外消费的那几条)。
         completionQ_ = platform_->completionQ(sensorIndex_);
         if (!completionQ_) {
-            std::cerr << "hal_cam: no isp0CompletionQueue for sensor "
+            std::cerr << "hal_cam: no completion queue for sensor "
                       << sensorIndex_ << "\n";
             return false;
+        }
+        grabQ_ = completionQ_;
+        hasIsp_ = platform_->hasIspOf(sensorIndex_);
+        if (hasIsp_) {
+            isp0Pool_ = platform_->isp0PoolOf(sensorIndex_);
+            if (!isp0Pool_) {
+                std::cerr << "hal_cam: no ISP0 pool for sensor " << sensorIndex_
+                          << "\n";
+                return false;
+            }
+        } else {
+            // YUV 直出模组:帧走 ICP 队列(见 Grab),没有 ISP0 池。
+            icpPool_ = platform_->icpPoolOf(sensorIndex_);
+            if (!icpPool_) {
+                std::cerr << "hal_cam: no ICP pool for sensor " << sensorIndex_
+                          << "\n";
+                return false;
+            }
         }
         ResolveSensorResolution(platform_->config(), sensorIndex_, w_, h_);
         return true;
     }
 
-    // 平台 Init 之后:构造 cross-engine attr、分配池、RegisterImages、EOF sync。
+    // 阶段 B —— 平台 Init 之后:本 sensor 的登记工作已由
+    // SIPLPlatform::PrepareAllPipelines() 统一完成(全 mask 下必须对每条 ISP
+    // 输出启用的 pipeline 都做,见其注释),这里只做前置检查 + 回读。
     bool Prepare() override {
-        INvSIPLCamera* camera = platform_->camera();
-        combinedAttr_ = BuildCombinedAttrList(
-            platform_->bufModule(), sensorIndex_, camera, w_, h_);
-        if (!combinedAttr_) {
+        if (!platform_->prepared(sensorIndex_)) {
             std::cerr << "hal_cam: sensor " << sensorIndex_
-                      << " combined attr list build failed\n";
+                      << " pipeline not registered by platform\n";
             return false;
         }
-        constexpr uint32_t kPool = 4;
-        pool_.reserve(kPool);
-        for (uint32_t i = 0; i < kPool; ++i) {
-            NvSciBufObj obj = nullptr;
-            if (NvSciBufObjAlloc(combinedAttr_, &obj) != NvSciError_Success) {
-                std::cerr << "hal_cam: sensor " << sensorIndex_
-                          << " NvSciBufObjAlloc " << i << " failed\n";
-                return false;
-            }
-            pool_.push_back(obj);
-        }
-        SIPLStatus sts = camera->RegisterImages(
-            sensorIndex_, INvSIPLClient::ConsumerDesc::OutputType::ISP0, pool_);
-        if (sts != NVSIPL_STATUS_OK) {
-            std::cerr << "hal_cam: sensor " << sensorIndex_
-                      << " RegisterImages failed: " << StatusName(sts) << "\n";
-            return false;
-        }
-        // ISP 输出需要 auto-control plugin(AEC/AWB);示例插件缺失时 ISP 仍可
-        // 出帧但曝光不校正,提示后继续(与 hal_camera 行为一致)。
-
-        // EOF sync obj(SIPL 在 ISP0 帧完成时 signal EOF)(从 hal_camera 平移)。
-        NvSciSyncAttrList syncAttr = nullptr, sReconciled = nullptr, sConflict = nullptr;
-        NvSciSyncAttrListCreate(platform_->syncModule(), &syncAttr);
-        bool cpuSignaler = true;
-        NvSciSyncAttrKeyValuePair kv[] = {
-            {NvSciSyncAttrKey_NeedCpuAccess, &cpuSignaler, sizeof(cpuSignaler)},
-        };
-        NvSciSyncAttrListSetAttrs(syncAttr, kv, 1);
-        NvSciSyncAttrListReconcile(&syncAttr, 1, &sReconciled, &sConflict);
-        NvSciSyncObjAlloc(sReconciled, &eofSyncObj_);
-        NvSciSyncAttrListFree(syncAttr);
-        NvSciSyncAttrListFree(sReconciled);
-        NvSciSyncAttrListFree(sConflict);
-        if (eofSyncObj_) {
-            camera->RegisterNvSciSyncObj(
-                sensorIndex_, INvSIPLClient::ConsumerDesc::OutputType::ISP0,
-                NVSIPL_EOFSYNCOBJ, eofSyncObj_);
+        // 回读 ISP0 池的 attr,便于与 reconcile 结果对照(诊断用)。
+        if (DumpAttrsEnabled()) {
+            NvSciBufAttrList attr = platform_->isp0AttrOf(sensorIndex_);
+            if (attr) DumpBufAttrList("ISP0 attr", attr);
         }
         return true;
     }
@@ -592,13 +1151,22 @@ public:
 
     bool Grab(halcodec::CodecFrame& frame) override {
         constexpr int64_t kGetTimeoutUs = 5 * 1000 * 1000; // 5 s per frame
+        if (!grabQ_) {
+            std::cerr << "hal_cam: sensor " << sensorIndex_
+                      << " no completion queue to grab from\n";
+            return false;
+        }
         while (!requestedStop_.load()) {
             INvSIPLClient::INvSIPLBuffer* item = nullptr;
-            SIPLStatus sts = completionQ_->Get(item, kGetTimeoutUs);
+            SIPLStatus sts = grabQ_->Get(item, kGetTimeoutUs);
             if (sts != NVSIPL_STATUS_OK || !item) {
-                // 超时:重试(RequestStop 后由循环条件退出)。
-                std::cerr << "hal_cam: sensor " << sensorIndex_
-                          << " queue Get timeout (" << StatusName(sts) << ")\n";
+                // 超时:重试(RequestStop 后由循环条件退出)。首个和每 30 次各打一行,
+                // 否则 5s×N 会把日志刷满。
+                if (timeouts_++ == 0 || timeouts_ % 30 == 0) {
+                    std::cerr << "hal_cam: sensor " << sensorIndex_
+                              << " queue Get timeout (" << StatusName(sts)
+                              << ", " << timeouts_ << " so far)\n";
+                }
                 continue;
             }
             auto* nvm = dynamic_cast<INvSIPLClient::INvSIPLNvMBuffer*>(item);
@@ -615,7 +1183,9 @@ public:
             frame.device.nvSciBufObj = siplBuf;
             frame.width = static_cast<int>(w_);
             frame.height = static_cast<int>(h_);
-            frame.format = halcodec::PixelFormat::NV12;
+            // YUV422 直出的 ICP 帧不是 NV12;ISP 帧才是平面 NV12。
+            frame.format = hasIsp_ ? halcodec::PixelFormat::NV12
+                                   : halcodec::PixelFormat::NV16;
             frame.release = [keep]() { keep->Release(); };
             return true;
         }
@@ -623,12 +1193,8 @@ public:
     }
 
     void Stop() override {
-        for (auto& obj : pool_) { if (obj) NvSciBufObjFree(obj); }
-        pool_.clear();
-        if (eofSyncObj_) NvSciSyncObjFree(eofSyncObj_);
-        eofSyncObj_ = nullptr;
-        if (combinedAttr_) NvSciBufAttrListFree(combinedAttr_);
-        combinedAttr_ = nullptr;
+        // buffer 池 / sync obj / attr list 全部由 SIPLPlatform 按 pipeline 持有,
+        // 随平台对象释放(必须在 camera_->Deinit() 之后,故不在这里 Free)。
         platform_->SourceStopped();
     }
 
@@ -643,10 +1209,14 @@ private:
     uint32_t w_ = 0;
     uint32_t h_ = 0;
     std::atomic<bool> requestedStop_{false};
+    uint64_t timeouts_ = 0;
     INvSIPLFrameCompletionQueue* completionQ_ = nullptr;
-    NvSciBufAttrList combinedAttr_ = nullptr;
-    std::vector<NvSciBufObj> pool_;
-    NvSciSyncObj eofSyncObj_ = nullptr;
+    // 取帧用的完成队列:ISP 模组取 ISP0 队列,YUV 直出模组取 ICP 队列。
+    INvSIPLFrameCompletionQueue* grabQ_ = nullptr;
+    bool hasIsp_ = true;
+    // 本 sensor 的 buffer 池 —— 由平台持有,这里只借用(Start 前平台已登记)。
+    std::vector<NvSciBufObj>* isp0Pool_ = nullptr;
+    std::vector<NvSciBufObj>* icpPool_ = nullptr;
 };
 
 } // namespace
@@ -666,7 +1236,12 @@ bool CreateSIPL(const CommandLineParser& cli,
     // 才能 Init)。只取前 numCameras 个作为对外输出源。
     if (!platform->ConfigureAllPipelines()) return false;
 
-    // 阶段 1b:构造请求的源(仅 Open = 取回 completion queue + 解析分辨率)。
+    // 阶段 1b:Init 之前取 image attributes 并分配 NvSciBufObj 池(厂商顺序:
+    // GetImageAttributes 全部发生在 Init: Entering 之前)。对**每一条**被 mask
+    // 选中的 pipeline 都建池 —— Start() 要求每条 ISP 输出启用的 pipeline 都注册。
+    if (!platform->AllocateAllPools()) return false;
+
+    // 阶段 1c:构造请求的源(Open = 取回 completion queue + 借用平台建的 ISP0 池)。
     std::vector<std::unique_ptr<SIPLCameraSource>> sources;
     sources.reserve(static_cast<size_t>(numCameras));
     for (int i = 0; i < numCameras; ++i) {
@@ -677,8 +1252,11 @@ bool CreateSIPL(const CommandLineParser& cli,
                   << " resolution " << s->width() << "x" << s->height() << "\n";
         sources.push_back(std::move(s));
     }
-    // 阶段 2:平台 Init,然后逐个 Prepare(RegisterImages 等)。
+    // 阶段 2:平台 Init,然后把**全部** pipeline 登记给 SIPL(RegisterImages /
+    // RegisterNvSciSyncObj / RegisterAutoControlPlugin)。只登记对外消费的那几条
+    // 会让 Start() 返回 INVALID_STATE。
     if (!platform->InitOnce()) return false;
+    if (!platform->PrepareAllPipelines()) return false;
     for (auto& s : sources) {
         if (!s->Prepare()) return false;
     }

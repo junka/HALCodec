@@ -22,7 +22,7 @@
 //       -Wl,-rpath-link,$SDK/lib-target -L$SDK/lib-target \
 //       -lnvmedia_ide_parser -lnvparser -lnvrm_surface -lnvos -lnvsocsys \
 //       -lnvscibuf -lnvscisync -lnvvideo -ldl
-// Run on nv118:
+// Run on orin:
 //   LD_LIBRARY_PATH=<sdk-lib-target> ./feed_probe vp9 input.ivf
 //   LD_LIBRARY_PATH=<sdk-lib-target> ./feed_probe av1 input.ivf
 //   LD_LIBRARY_PATH=<sdk-lib-target> ./feed_probe raw mpeg2 input.mpg
