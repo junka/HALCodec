@@ -17,7 +17,10 @@
 // Search order for the backend directory:
 //   1. $HALCODEC_BACKEND_DIR
 //   2. the directory of the running executable (build-tree friendly)
-//   3. <exe-dir>/../lib/halcodec (install-tree friendly)
+//   3. <exe-dir>/../lib (install-tree friendly: prefix/bin → prefix/lib,
+//      where the backend .so's land alongside libhalcodec_core.so)
+//   4. <exe-dir>/../lib/halcodec (legacy install layout with a halcodec/
+//      subdir; kept for backwards compatibility)
 
 #include <dlfcn.h>
 
@@ -86,44 +89,43 @@ inline int LoadBackends(const std::string& explicitDir = "") {
     const char* env = std::getenv("HALCODEC_BACKEND_DIR");
     if (env && *env) candidates.push_back(env);
     candidates.push_back(ExeDir());
+    candidates.push_back(ExeDir() + "/../lib");
     candidates.push_back(ExeDir() + "/../lib/halcodec");
 
-    std::string dir;
+    // A candidate "hits" only if it is a directory that actually contains at
+    // least one *_layers.{so,dylib}. This matters for the install tree, where
+    // ExeDir() (prefix/bin) always exists but holds no backends — without this
+    // check the search would stop at bin/ and never reach ../lib where the
+    // backends were installed.
+    int loaded = 0;
     for (const auto& c : candidates) {
-        struct stat st;
-        if (::stat(c.c_str(), &st) == 0 && S_ISDIR(st.st_mode)) {
-            dir = c;
+        DIR* d = ::opendir(c.c_str());
+        if (!d) continue;
+        int before = loaded;
+        struct dirent* ent;
+        while ((ent = ::readdir(d)) != nullptr) {
+            if (!EndsWithLayersSo(ent->d_name)) continue;
+            std::string full = c + "/" + ent->d_name;
+            // RTLD_GLOBAL so the backend's symbols are visible to other backends
+            // and to the executable's Registry lookups. RTLD_NOW surfaces missing
+            // dependencies immediately (and lets us skip cleanly).
+            void* h = ::dlopen(full.c_str(), RTLD_NOW | RTLD_GLOBAL);
+            if (!h) {
+                std::cerr << "LoadBackends: skip " << ent->d_name
+                          << " (" << ::dlerror() << ")" << std::endl;
+                continue;
+            }
+            ++loaded;
+        }
+        ::closedir(d);
+        if (loaded > before) {
+            // Found and loaded backends in this candidate; stop searching.
             break;
         }
     }
-    if (dir.empty()) {
+    if (loaded == 0) {
         std::cerr << "LoadBackends: no backend directory found" << std::endl;
-        return 0;
     }
-
-    DIR* d = ::opendir(dir.c_str());
-    if (!d) {
-        std::cerr << "LoadBackends: cannot open " << dir << std::endl;
-        return 0;
-    }
-
-    int loaded = 0;
-    struct dirent* ent;
-    while ((ent = ::readdir(d)) != nullptr) {
-        if (!EndsWithLayersSo(ent->d_name)) continue;
-        std::string full = dir + "/" + ent->d_name;
-        // RTLD_GLOBAL so the backend's symbols are visible to other backends
-        // and to the executable's Registry lookups. RTLD_NOW surfaces missing
-        // dependencies immediately (and lets us skip cleanly).
-        void* h = ::dlopen(full.c_str(), RTLD_NOW | RTLD_GLOBAL);
-        if (!h) {
-            std::cerr << "LoadBackends: skip " << ent->d_name
-                      << " (" << ::dlerror() << ")" << std::endl;
-            continue;
-        }
-        ++loaded;
-    }
-    ::closedir(d);
     return loaded;
 }
 

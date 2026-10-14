@@ -142,6 +142,39 @@ endif()
 
 add_subdirectory(app)
 
+# ---------------------------------------------------------------------------
+# Install rules. `cmake --install <build> [--prefix <dir>]` stages the
+# canonical runtime tree:
+#   <prefix>/bin/                 executables
+#   <prefix>/lib/                 libhalcodec_core.so + *_layers backends
+#   <prefix>/share/halcodec/configs/   encode presets
+# Backend .so's land in lib/ (not a halcodec/ subdir): plugin_loader's
+# <exe-dir>/../lib candidate (src/plugin_loader.h) resolves them from bin/.
+# The apps link libhalcodec_core at build time, so each gets an INSTALL_RPATH
+# of $ORIGIN/../lib (Linux) / @loader_path/../lib (macOS) to find the core
+# without LD_LIBRARY_PATH. Build-tree RPATH is left at the default so the
+# freshly built binaries run in-place.
+if(APPLE)
+    set(_halcodec_install_rpath "@loader_path/../lib")
+else()
+    set(_halcodec_install_rpath "$ORIGIN/../lib")
+endif()
+set(_halcodec_apps hal_enc hal_dec hal_transcode hal_session hal_cam codecinfo)
+foreach(_app ${_halcodec_apps})
+    if(TARGET ${_app})
+        set_target_properties(${_app} PROPERTIES INSTALL_RPATH "${_halcodec_install_rpath}")
+        install(TARGETS ${_app} RUNTIME DESTINATION bin)
+    endif()
+endforeach()
+install(TARGETS halcodec_core LIBRARY DESTINATION lib)
+# Backend layers are optional (platform/SDK-gated); install whichever were built.
+foreach(_backend vtbox_layers nvenc_layers nvjpeg_layers amf_layers qsv_layers nvmedia_layers)
+    if(TARGET ${_backend})
+        install(TARGETS ${_backend} LIBRARY DESTINATION lib)
+    endif()
+endforeach()
+install(DIRECTORY configs/ DESTINATION share/halcodec/configs)
+
 if(APPLE OR UNIX)
     enable_testing()
     add_subdirectory(tests)
