@@ -161,3 +161,50 @@ foreach(_tgt hal_enc codecinfo hal_dec hal_session hal_transcode hal_cam)
         add_dependencies(${_tgt} halcodec_stage_backends)
     endif()
 endforeach()
+
+# hal_player: cross-platform hard-decode player via HAL Decoder + SDL2 + OpenGL.
+# Falls back to the Apple-specific Objective-C++ build only when SDL2 is
+# unavailable (kept so the pure VT path still builds on a bare macOS SDK).
+find_package(SDL2 CONFIG QUIET)
+if(NOT SDL2_FOUND)
+    find_package(SDL2 QUIET)
+endif()
+
+if(SDL2_FOUND)
+    message(STATUS "[hal_player] SDL2 found — building cross-platform SDL+OpenGL player")
+    add_executable(hal_player hal_player.cc)
+    set_target_properties(hal_player PROPERTIES
+        CXX_STANDARD 17
+        CXX_STANDARD_REQUIRED ON)
+    if(APPLE)
+        find_library(GL_FRAMEWORK OpenGL REQUIRED)
+        find_library(COCOA_FRAMEWORK Cocoa REQUIRED)
+        target_link_libraries(hal_player PRIVATE halcodec_core ${SDL2_LIBRARIES} ${GL_FRAMEWORK} ${COCOA_FRAMEWORK})
+    else()
+        target_link_libraries(hal_player PRIVATE halcodec_core ${SDL2_LIBRARIES})
+    endif()
+    target_include_directories(hal_player PRIVATE ${SDL2_INCLUDE_DIRS})
+    if(TARGET SDL2::SDL2)
+        target_link_libraries(hal_player PRIVATE SDL2::SDL2)
+    endif()
+    add_dependencies(hal_player halcodec_stage_backends)
+elseif(APPLE)
+    message(STATUS "[hal_player] SDL2 NOT found — falling back to Apple-only hal_player.mm")
+    enable_language(OBJCXX)
+    find_library(VT_FRAMEWORK VideoToolbox REQUIRED)
+    find_library(APPKIT_FRAMEWORK AppKit REQUIRED)
+    find_library(COREIMAGE_FRAMEWORK CoreImage REQUIRED)
+    add_executable(hal_player hal_player.mm)
+    set_target_properties(hal_player PROPERTIES
+        CXX_STANDARD 17
+        CXX_STANDARD_REQUIRED ON)
+    target_compile_options(hal_player PRIVATE -fobjc-arc)
+    target_link_libraries(hal_player PRIVATE
+        halcodec_core Boost::program_options
+        ${FOUNDATION_FRAMEWORK} ${APPKIT_FRAMEWORK} ${AV_FRAMEWORK}
+        ${CORE_FOUNDATION_FRAMEWORK} ${CORE_MEDIA_FRAMEWORK}
+        ${CORE_VIDEO_FRAMEWORK} ${COREIMAGE_FRAMEWORK} ${VT_FRAMEWORK})
+    add_dependencies(hal_player halcodec_stage_backends)
+else()
+    message(STATUS "[hal_player] SDL2 not found — hal_player target skipped")
+endif()

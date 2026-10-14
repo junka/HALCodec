@@ -75,3 +75,4 @@ test_cars_mjpeg.mjpeg
 # 按需 tools/fetch_prores_raw_sample.sh 拉取，不入库；golden 是它的内容对拍件。
 tests/data/prores_raw_*.prrf
 tests/data/*.golden8.bin
+.trae/
