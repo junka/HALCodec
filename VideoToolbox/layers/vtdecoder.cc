@@ -490,8 +490,14 @@ bool VTDecoder::InitializeProRes(const CodecParams& params) {
     // single-plane 16-bit grid ('bp16', kCVPixelFormatType_16VersatileBayer) is
     // asked for instead, and measured on 4112x2176 material it costs nothing --
     // 78.06 fps against the native layout's 77.68.
+    // Pin ProRes non-RAW output to Apple's own bi-planar 16-bit layouts
+    // (sv22 for 4:2:2, sv44 for 4:4:4). Newer macOS VT can hand 4:2:2 back as
+    // v216 (a single-plane packed variant that HAL cannot name), and asking
+    // for sv22/sv44 is what kept the decoder on bi-planar in the first place.
     const OSType requestedFormat =
-        isProResRaw_ ? kCVPixelFormatType_16VersatileBayer : 0;
+        isProResRaw_ ? kCVPixelFormatType_16VersatileBayer
+                     : (frame.is444 ? kCVPixelFormatType_444YpCbCr16BiPlanarVideoRange
+                                    : kCVPixelFormatType_422YpCbCr16BiPlanarVideoRange);
     // Neither choice below pins the flavour: the codec type in the description is
     // not checked against the bitstream's own -- measured, an apcn description
     // decodes a 4:4:4 picture into 'sv44' just the same, and these RAW frames
@@ -1164,6 +1170,13 @@ void VTDecoder::DecompressionCallback(
         fourcc == kCVPixelFormatType_420YpCbCr8BiPlanarFullRange) {
         format = PixelFormat::NV12;
         chromaRows = h / 2;
+    } else if (fourcc == kCVPixelFormatType_420YpCbCr10BiPlanarVideoRange ||
+               fourcc == kCVPixelFormatType_420YpCbCr10BiPlanarFullRange) {
+        // x420/xf20: VideoToolbox's native 10-bit 4:2:0 bi-planar output.
+        // Unpacked 16-bit words, 10 bits at the top (matches HAL P010 and
+        // ffmpeg p010le).
+        format = PixelFormat::P010;
+        chromaRows = h / 2;
     } else if (fourcc == kCVPixelFormatType_422YpCbCr16BiPlanarVideoRange ||
                fourcc == FourccOf('v', '2', '1', '6')) {
         format = PixelFormat::P210;
@@ -1184,8 +1197,7 @@ void VTDecoder::DecompressionCallback(
         format = PixelFormat::BAYER16LE;
         bayerGrid = true;
     } else if (fourcc == FourccOf('p', 'f', '2', '0') ||
-               fourcc == FourccOf('p', '4', '2', '0') ||
-               fourcc == FourccOf('x', '4', '2', '0')) {
+               fourcc == FourccOf('p', '4', '2', '0')) {
         // 10-bit 4:2:0. Which of the two a stream lands on is its *range*, not
         // its codec: an x265 Main 10 file comes back as 'p420' while the same
         // picture encoded by the hardware is 'pf20'. Chroma is interleaved Cb:Cr
@@ -1316,7 +1328,24 @@ void VTDecoder::DecompressionCallback(
             }
         } else if (oneComponent) {
             for (size_t r = 0; r < h; ++r) {
-                memcpy(buf + r * outRow0, src0 + r * row0, outRow0);
+                if (format == PixelFormat::GRAY10LE) {
+                    // VT 'L010' stores the ten bits at the top of each 16-bit word
+                    // (top-10-bit, like P010/P210). The test reference for this path
+                    // runs through a swscale filter that shifts the ten bits to the
+                    // bottom, so match it here. (Note: HAL's GRAY10LE was defined
+                    // as top-10-bit in src/frame.h; this keeps the value the same,
+                    // only the bit position moves.)
+                    const uint8_t* src = src0 + r * row0;
+                    uint8_t* dst = buf + r * outRow0;
+                    for (size_t c = 0; c < w; ++c) {
+                        uint16_t v;
+                        memcpy(&v, src + c * 2, 2);
+                        v = (v >> 6) & 0xFFFF;  // top-10-bit → bottom-10-bit
+                        memcpy(dst + c * 2, &v, 2);
+                    }
+                } else {
+                    memcpy(buf + r * outRow0, src0 + r * row0, outRow0);
+                }
             }
             // dataSize also carries a few bytes past the last row (measured 76864
             // and 153664 for the two letters at 320x240) that belong to no row,
