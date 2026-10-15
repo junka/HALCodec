@@ -147,8 +147,9 @@ static void NV12ToBGRA(const uint8_t* y, const uint8_t* uv, int w, int h,
             uint8_t Yv = yRow[col];
             // UV 交错:偶索引 U,奇索引 V
             int cu = (col & ~1);
-            int8_t U = (int8_t)uvRow[cu];       // 有符号 -128..+127
-            int8_t V = (int8_t)uvRow[cu + 1];
+            // NV12 chroma 是无符号字节,中性点 128 —— 必须减 128 才是 BT.601 的有符号 Cb/Cr.
+            int U = (int)uvRow[cu] - 128;
+            int V = (int)uvRow[cu + 1] - 128;
             int R = Yv + (141 * V) / 100;
             int G = Yv - (34 * U) / 100 - (71 * V) / 100;
             int B = Yv + (177 * U) / 100;
