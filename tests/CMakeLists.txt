@@ -126,6 +126,23 @@ set_target_properties(registry_test PROPERTIES CXX_STANDARD 17)
 add_test(NAME registry COMMAND registry_test)
 
 # ---------------------------------------------------------------------------
+# yuv_to_bgra_test — the player's frame→BGRA conversion, header-only in
+# app/yuv_to_bgra.h so it needs no decoder, no GPU and no window. It is the one
+# place a decoder's output meets a picture, and it is where the chroma-read bug
+# lived, so the checks are both absolute (known samples must give the BT.601
+# integers, and unsigned chroma must not be read as signed) and relative (each
+# layout — I420, NV16, P010/P016, P210, 4:4:4 — is a re-layout of one reference
+# frame and must convert to the same bytes). Also pins the two contract edges
+# hal_player depends on: strides of 0 mean tightly packed, and a format with no
+# conversion is refused rather than rendered as garbage.
+# ---------------------------------------------------------------------------
+add_executable(yuv_to_bgra_test yuv_to_bgra_test.cc)
+target_link_libraries(yuv_to_bgra_test PRIVATE halcodec_core)
+target_include_directories(yuv_to_bgra_test PRIVATE ${CMAKE_SOURCE_DIR}/app)
+set_target_properties(yuv_to_bgra_test PROPERTIES CXX_STANDARD 17)
+add_test(NAME yuv_to_bgra COMMAND yuv_to_bgra_test)
+
+# ---------------------------------------------------------------------------
 # frame_channel_test — the layer-1/layer-2 abstractions with no camera, no GPU
 # and no transport: it links halcodec_core (which owns the channel-factory
 # registry) plus the loopback backend, which registers itself at static-init.

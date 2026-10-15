@@ -41,6 +41,7 @@
 #include "decoder.h"
 #include "frame.h"
 #include "plugin_loader.h"
+#include "yuv_to_bgra.h"
 
 namespace {
 
@@ -170,6 +171,7 @@ struct Player {
     GLuint texBGRA = 0;
     int winW = 0, winH = 0;
     bool running = true;
+    bool warnedFormat_ = false;
 
     ~Player() { shutdown(); }
 
@@ -206,10 +208,19 @@ struct Player {
         return true;
     }
 
+    // 上传一帧。格式不支持就报一次(不每帧刷屏),不画——宁可黑屏也不要拿
+    // 读错的像素冒充画面.
     void renderFrame(const halcodec::CodecFrame& frame, uint8_t* bgraBuf) {
-        NV12ToBGRA(frame.data, frame.data + frame.strides[0] * frame.height,
-                   frame.width, frame.height,
-                   frame.strides[0], frame.strides[1], bgraBuf);
+        if (!halplayer::ConvertFrame(frame, bgraBuf)) {
+            if (!warnedFormat_) {
+                std::cerr << "[hal_player] cannot render format "
+                          << halplayer::FormatName(frame.format)
+                          << " (" << static_cast<int>(frame.format)
+                          << ") — no conversion for it; frames shown as black\n";
+                warnedFormat_ = true;
+            }
+            return;
+        }
         glBindTexture(GL_TEXTURE_2D, texBGRA);
         glTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA, frame.width, frame.height,
                      0, GL_BGRA, GL_UNSIGNED_BYTE, bgraBuf);
