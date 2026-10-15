@@ -245,9 +245,9 @@ int main(int argc, char* argv[]) {
     params.zeroCopy = true;  // 让 backend 优先 device memory (NV12 on GPU)
     std::vector<uint8_t> raw;
     bool live = false;
+#if defined(__linux__)
     std::thread feeder;                                   // live: feeds FillInput
     std::unique_ptr<halcodec::ShmRingHost> ring;          // live: the transport
-#if defined(__linux__)
     if (path.rfind("shm:", 0) == 0) {
         live = true;
         const std::string name = path.substr(4);
@@ -331,6 +331,7 @@ int main(int argc, char* argv[]) {
     // deadlock against a full ring). Async backends run FillInput and
     // GetFrame from different threads safely -- the Session fan-in relies
     // on the same contract.
+#if defined(__linux__)
     if (live) {
         feeder = std::thread([&dec, &raw, &ring] {
             constexpr size_t kFeedChunk = 256 * 1024;
@@ -349,6 +350,7 @@ int main(int argc, char* argv[]) {
             dec->SignalInputComplete();
         });
     }
+#endif
 
     Player player;
     std::vector<uint8_t> bgraBuf;
@@ -432,12 +434,14 @@ int main(int argc, char* argv[]) {
         }
     }
 
+#if defined(__linux__)
     if (live) {
         // Release the feeder if the window closed while the producer still
         // streams; after a natural end-of-stream this is a no-op.
         ring->abort();
         feeder.join();
     }
+#endif
     player.shutdown();
     dec->Finalize();
     std::cerr << "[hal_player] exit\n";
