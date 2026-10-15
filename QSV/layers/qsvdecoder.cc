@@ -81,11 +81,30 @@ bool DownloadVPLSurfaceToHost(const QSVRuntime& rt, mfxSession sess,
     mfxMemoryInterface* memIface = static_cast<mfxMemoryInterface*>(hdl);
     mfxSurfaceHeader* header =
         static_cast<mfxSurfaceHeader*>(f.device.vplExportedHeader);
+    // The decoder's Export set SurfaceFlags = EXPORT_SHARED (0x100), which the
+    // import side's check_import_flags() rejects (it only accepts IMPORT_SHARED
+    // / IMPORT_COPY / DEFAULT) -- importing the header verbatim -4's. Rewrite to
+    // IMPORT_SHARED on a stack copy so the runtime maps the shared native handle
+    // directly (and backfills IMPORT_COPY if it must fall back). Copying rather
+    // than mutating in place keeps the decoder's view of its refcounted header
+    // intact for any later re-import. Same fix as the encode path (see
+    // qsvencoder.cc); without it DownloadToHost always -4's and every zero-copy
+    // frame is undownloadable.
+    mfxSurfaceVAAPI importCopy{};
+    importCopy.SurfaceInterface.Header = *header;
+    importCopy.SurfaceInterface.Header.SurfaceFlags =
+        MFX_SURFACE_FLAG_IMPORT_SHARED;
+    {
+        auto src = reinterpret_cast<mfxSurfaceVAAPI*>(f.device.vplExportedHeader);
+        importCopy.vaDisplay = src->vaDisplay;
+        importCopy.vaSurfaceID = src->vaSurfaceID;
+    }
     mfxFrameSurface1* imported = nullptr;
     // DECODE component gives read access; ENCODE/VPP_INPUT are the other
     // import-capable components. For a pure download, DECODE suffices.
-    sts = memIface->ImportFrameSurface(memIface, MFX_SURFACE_COMPONENT_DECODE,
-                                       header, &imported);
+    sts = memIface->ImportFrameSurface(
+        memIface, MFX_SURFACE_COMPONENT_DECODE,
+        reinterpret_cast<mfxSurfaceHeader*>(&importCopy), &imported);
     if (sts != MFX_ERR_NONE || !imported) {
         std::cerr << "QSVDecoder: ImportFrameSurface failed: " << sts << "\n";
         return false;
@@ -113,18 +132,23 @@ bool DownloadVPLSurfaceToHost(const QSVRuntime& rt, mfxSession sess,
     if (!host) {
         return false;
     }
-    // Flip to host. Release the exported header now that we have a private
-    // host copy; the import above did not take ownership of the header's
-    // refcount (ImportFrameSurface AddRef's internally and the imported
-    // surface's Release balances that).
-    mfxSurfaceInterface* siface =
-        reinterpret_cast<mfxSurfaceInterface*>(header);
-    siface->Release(siface);
+    // Flip to host now that we have a private host copy. The imported surface's
+    // own Release above balanced the import; what remains is the exported
+    // header, whose ownership lives in the frame's release callback (the
+    // shared_ptr guard captured in pushZeroCopyFrameLocked).
+    //
+    // Fire that callback exactly once here rather than releasing the header
+    // directly AND overwriting f.release: overwriting destroys the captured
+    // shared_ptr, whose deleter Releases the header a second time on an
+    // already-freed surface (segfaults inside libmfx-gen). Invoking it drops
+    // the guard (one Release), then we install the host-buffer release.
+    if (f.release) f.release();
     f.data = host;
     f.size = static_cast<size_t>(f.width) * f.height * 3 / 2;
     f.strides[0] = static_cast<size_t>(f.width);
     f.locality = FrameLocality::Host;
     f.device.vplExportedHeader = nullptr;
+    f.device.vplVaDisplay = nullptr;
     uint8_t* owned = host;
     f.release = [owned]() { std::free(owned); };
     return true;
