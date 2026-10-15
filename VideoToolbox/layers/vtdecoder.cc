@@ -1164,7 +1164,8 @@ void VTDecoder::DecompressionCallback(
         fourcc == kCVPixelFormatType_420YpCbCr8BiPlanarFullRange) {
         format = PixelFormat::NV12;
         chromaRows = h / 2;
-    } else if (fourcc == kCVPixelFormatType_422YpCbCr16BiPlanarVideoRange) {
+    } else if (fourcc == kCVPixelFormatType_422YpCbCr16BiPlanarVideoRange ||
+               fourcc == FourccOf('v', '2', '1', '6')) {
         format = PixelFormat::P210;
         chromaRows = h;
     } else if (fourcc == kCVPixelFormatType_444YpCbCr16BiPlanarVideoRange) {
@@ -1204,7 +1205,8 @@ void VTDecoder::DecompressionCallback(
         chromaRows = h;
         packed10 = true;
     } else if (fourcc == kCVPixelFormatType_422YpCbCr8 ||
-               fourcc == kCVPixelFormatType_422YpCbCr8FullRange) {
+               fourcc == kCVPixelFormatType_422YpCbCr8FullRange ||
+               fourcc == FourccOf('x', '4', '2', '2')) {
         // 8-bit 4:2:2 packed ('2vuy'/'yuv2'). Two planes like NV12: luma row is
         // w bytes, chroma row is 2*w bytes of interleaved CbCr -- only chroma
         // rows match luma rows (4:2:2 vs 4:2:0). Walks the plain memcpy path at
@@ -1253,8 +1255,9 @@ void VTDecoder::DecompressionCallback(
     // grid whose own row is 8224), which is a different width from the row the HAL
     // format carries, so the output strides are the format's own and those rows
     // move one at a time.
-    size_t outRow0 = (packed10 || planar444 || bayerGrid) ? w * 2 : row0;
-    const size_t outRow1 = (packed10 || planar444 || bayerGrid) ? w * 2 : row1;
+    const bool nv16ish = (format == PixelFormat::NV16);
+    size_t outRow0 = (packed10 || planar444 || bayerGrid) ? w * 2 : nv16ish ? w : row0;
+    const size_t outRow1 = (packed10 || planar444 || bayerGrid) ? w * 2 : nv16ish ? w * 2 : row1;
     if (oneComponent) {
         // A greyscale picture leaves here tightly packed, as every other
         // single-plane grey frame in HAL is (nvjpeg's GRAY is w bytes a row, and
@@ -1318,6 +1321,16 @@ void VTDecoder::DecompressionCallback(
             // dataSize also carries a few bytes past the last row (measured 76864
             // and 153664 for the two letters at 320x240) that belong to no row,
             // so only plane0Bytes of the buffer are read.
+        } else if (format == PixelFormat::NV16) {
+            // NV16 4:2:2 bi-planar, VT aligns rows past the picture (measured
+            // row0=row1=960 for a 320-wide x422 frame), but HAL consumers
+            // expect tightly packed rows of w bytes (luma) and 2*w bytes (UV).
+            for (size_t r = 0; r < h; ++r) {
+                memcpy(buf + r * w, src0 + r * row0, w);
+            }
+            for (size_t r = 0; r < h; ++r) {
+                memcpy(buf + h * w + r * w * 2, src1 + r * row1, w * 2);
+            }
         } else {
             memcpy(buf, src0, plane0Bytes);
             memcpy(buf + plane0Bytes, src1, plane1Bytes);
