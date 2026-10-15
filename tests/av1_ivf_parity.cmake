@@ -5,9 +5,8 @@
 # when ffmpeg lacks an AV1 encoder or decoder, when the assets are missing, or
 # when the vtbox backend cannot load.
 
-if(NOT HAL_DEC OR NOT FFMPEG OR NOT INPUT_NV12 OR NOT WORKDIR)
-    message(FATAL_ERROR "HAL_DEC, FFMPEG, INPUT_NV12 and WORKDIR must be set")
-endif()
+include("${CMAKE_CURRENT_LIST_DIR}/halcodec_test_prelude.cmake")
+halcodec_require(HAL_DEC FFMPEG INPUT_NV12 WORKDIR)
 
 set(SYNTH_IVF   "${WORKDIR}/synth_av1.ivf")
 set(FFMPEG_REF  "${WORKDIR}/av1_ffmpeg_ref.nv12")

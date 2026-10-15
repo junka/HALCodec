@@ -10,9 +10,8 @@
 # waiting forever for an end-of-image marker. Skips when ffmpeg is missing or the
 # backend cannot load.
 
-if(NOT HAL_DEC OR NOT FFMPEG OR NOT INPUT_NV12 OR NOT WORKDIR)
-    message(FATAL_ERROR "HAL_DEC, FFMPEG, INPUT_NV12 and WORKDIR must be set")
-endif()
+include("${CMAKE_CURRENT_LIST_DIR}/halcodec_test_prelude.cmake")
+halcodec_require(HAL_DEC FFMPEG INPUT_NV12 WORKDIR)
 
 set(FRAME_BYTES 115200)   # 320x240 NV12
 set(JPG      "${WORKDIR}/jdec_420.jpg")

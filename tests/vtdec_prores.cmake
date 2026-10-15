@@ -15,9 +15,8 @@
 # rather than waiting forever for a byte count that will not be satisfied. Skips
 # when ffmpeg is missing or the backend cannot load.
 
-if(NOT HAL_DEC OR NOT FFMPEG OR NOT INPUT_NV12 OR NOT WORKDIR)
-    message(FATAL_ERROR "HAL_DEC, FFMPEG, INPUT_NV12 and WORKDIR must be set")
-endif()
+include("${CMAKE_CURRENT_LIST_DIR}/halcodec_test_prelude.cmake")
+halcodec_require(HAL_DEC FFMPEG INPUT_NV12 WORKDIR)
 
 set(FRAMES 3)
 set(FRAME_BYTES 307200)   # 320x240 P210: 4:2:2, 16-bit storage (4 bytes/pixel)

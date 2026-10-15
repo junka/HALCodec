@@ -3,9 +3,8 @@
 # outputs are byte-identical (order-sensitive). Skips when ffmpeg or assets are
 # missing, or when the vtbox backend cannot load.
 
-if(NOT HAL_DEC OR NOT FFMPEG OR NOT INPUT_NV12 OR NOT WORKDIR)
-    message(FATAL_ERROR "HAL_DEC, FFMPEG, INPUT_NV12 and WORKDIR must be set")
-endif()
+include("${CMAKE_CURRENT_LIST_DIR}/halcodec_test_prelude.cmake")
+halcodec_require(HAL_DEC FFMPEG INPUT_NV12 WORKDIR)
 
 set(SYNTH_H264 "${WORKDIR}/synth_8slice_bframe.h264")
 set(FFMPEG_REF "${WORKDIR}/ffmpeg_ref.nv12")

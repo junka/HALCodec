@@ -2,9 +2,8 @@
 # assert the outputs are byte-identical and the frame count is correct.
 # Exits with code 77 when the backend cannot load (ctest SKIP).
 
-if(NOT HAL_DEC OR NOT INPUT_H264 OR NOT WORKDIR)
-    message(FATAL_ERROR "HAL_DEC, INPUT_H264 and WORKDIR must be set")
-endif()
+include("${CMAKE_CURRENT_LIST_DIR}/halcodec_test_prelude.cmake")
+halcodec_require(HAL_DEC INPUT_H264 WORKDIR)
 
 set(OUT1 "${WORKDIR}/det_run1.nv12")
 set(OUT2 "${WORKDIR}/det_run2.nv12")

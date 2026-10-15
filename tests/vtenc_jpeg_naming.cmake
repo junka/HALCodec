@@ -17,9 +17,8 @@
 #     writes x.jpg, not x.nv12.
 # Skips when ffmpeg/ffprobe or the vtenc backend are missing.
 
-if(NOT HAL_ENC OR NOT FFMPEG OR NOT FFPROBE OR NOT INPUT_NV12 OR NOT WORKDIR)
-    message(FATAL_ERROR "HAL_ENC, FFMPEG, FFPROBE, INPUT_NV12 and WORKDIR must be set")
-endif()
+include("${CMAKE_CURRENT_LIST_DIR}/halcodec_test_prelude.cmake")
+halcodec_require(HAL_ENC FFMPEG FFPROBE INPUT_NV12 WORKDIR)
 
 set(FRAME_BYTES 115200)   # 320x240 NV12
 set(IMAGES 4)

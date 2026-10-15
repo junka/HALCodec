@@ -30,9 +30,8 @@
 #      golden is an independent witness of the phase order and of the de-padding,
 #      not a snapshot of this code's own output.
 
-if(NOT HAL_DEC OR NOT SAMPLE OR NOT WORKDIR)
-    message(FATAL_ERROR "HAL_DEC, SAMPLE and WORKDIR must be set")
-endif()
+include("${CMAKE_CURRENT_LIST_DIR}/halcodec_test_prelude.cmake")
+halcodec_require(HAL_DEC SAMPLE WORKDIR)
 if(NOT EXISTS "${SAMPLE}")
     message(FATAL_ERROR "no ProRes RAW stream at ${SAMPLE}")
 endif()
