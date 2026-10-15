@@ -46,15 +46,8 @@ uint8_t* CopyNV12(const mfxFrameSurface1* surf) {
     if (!dst) {
         return nullptr;
     }
-    for (mfxU16 i = 0; i < h; i++) {
-        std::memcpy(dst + static_cast<size_t>(w) * i,
-                    surf->Data.Y + static_cast<size_t>(pitch) * i, w);
-    }
-    uint8_t* dstUV = dst + yBytes;
-    for (mfxU16 i = 0; i < h / 2; i++) {
-        std::memcpy(dstUV + static_cast<size_t>(w) * i,
-                    surf->Data.UV + static_cast<size_t>(pitch) * i, w);
-    }
+    copyPitchedRows(dst, w, surf->Data.Y, pitch, w, h);
+    copyPitchedRows(dst + yBytes, w, surf->Data.UV, pitch, w, h / 2);
     return dst;
 }
 

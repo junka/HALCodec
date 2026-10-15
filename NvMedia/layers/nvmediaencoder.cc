@@ -707,51 +707,9 @@ bool NvMediaEncoder::FillFrame(const CodecFrame& in) {
         std::cerr << "NvMediaEncoder: NvSciSyncObjSignal failed: 0x"
                   << std::hex << sigErr << std::dec << std::endl;
     }
-    // Stage the frame as a 3-plane planar YUV420 (Y, U, V) CPU buffer. This
-    // DRIVE build's NvSciBufObjPutPixels rejects a 2-plane semi-planar
-    // (NV12-style) source for a V8U8 surface with BadParameter (0x100) and
-    // only accepts a 3-plane planar layout -- verified directly on the board
-    // with a standalone PutPixels probe (2-plane -> 0x100, 3-plane -> 0x0).
-    // The decoder's GetPixels path uses the same 3-plane convention. Plane
-    // sizes/pitches: Y = w*h pitch w, U = V = (w/2)*(h/2) pitch (w/2). I420
-    // input is already planar; NV12 is de-interleaved on the fly.
-    const uint32_t cw = w >> 1;  // chroma samples per row (each of U, V)
-    const uint32_t ch = h >> 1;
-    const size_t yBytes = static_cast<size_t>(w) * h;
-    const size_t cBytes = static_cast<size_t>(cw) * ch;  // each of U, V
-    std::vector<uint8_t> yPlane(yBytes, 0);
-    std::vector<uint8_t> uPlane(cBytes, 0);
-    std::vector<uint8_t> vPlane(cBytes, 0);
-    std::memcpy(yPlane.data(), in.data, yBytes);
-    if (in.format == PixelFormat::I420) {
-        std::memcpy(uPlane.data(), in.data + yBytes, cBytes);
-        std::memcpy(vPlane.data(), in.data + yBytes + cBytes, cBytes);
-    } else {
-        // NV12 (and Unknown: treated as semi-planar): de-interleave UV.
-        const uint8_t* srcUV = in.data + yBytes;
-        for (uint32_t r = 0; r < ch; ++r) {
-            const uint8_t* uvRow = srcUV + static_cast<size_t>(r) * w;
-            uint8_t* uRow = uPlane.data() + static_cast<size_t>(r) * cw;
-            uint8_t* vRow = vPlane.data() + static_cast<size_t>(r) * cw;
-            for (uint32_t c = 0; c < cw; ++c) {
-                uRow[c] = uvRow[2 * c];
-                vRow[c] = uvRow[2 * c + 1];
-            }
-        }
-    }
-
-    const void* srcPtrs[3] = {yPlane.data(), uPlane.data(), vPlane.data()};
-    const uint32_t srcSizes[3] = {static_cast<uint32_t>(yBytes),
-                                  static_cast<uint32_t>(cBytes),
-                                  static_cast<uint32_t>(cBytes)};
-    const uint32_t srcPitches[3] = {w, cw, cw};
-    NvSciError putErr = NvSciBufObjPutPixels(surface.buf, nullptr, srcPtrs,
-                                             srcSizes, srcPitches);
-    if (putErr != NvSciError_Success) {
-        std::cerr << "NvMediaEncoder: NvSciBufObjPutPixels failed: 0x"
-                  << std::hex << putErr << std::dec << " (3-plane " << w << "x"
-                  << h << " pitch " << w << ", " << cw << "x" << ch
-                  << " pitch " << cw << ")" << std::endl;
+    // Stage the frame as a 3-plane planar YUV420 and upload it. The plane
+    // split and its DRIVE-build rationale live in StagePlanarYuv420.
+    if (!StagePlanarYuv420(in, w, h, surface.buf)) {
         NvSciSyncFenceClear(&preFence);
         return false;
     }
@@ -1151,6 +1109,77 @@ bool NvMediaEncoder::SetupJpeg(const CodecParams& params) {
     return true;
 }
 
+// Shared tail of DrainJpeg() and Drain(): the two APIs report their byte
+// counts differently but hand the encoder the same thing — a freshly read
+// bitstream — so the queueing of it is one function.
+bool NvMediaEncoder::PushBitstreamPacket(const uint8_t* bits,
+                                         uint32_t numBytes) {
+    const uint32_t bytes = numBytes;
+    uint8_t* data = new uint8_t[bytes];
+    std::memcpy(data, bits, bytes);
+    CodecFrame packet;
+    packet.data = data;
+    packet.size = bytes;
+    packet.width = static_cast<int>(width_);
+    packet.height = static_cast<int>(height_);
+    packet.format = PixelFormat::Unknown;  // encoded bitstream
+    packet.release = [data] { delete[] data; };
+    outQueue_.push_back(std::move(packet));
+    return true;
+}
+
+// Stage a host frame as 3-plane planar YUV420 and upload it with
+// NvSciBufObjPutPixels. This DRIVE build's PutPixels rejects a 2-plane
+// semi-planar (NV12-style) source for a V8U8 surface with BadParameter
+// (0x100) and only accepts a 3-plane planar layout -- verified directly on
+// the board with a standalone PutPixels probe (2-plane -> 0x100, 3-plane ->
+// 0x0). The decoder's GetPixels path uses the same 3-plane convention.
+// Plane sizes/pitches: Y = w*h pitch w, U = V = (w/2)*(h/2) pitch (w/2).
+// I420 input is already planar; NV12 (and Unknown, treated as semi-planar)
+// is de-interleaved on the fly.
+bool NvMediaEncoder::StagePlanarYuv420(const CodecFrame& in, uint32_t w,
+                                       uint32_t h, NvSciBufObj surfaceBuf) {
+    const uint32_t cw = w >> 1;  // chroma samples per row (each of U, V)
+    const uint32_t ch = h >> 1;
+    const size_t yBytes = static_cast<size_t>(w) * h;
+    const size_t cBytes = static_cast<size_t>(cw) * ch;  // each of U, V
+    std::vector<uint8_t> yPlane(yBytes, 0);
+    std::vector<uint8_t> uPlane(cBytes, 0);
+    std::vector<uint8_t> vPlane(cBytes, 0);
+    std::memcpy(yPlane.data(), in.data, yBytes);
+    if (in.format == PixelFormat::I420) {
+        std::memcpy(uPlane.data(), in.data + yBytes, cBytes);
+        std::memcpy(vPlane.data(), in.data + yBytes + cBytes, cBytes);
+    } else {
+        const uint8_t* srcUV = in.data + yBytes;
+        for (uint32_t r = 0; r < ch; ++r) {
+            const uint8_t* uvRow = srcUV + static_cast<size_t>(r) * w;
+            uint8_t* uRow = uPlane.data() + static_cast<size_t>(r) * cw;
+            uint8_t* vRow = vPlane.data() + static_cast<size_t>(r) * cw;
+            for (uint32_t c = 0; c < cw; ++c) {
+                uRow[c] = uvRow[2 * c];
+                vRow[c] = uvRow[2 * c + 1];
+            }
+        }
+    }
+
+    const void* srcPtrs[3] = {yPlane.data(), uPlane.data(), vPlane.data()};
+    const uint32_t srcSizes[3] = {static_cast<uint32_t>(yBytes),
+                                  static_cast<uint32_t>(cBytes),
+                                  static_cast<uint32_t>(cBytes)};
+    const uint32_t srcPitches[3] = {w, cw, cw};
+    NvSciError putErr = NvSciBufObjPutPixels(surfaceBuf, nullptr, srcPtrs,
+                                             srcSizes, srcPitches);
+    if (putErr != NvSciError_Success) {
+        std::cerr << "NvMediaEncoder: NvSciBufObjPutPixels failed: 0x"
+                  << std::hex << putErr << std::dec << " (3-plane " << w << "x"
+                  << h << " pitch " << w << ", " << cw << "x" << ch
+                  << " pitch " << cw << ")" << std::endl;
+        return false;
+    }
+    return true;
+}
+
 bool NvMediaEncoder::DrainJpeg() {
     uint32_t bytesAvailable = 0;
     NvMediaStatus s = NvMediaIJPEBitsAvailable(
@@ -1174,19 +1203,7 @@ bool NvMediaEncoder::DrainJpeg() {
                   << s << std::dec << std::endl;
         return false;
     }
-
-    const uint32_t bytes = numBytes;
-    uint8_t* data = new uint8_t[bytes];
-    std::memcpy(data, storage.data(), bytes);
-    CodecFrame packet;
-    packet.data = data;
-    packet.size = bytes;
-    packet.width = static_cast<int>(width_);
-    packet.height = static_cast<int>(height_);
-    packet.format = PixelFormat::Unknown;  // encoded JPEG bitstream
-    packet.release = [data] { delete[] data; };
-    outQueue_.push_back(std::move(packet));
-    return true;
+    return PushBitstreamPacket(storage.data(), numBytes);
 }
 
 bool NvMediaEncoder::FillJpegFrame(const CodecFrame& in) {
@@ -1259,42 +1276,9 @@ bool NvMediaEncoder::FillJpegFrame(const CodecFrame& in) {
                   << sigErr << std::dec << std::endl;
     }
 
-    // 3-plane planar YUV420 upload (same convention as the IEP path: this DRIVE
-    // build's PutPixels rejects 2-plane semi-planar for a multi-plane surface).
-    const uint32_t cw = w >> 1;
-    const uint32_t ch = h >> 1;
-    const size_t yBytes = static_cast<size_t>(w) * h;
-    const size_t cBytes = static_cast<size_t>(cw) * ch;
-    std::vector<uint8_t> yPlane(yBytes, 0);
-    std::vector<uint8_t> uPlane(cBytes, 0);
-    std::vector<uint8_t> vPlane(cBytes, 0);
-    std::memcpy(yPlane.data(), in.data, yBytes);
-    if (in.format == PixelFormat::I420) {
-        std::memcpy(uPlane.data(), in.data + yBytes, cBytes);
-        std::memcpy(vPlane.data(), in.data + yBytes + cBytes, cBytes);
-    } else {
-        const uint8_t* srcUV = in.data + yBytes;
-        for (uint32_t r = 0; r < ch; ++r) {
-            const uint8_t* uvRow = srcUV + static_cast<size_t>(r) * w;
-            uint8_t* uRow = uPlane.data() + static_cast<size_t>(r) * cw;
-            uint8_t* vRow = vPlane.data() + static_cast<size_t>(r) * cw;
-            for (uint32_t c = 0; c < cw; ++c) {
-                uRow[c] = uvRow[2 * c];
-                vRow[c] = uvRow[2 * c + 1];
-            }
-        }
-    }
-
-    const void* srcPtrs[3] = {yPlane.data(), uPlane.data(), vPlane.data()};
-    const uint32_t srcSizes[3] = {static_cast<uint32_t>(yBytes),
-                                  static_cast<uint32_t>(cBytes),
-                                  static_cast<uint32_t>(cBytes)};
-    const uint32_t srcPitches[3] = {w, cw, cw};
-    NvSciError putErr = NvSciBufObjPutPixels(surface.buf, nullptr, srcPtrs,
-                                             srcSizes, srcPitches);
-    if (putErr != NvSciError_Success) {
-        std::cerr << "NvMediaEncoder: IJPE PutPixels failed: 0x" << std::hex
-                  << putErr << std::dec << std::endl;
+    // 3-plane planar YUV420 upload (same convention as the IEP path; see
+    // StagePlanarYuv420 for why the extra plane split is required).
+    if (!StagePlanarYuv420(in, w, h, surface.buf)) {
         NvSciSyncFenceClear(&preFence);
         return false;
     }
@@ -1367,18 +1351,7 @@ bool NvMediaEncoder::Drain() {
 
     // Hand the encoded bytes to the caller via a heap buffer owned by the
     // frame; GetFrame() transfers ownership to the app, which releases it.
-    const uint32_t bytes = numBytes;
-    uint8_t* data = new uint8_t[bytes];
-    std::memcpy(data, storage.data(), bytes);
-    CodecFrame packet;
-    packet.data = data;
-    packet.size = bytes;
-    packet.width = static_cast<int>(width_);
-    packet.height = static_cast<int>(height_);
-    packet.format = PixelFormat::Unknown;  // encoded bitstream, not a surface
-    packet.release = [data] { delete[] data; };
-    outQueue_.push_back(std::move(packet));
-    return true;
+    return PushBitstreamPacket(storage.data(), numBytes);
 }
 
 bool NvMediaEncoder::GetFrame(CodecFrame& out) {

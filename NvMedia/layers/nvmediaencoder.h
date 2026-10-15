@@ -45,6 +45,15 @@ private:
 
     bool SetupSync();
     bool Drain();
+    // Shared tail of both drains: copy `numBytes` from `bits` into a
+    // heap-owned CodecFrame and queue it for GetFrame(). Always true.
+    bool PushBitstreamPacket(const uint8_t* bits, uint32_t numBytes);
+    // Stage a host frame as a 3-plane planar YUV420 (Y, U, V) into
+    // `surfaceBuf` via NvSciBufObjPutPixels — the upload both the IEP and the
+    // IJPE host paths perform before their respective FeedFrame. False on a
+    // PutPixels failure; the caller still owns any fence it inserted.
+    bool StagePlanarYuv420(const CodecFrame& in, uint32_t w, uint32_t h,
+                           NvSciBufObj surfaceBuf);
 
     // --- JPEG (IJPE) path ---
     // JPEG is image-level (no rate control / GOP / picture params): each fed

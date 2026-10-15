@@ -2,6 +2,8 @@
 
 #include "qsv_va_allocator.h"
 
+#include "qsv_common.h"
+
 #include <dlfcn.h>
 #include <cstring>
 #include <cstdlib>
@@ -203,17 +205,9 @@ uint8_t* VaApiAllocator::copySurfaceToHost(VASurfaceID id, int w, int h,
         fns_.vaUnmapBuffer(display_, img.buf);
         return nullptr;
     }
-    const uint8_t* ySrc = buf + img.offsets[0];
-    for (int row = 0; row < h; row++) {
-        std::memcpy(out + static_cast<size_t>(w) * row,
-                    ySrc + static_cast<size_t>(yStride) * row, w);
-    }
-    const uint8_t* uvSrc = buf + img.offsets[1];
-    uint8_t* uvDst = out + static_cast<size_t>(w) * h;
-    for (int row = 0; row < h / 2; row++) {
-        std::memcpy(uvDst + static_cast<size_t>(w) * row,
-                    uvSrc + static_cast<size_t>(uvStride) * row, w);
-    }
+    copyPitchedRows(out, w, buf + img.offsets[0], yStride, w, h);
+    copyPitchedRows(out + static_cast<size_t>(w) * h, w,
+                    buf + img.offsets[1], uvStride, w, h / 2);
     fns_.vaUnmapBuffer(display_, img.buf);
     if (outStride) *outStride = w;
     return out;

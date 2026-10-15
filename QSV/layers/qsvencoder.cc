@@ -56,17 +56,9 @@ mfxStatus FillSurfaceFromFrame(mfxFrameSurface1* surf, const CodecFrame& in) {
     if (in.size < yBytes + uvBytes) {
         return MFX_ERR_NOT_ENOUGH_BUFFER;
     }
-    // Y plane.
-    for (mfxU16 i = 0; i < h; i++) {
-        std::memcpy(surf->Data.Y + static_cast<size_t>(pitch) * i,
-                    in.data + static_cast<size_t>(w) * i, w);
-    }
-    // Interleaved UV plane.
-    const uint8_t* srcUV = in.data + yBytes;
-    for (mfxU16 i = 0; i < h / 2; i++) {
-        std::memcpy(surf->Data.UV + static_cast<size_t>(pitch) * i,
-                    srcUV + static_cast<size_t>(w) * i, w);
-    }
+    // Y plane, then the interleaved UV plane (both from tightly packed rows).
+    copyPitchedRows(surf->Data.Y, pitch, in.data, w, w, h);
+    copyPitchedRows(surf->Data.UV, pitch, in.data + yBytes, w, w, h / 2);
     return MFX_ERR_NONE;
 }
 

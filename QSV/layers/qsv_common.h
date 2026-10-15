@@ -9,6 +9,8 @@
 
 #include <dlfcn.h>
 
+#include <cstddef>
+#include <cstring>
 #include <iostream>
 #include <string>
 
@@ -292,6 +294,20 @@ inline mfxU32 mapCodec(const std::string& codec) {
     if (codec == "vc1")  return MFX_CODEC_VC1;
     if (codec == "mpeg2") return MFX_CODEC_MPEG2;
     return 0; // unknown — caller must reject
+}
+
+// Copies `rows` rows of `rowBytes` between two buffers that may carry row
+// padding: `src` advances by srcStride per row, `dst` by dstStride. The one
+// shape behind every plane copy in the backend — the decoder packing a mapped
+// surface out, the encoder filling a mapped surface from packed input, and the
+// VA allocator deriving packed NV12 from a VAImage — which had drifted into
+// three row-loop copies with the same arithmetic.
+inline void copyPitchedRows(uint8_t* dst, size_t dstStride,
+                            const uint8_t* src, size_t srcStride,
+                            size_t rowBytes, size_t rows) {
+    for (size_t i = 0; i < rows; i++) {
+        std::memcpy(dst + dstStride * i, src + srcStride * i, rowBytes);
+    }
 }
 
 } // namespace qsv

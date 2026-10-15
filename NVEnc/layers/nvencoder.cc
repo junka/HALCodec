@@ -134,6 +134,22 @@ public:
     }
 
 private:
+    // EndEncode + hand every packet out, then mark the stream finished. The
+    // two drain sites (eof_ seen with an empty queue, and the zero-size EOS
+    // marker frame) were the same 13 lines twice.
+    void finishAndDrain() {
+        vPacket_.clear();
+        encoder_->EndEncode(vPacket_);
+        std::lock_guard<std::mutex> lk(mu_);
+        int w = encoder_->GetEncodeWidth();
+        int h = encoder_->GetEncodeHeight();
+        for (const auto& p : vPacket_) {
+            packets_.push(TakePacket(p, w, h));
+        }
+        finished_ = true;
+        cvPackets_.notify_all();
+    }
+
     NvEncoderCuda* encoder_;
     CUcontext cudaCtx_ = nullptr;
 
@@ -146,12 +162,14 @@ private:
     bool finished_ = false;
     bool workerError_ = false;
     std::thread worker_;
+    // The packet sink EndEncode/EncodeFrame append into. Worker-thread-only,
+    // so it lives here rather than on run()'s stack for finishAndDrain().
+    std::vector<NvEncOutputFrame> vPacket_;
 
     void run() {
         if (cudaCtx_) {
             cuCtxSetCurrent(cudaCtx_);
         }
-        std::vector<NvEncOutputFrame> vPacket;
         while (true) {
             CodecFrame input;
             bool eos = false;
@@ -173,32 +191,14 @@ private:
             }
 
             if (eos) {
-                vPacket.clear();
-                encoder_->EndEncode(vPacket);
-                std::lock_guard<std::mutex> lk(mu_);
-                int w = encoder_->GetEncodeWidth();
-                int h = encoder_->GetEncodeHeight();
-                for (const auto& p : vPacket) {
-                    packets_.push(TakePacket(p, w, h));
-                }
-                finished_ = true;
-                cvPackets_.notify_all();
+                finishAndDrain();
                 return;
             }
 
             // EOS marker frame (zero-size host frame) takes the drain path too.
             if (input.size == 0 && input.locality == FrameLocality::Host) {
                 if (input.release) input.release();
-                vPacket.clear();
-                encoder_->EndEncode(vPacket);
-                std::lock_guard<std::mutex> lk(mu_);
-                int w = encoder_->GetEncodeWidth();
-                int h = encoder_->GetEncodeHeight();
-                for (const auto& p : vPacket) {
-                    packets_.push(TakePacket(p, w, h));
-                }
-                finished_ = true;
-                cvPackets_.notify_all();
+                finishAndDrain();
                 return;
             }
 
@@ -235,16 +235,16 @@ private:
                     encoderInputFrame->chromaOffsets,
                     encoderInputFrame->numChromaPlanes);
             }
-            vPacket.clear();
-            encoder_->EncodeFrame(vPacket);
+            vPacket_.clear();
+            encoder_->EncodeFrame(vPacket_);
 
             if (input.release) input.release();
 
-            if (!vPacket.empty()) {
+            if (!vPacket_.empty()) {
                 std::lock_guard<std::mutex> lk(mu_);
                 int w = encoder_->GetEncodeWidth();
                 int h = encoder_->GetEncodeHeight();
-                for (const auto& p : vPacket) {
+                for (const auto& p : vPacket_) {
                     packets_.push(TakePacket(p, w, h));
                 }
                 cvPackets_.notify_all();
