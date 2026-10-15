@@ -71,20 +71,11 @@ endif()
 # (the figure is deliberately well below what a working encoder reaches, because
 # hal declares full range and ffmpeg's psnr filter rescales against the
 # limited-range raw input).
-execute_process(COMMAND ${FFMPEG} -hide_banner -loglevel info
+halcodec_psnr_average(PSNR "vtenc.hevc_main10"
                 -s 320x240 -r 25 -f rawvideo -pixel_format p010le -i ${P010_RAW}
-                -f hevc -i ${OUT_H265}
-                -lavfi "[0:v]settb=AVTB[a];[a][1:v]psnr" -f null -
-                RESULT_VARIABLE rc5 ERROR_VARIABLE psnr_out OUTPUT_QUIET)
-if(NOT rc5 EQUAL 0)
-    message(FATAL_ERROR "psnr comparison failed: ${psnr_out}")
-endif()
-string(REGEX MATCH "average:([0-9]+)\\.([0-9]+)" _m "${psnr_out}")
-set(PSNR_WHOLE "${CMAKE_MATCH_1}")
-if(NOT PSNR_WHOLE GREATER 25)
-    message(FATAL_ERROR "encoded frames do not match the input (PSNR "
-            "${psnr_out}) -- check the 10-bit plane copy")
-endif()
+                -f hevc -i ${OUT_H265})
+halcodec_psnr_gate(PSNR 25 "vtenc.hevc_main10"
+                "encoded frames do not match the input -- check the 10-bit plane copy")
 
 message("vtenc.hevc_main10: passed (${frames} frames, Main 10 / yuv420p10le, "
         "PSNR ${PSNR_WHOLE} dB)")

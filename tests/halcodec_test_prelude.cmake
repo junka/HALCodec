@@ -37,3 +37,61 @@ if(NOT COMMAND halcodec_require)
         endif()
     endmacro()
 endif()
+
+# --- PSNR gates ----------------------------------------------------------------
+#
+# Eight integration cases compare decoded/encoded samples the same way -- run
+# ffmpeg's psnr filter, fish `average:` out of its stderr, gate the number
+# against a floor -- and three of them re-run that inside a loop to prove a
+# picture landed in the file named after its own input frame. The copies had
+# drifted into three different `average:` regexes, and a failure message that
+# names the wrong variable is the one bug no other test can catch. Two macros
+# cover every site:
+#
+#   halcodec_psnr_average(PSNR "vtdec.jpeg vs ffmpeg"
+#       -s 320x240 -f rawvideo -pixel_format nv12 -i ${FF_REF}
+#       -s 320x240 -f rawvideo -pixel_format nv12 -i ${HAL_OUT})
+#   halcodec_psnr_gate(PSNR 45 "vtdec.jpeg"
+#       "hal_dec and ffmpeg disagree -- check the picture size and the plane copy")
+#
+# halcodec_psnr_average runs <ffmpegArgs...> after `-hide_banner -loglevel
+# info` and before the default two-input psnr graph; set HALCODEC_PSNR_GRAPH
+# first to replace the graph (the 10-bit profile cases need format= filters
+# on both branches). It sets <outVar> to the reported average and
+# FATAL_ERRORs if ffmpeg exits non-zero or reports no average.
+# halcodec_psnr_gate FATAL_ERRORs unless <psnrVar> is greater than <floor>,
+# with <hint> naming what to check and ffmpeg's full psnr output appended --
+# the average line alone rarely says enough to debug a plane-copy bug.
+
+if(NOT COMMAND halcodec_psnr_average)
+    macro(halcodec_psnr_average outVar label)
+        set(_halcodec_graph "[0:v]settb=AVTB[a];[a][1:v]psnr")
+        if(HALCODEC_PSNR_GRAPH)
+            set(_halcodec_graph "${HALCODEC_PSNR_GRAPH}")
+        endif()
+        execute_process(COMMAND ${FFMPEG} -hide_banner -loglevel info
+                        ${ARGN}
+                        -lavfi "${_halcodec_graph}" -f null -
+                        RESULT_VARIABLE _halcodec_rc
+                        ERROR_VARIABLE _halcodec_err OUTPUT_QUIET)
+        if(NOT _halcodec_rc EQUAL 0)
+            message(FATAL_ERROR
+                "psnr comparison failed for ${label}: ${_halcodec_err}")
+        endif()
+        string(REGEX MATCH "average:([0-9]+\\.?[0-9]*)" _halcodec_m "${_halcodec_err}")
+        if(NOT CMAKE_MATCH_1)
+            message(FATAL_ERROR "no psnr average for ${label}: ${_halcodec_err}")
+        endif()
+        set(${outVar} "${CMAKE_MATCH_1}")
+    endmacro()
+
+    # Reads _halcodec_err left behind by a preceding halcodec_psnr_average so
+    # the gate can show the whole psnr output, not just the average.
+    macro(halcodec_psnr_gate psnrVar floor label hint)
+        if(NOT ${psnrVar} GREATER ${floor})
+            message(FATAL_ERROR
+                "${label}: PSNR ${${psnrVar}} dB is not above ${floor}"
+                " -- ${hint}\n${_halcodec_err}")
+        endif()
+    endmacro()
+endif()

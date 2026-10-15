@@ -78,21 +78,12 @@ endif()
 # bits below 10-bit precision that ffmpeg discards, so this is a PSNR rather than a
 # byte compare: the two decoders measure ~63 dB apart here, while a half-height
 # chroma copy or a 6-bit rescale lands in single digits.
-execute_process(COMMAND ${FFMPEG} -hide_banner -loglevel info
+halcodec_psnr_average(PSNR "vtdec.prores vs ffmpeg"
                 -s 320x240 -f rawvideo -pixel_format p210le -i ${FF_REF}
-                -s 320x240 -f rawvideo -pixel_format p210le -i ${HAL_OUT}
-                -lavfi "[0:v]settb=AVTB[a];[a][1:v]psnr" -f null -
-                RESULT_VARIABLE rc5 ERROR_VARIABLE psnr_out OUTPUT_QUIET)
-if(NOT rc5 EQUAL 0)
-    message(FATAL_ERROR "psnr comparison failed: ${psnr_out}")
-endif()
-string(REGEX MATCH "average:([0-9]+)" _m "${psnr_out}")
-set(PSNR "${CMAKE_MATCH_1}")
-if(NOT PSNR GREATER 50)
-    message(FATAL_ERROR "hal_dec and ffmpeg disagree on the same ProRes stream "
-            "(PSNR ${PSNR} dB) -- check the dimensions, the per-plane copy and the "
-            "chroma plane height:\n${psnr_out}")
-endif()
+                -s 320x240 -f rawvideo -pixel_format p210le -i ${HAL_OUT})
+halcodec_psnr_gate(PSNR 50 "vtdec.prores"
+                "hal_dec and ffmpeg disagree -- check the dimensions, the per-plane "
+                "copy and the chroma plane height")
 message("vtdec.prores: passed (${FRAMES} frames, ${hal_size} bytes, PSNR ${PSNR} dB)")
 
 # ---------------------------------------------------------------------------
@@ -191,21 +182,12 @@ foreach(size 320x240 336x240)
                 "byte-identical to ffmpeg")
         continue()
     endif()
-    execute_process(COMMAND ${FFMPEG} -hide_banner -loglevel info
+    halcodec_psnr_average(PSNR444 "vtdec.prores_4444 ${size}"
                     -s ${size} -f rawvideo -pixel_format yuv444p16le -i ${FF444}
-                    -s ${size} -f rawvideo -pixel_format yuv444p16le -i ${HAL444}
-                    -lavfi "[0:v]settb=AVTB[a];[a][1:v]psnr" -f null -
-                    RESULT_VARIABLE rc11 ERROR_VARIABLE psnr444 OUTPUT_QUIET)
-    if(NOT rc11 EQUAL 0)
-        message(FATAL_ERROR "psnr comparison failed: ${psnr444}")
-    endif()
-    string(REGEX MATCH "average:([0-9]+)" _m444 "${psnr444}")
-    set(PSNR444 "${CMAKE_MATCH_1}")
-    if(NOT PSNR444 GREATER 50)
-        message(FATAL_ERROR "${size}: hal_dec and ffmpeg disagree on the same 4:4:4 "
-                "stream (PSNR ${PSNR444} dB) -- check the Cb:Cr slot order and the "
-                "per-row de-interleave:\n${psnr444}")
-    endif()
+                    -s ${size} -f rawvideo -pixel_format yuv444p16le -i ${HAL444})
+    halcodec_psnr_gate(PSNR444 50 "vtdec.prores_4444 ${size}"
+                    "hal_dec and ffmpeg disagree -- check the Cb:Cr slot order and "
+                    "the per-row de-interleave")
     message("vtdec.prores_4444 ${size}: ${F444} frames, ${hal444_size} bytes, "
             "PSNR ${PSNR444} dB")
 endforeach()

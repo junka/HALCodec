@@ -55,20 +55,12 @@ endif()
 
 # One frame, so the whole-buffer comparison is a PSNR rather than a span walk. A
 # plane mis-copy (aligned chroma offset treated as compact) shows up here at once.
-execute_process(COMMAND ${FFMPEG} -hide_banner -loglevel info
+halcodec_psnr_average(PSNR "vtdec.jpeg vs ffmpeg"
                 -s 320x240 -f rawvideo -pixel_format nv12 -i ${FF_REF}
-                -s 320x240 -f rawvideo -pixel_format nv12 -i ${HAL_OUT}
-                -lavfi "[0:v]settb=AVTB[a];[a][1:v]psnr" -f null -
-                RESULT_VARIABLE rc4 ERROR_VARIABLE psnr_out OUTPUT_QUIET)
-if(NOT rc4 EQUAL 0)
-    message(FATAL_ERROR "psnr comparison failed: ${psnr_out}")
-endif()
-string(REGEX MATCH "average:([0-9]+)" _m "${psnr_out}")
-set(PSNR "${CMAKE_MATCH_1}")
-if(NOT PSNR GREATER 45)
-    message(FATAL_ERROR "hal_dec and ffmpeg disagree on the same JPEG (PSNR ${PSNR} "
-            "dB) -- check the picture size and the per-plane copy:\n${psnr_out}")
-endif()
+                -s 320x240 -f rawvideo -pixel_format nv12 -i ${HAL_OUT})
+halcodec_psnr_gate(PSNR 45 "vtdec.jpeg"
+                "hal_dec and ffmpeg disagree -- check the picture size and the "
+                "per-plane copy")
 message("vtdec.jpeg: passed (1 frame, ${hal_size} bytes, PSNR ${PSNR} dB)")
 
 # 4:4:4 decodes into a buffer that is not two-plane NV12, so it has to be refused

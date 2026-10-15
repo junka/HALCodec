@@ -104,22 +104,16 @@ foreach(case ${CASES})
     # the coder's own output format, then psnr. The floor is low on purpose -- HAL
     # declares full range while ffmpeg reads the raw side as limited range, which
     # costs several dB on content that is otherwise a clean round trip.
-    execute_process(COMMAND ${FFMPEG} -hide_banner -loglevel info
+    # Both branches forced into the coder's own output format before psnr.
+    set(HALCODEC_PSNR_GRAPH
+        "[0:v]format=${want_fmt},settb=AVTB[a];[1:v]format=${want_fmt}[b];[a][b]psnr")
+    halcodec_psnr_average(PSNR "vtenc.hevc_profiles ${profile} from ${fmt}"
                     -s 320x240 -r 25 -f rawvideo -pixel_format ${ff_fmt} -i ${src}
-                    -f hevc -i ${stream}
-                    -lavfi "[0:v]format=${want_fmt},settb=AVTB[a];[1:v]format=${want_fmt}[b];[a][b]psnr"
-                    -f null -
-                    RESULT_VARIABLE rc4 ERROR_VARIABLE psnr_out OUTPUT_QUIET)
-    if(NOT rc4 EQUAL 0)
-        message(FATAL_ERROR "psnr comparison failed: ${psnr_out}")
-    endif()
-    string(REGEX MATCH "average:([0-9]+)" _m "${psnr_out}")
-    set(PSNR "${CMAKE_MATCH_1}")
-    if(NOT PSNR GREATER 20)
-        message(FATAL_ERROR "${profile} from ${fmt}: PSNR ${PSNR} dB against its "
-                "own source -- a wrong plane pitch or a dropped chroma plane "
-                "lands here\n${psnr_out}")
-    endif()
+                    -f hevc -i ${stream})
+    unset(HALCODEC_PSNR_GRAPH)
+    halcodec_psnr_gate(PSNR 20 "vtenc.hevc_profiles ${profile} from ${fmt}"
+                    "PSNR against its own source: a wrong plane pitch or a "
+                    "dropped chroma plane lands here")
     file(SIZE ${stream} stream_bytes)
     message("vtenc.hevc_profiles ${profile} from ${fmt}: ${FRAMES} frames, "
             "${stream_bytes} bytes, ${want_fmt}, PSNR ${PSNR} dB")

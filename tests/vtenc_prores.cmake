@@ -125,21 +125,12 @@ if(NOT rt_size EQUAL WANT_BYTES)
     message(FATAL_ERROR "round trip gave ${rt_size} bytes, expected ${WANT_BYTES} -- "
             "the picture that came back is not the one that went in")
 endif()
-execute_process(COMMAND ${FFMPEG} -hide_banner -loglevel info
+halcodec_psnr_average(PSNR "vtenc.prores round trip"
                 -s 320x240 -f rawvideo -pixel_format p210le -i ${P210}
-                -s 320x240 -f rawvideo -pixel_format p210le -i ${RT}
-                -lavfi "[0:v]settb=AVTB[a];[a][1:v]psnr" -f null -
-                RESULT_VARIABLE rc5 ERROR_VARIABLE psnr_out OUTPUT_QUIET)
-if(NOT rc5 EQUAL 0)
-    message(FATAL_ERROR "psnr comparison failed: ${psnr_out}")
-endif()
-string(REGEX MATCH "average:([0-9]+)" _m "${psnr_out}")
-set(PSNR "${CMAKE_MATCH_1}")
-if(NOT PSNR GREATER 40)
-    message(FATAL_ERROR "the decoded frames do not match what was encoded (PSNR "
-            "${PSNR} dB) -- check the plane copy into the source buffer and the "
-            "sample handed over:\n${psnr_out}")
-endif()
+                -s 320x240 -f rawvideo -pixel_format p210le -i ${RT})
+halcodec_psnr_gate(PSNR 40 "vtenc.prores"
+                "the decoded frames do not match what was encoded -- check the "
+                "plane copy into the source buffer and the sample handed over")
 message("vtenc.prores: round trip ${FRAMES} frames, ${rt_size} bytes, PSNR ${PSNR} dB")
 
 # --- knobs ProRes has no use for must be refused, not swallowed -----------------

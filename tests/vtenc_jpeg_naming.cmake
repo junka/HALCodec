@@ -146,19 +146,9 @@ foreach(i RANGE 0 ${LAST})
     set(own_psnr -1)
     set(rival_psnr -1)
     foreach(k RANGE 0 ${LAST})
-        execute_process(COMMAND ${FFMPEG} -hide_banner -loglevel info
+        halcodec_psnr_average(score "image ${i} against frame ${k}"
                         -s 320x240 -f rawvideo -pixel_format nv12
-                        -i "${CDIR}/c${k}.nv12" -i ${jpg}
-                        -lavfi "[0:v]settb=AVTB[a];[a][1:v]psnr" -f null -
-                        RESULT_VARIABLE rcp ERROR_VARIABLE psnr_out OUTPUT_QUIET)
-        if(NOT rcp EQUAL 0)
-            message(FATAL_ERROR "psnr comparison failed for image ${i}: ${psnr_out}")
-        endif()
-        string(REGEX MATCH "average:([0-9]+\\.?[0-9]*)" _m "${psnr_out}")
-        if(NOT CMAKE_MATCH_1)
-            message(FATAL_ERROR "no psnr average for image ${i}: ${psnr_out}")
-        endif()
-        set(score "${CMAKE_MATCH_1}")
+                        -i "${CDIR}/c${k}.nv12" -i ${jpg})
         if(k EQUAL i)
             set(own_psnr "${score}")
         elseif(score GREATER rival_psnr)
