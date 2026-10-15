@@ -28,7 +28,11 @@
 #include <vector>
 
 #include <unistd.h>
+#if defined(__APPLE__)
 #include <mach/mach_time.h>
+#else
+#include <time.h>
+#endif
 
 #include <SDL2/SDL.h>
 #include <SDL2/SDL_opengl.h>
@@ -41,6 +45,9 @@
 namespace {
 
 // ---- 计时 ----
+// macOS: mach_absolute_time 是纳秒 tick(mach_timebase_info 给出换算比).
+// Linux/Windows: 统一用 POSIX CLOCK_MONOTONIC(纳秒) — NsToSec 即平凡换算.
+#if defined(__APPLE__)
 static inline uint64_t NowNs() { return mach_absolute_time(); }
 static inline double NsToSec(uint64_t ns) {
     static mach_timebase_info_data_t info;
@@ -48,6 +55,14 @@ static inline double NsToSec(uint64_t ns) {
     (void)once;
     return (double)(ns * info.numer) / (double)info.denom / 1e9;
 }
+#else
+static inline uint64_t NowNs() {
+    struct timespec ts;
+    clock_gettime(CLOCK_MONOTONIC, &ts);
+    return (uint64_t)ts.tv_sec * 1000000000ull + (uint64_t)ts.tv_nsec;
+}
+static inline double NsToSec(uint64_t ns) { return (double)ns / 1e9; }
+#endif
 
 // 从 Annex-B 流中提取 SPS+PPS (H.264) 或 VPS+SPS+PPS (HEVC),输出 AVCC 格式
 // [4-byte BE len][nalu][4-byte len][nalu]...  — VT/VTDecoder backend 要求.
@@ -56,8 +71,9 @@ static inline double NsToSec(uint64_t ns) {
 // 的 forbidden_zero_bit 都必须是 0!正确做法是看 type 值范围:
 //   H.264 types  7(SPS),8(PPS),5(IDR),6(SEI)   不会出现在 HEVC;
 //   HEVC  types 32(VPS),33(SPS),34(PPS),16-21  不会出现在 H.264.
-static void ExtractAnnexBParamSets(const uint8_t* data, size_t size,
-                                   std::vector<uint8_t>* out) {
+// 返回检测到的 codec: 1=HEVC, 0=H.264, -1=未能判定.
+static int ExtractAnnexBParamSets(const uint8_t* data, size_t size,
+                                  std::vector<uint8_t>* out) {
     // First pass:扫描所有 NALs,精确 detect codec
     int seenHEVCVPS = 0, seenH264SPS = 0;
     std::vector<std::pair<uint8_t*, size_t>> nals;  // (nalu ptr, nalu size, NO start code)
@@ -81,7 +97,9 @@ static void ExtractAnnexBParamSets(const uint8_t* data, size_t size,
         if (hevctype == 32) seenHEVCVPS = 1;
         i = j;
     }
-    int isHEVC = seenHEVCVPS ? 1 : 0;
+    // 判定优先级:见到 H.264 SPS 就是 H.264(VPS 的 32 是 H.264 里可能出现的
+    // 误命中,顺序相关),否则看 HEVC VPS,再退回 HEVC SPS(33).
+    int isHEVC = (!seenH264SPS && seenHEVCVPS) ? 1 : 0;
     if (!isHEVC && !seenH264SPS) {
         for (auto& [p, sz] : nals) if (((p[0] >> 1) & 0x3F) == 33) { isHEVC = 1; break; }
     }
@@ -109,6 +127,8 @@ static void ExtractAnnexBParamSets(const uint8_t* data, size_t size,
     std::cerr << "[hal_player] AnnexB PS: isHEVC=" << isHEVC
               << " gotVPS=" << gotVPS << " gotSPS=" << gotSPS << " gotPPS=" << gotPPS
               << " extradata=" << out->size() << " bytes\n";
+    if (!gotSPS || !gotPPS) return -1;   // 没抓到关键 PS → 交给 caller 的扩展名兜底
+    return isHEVC;
 }
 
 // NV12 (semi-planar YUV420) → BGRA (packed,row-major).
@@ -276,7 +296,26 @@ int main(int argc, char* argv[]) {
     halcodec::CodecParams params;
     params.inputs.push_back(path);
     params.zeroCopy = true;  // 让 backend 优先 device memory (NV12 on GPU)
-    ExtractAnnexBParamSets(raw.data(), raw.size(), &params.extradata);
+    int det = ExtractAnnexBParamSets(raw.data(), raw.size(), &params.extradata);
+
+    // codec:extradata 探测优先(以流内容为准),探测不出来才退回扩展名.
+    // 少了这一步,params.codec 默认为空,qsvdec 会以 "unsupported codec ''" 拒绝.
+    if (det >= 0) {
+        params.codec = det ? "hevc" : "h264";
+    } else {
+        auto ext = path.substr(path.find_last_of('.') + 1);
+        if (ext == "h264" || ext == "264") params.codec = "h264";
+        else if (ext == "h265" || ext == "hevc" || ext == "265") params.codec = "hevc";
+        else if (ext == "av1" || ext == "obu") params.codec = "av1";
+        else if (ext == "vp9") params.codec = "vp9";
+        else if (ext == "vp8") params.codec = "vp8";
+        else if (ext == "mjpeg" || ext == "mjpg" || ext == "jpg" || ext == "jpeg") params.codec = "jpeg";
+        else if (ext == "vc1") params.codec = "vc1";
+        else if (ext == "mpeg2" || ext == "mpg") params.codec = "mpeg2";
+        else params.codec = "h264";
+    }
+    std::cerr << "[hal_player] codec: " << params.codec
+              << " (detected=" << det << ")\n";
 
     if (!dec->Initialize(params)) {
         std::cerr << "decoder Initialize failed\n";

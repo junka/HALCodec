@@ -181,7 +181,10 @@ if(SDL2_FOUND)
         find_library(COCOA_FRAMEWORK Cocoa REQUIRED)
         target_link_libraries(hal_player PRIVATE halcodec_core ${SDL2_LIBRARIES} ${GL_FRAMEWORK} ${COCOA_FRAMEWORK})
     else()
-        target_link_libraries(hal_player PRIVATE halcodec_core ${SDL2_LIBRARIES})
+        # Linux/Windows: GL symbols come from the platform GL lib (libGL on
+        # Linux). macOS gets them from the OpenGL framework above.
+        find_package(OpenGL REQUIRED)
+        target_link_libraries(hal_player PRIVATE halcodec_core ${SDL2_LIBRARIES} OpenGL::GL)
     endif()
     target_include_directories(hal_player PRIVATE ${SDL2_INCLUDE_DIRS})
     if(TARGET SDL2::SDL2)
