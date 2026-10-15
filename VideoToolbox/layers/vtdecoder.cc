@@ -1229,12 +1229,18 @@ void VTDecoder::DecompressionCallback(
         packed10 = true;
     } else if (fourcc == kCVPixelFormatType_422YpCbCr8 ||
                fourcc == kCVPixelFormatType_422YpCbCr8FullRange ||
+               fourcc == FourccOf('4', '2', '2', 'v') ||
+               fourcc == FourccOf('4', '2', '2', 'f') ||
                fourcc == FourccOf('x', '4', '2', '2')) {
         // 8-bit 4:2:2 packed ('2vuy'/'yuv2'). Two planes like NV12: luma row is
         // w bytes, chroma row is 2*w bytes of interleaved CbCr -- only chroma
         // rows match luma rows (4:2:2 vs 4:2:0). Walks the plain memcpy path at
         // the end, so its output strides are the VT pitch (with padding), same
-        // as NV12/P010. Decodes H.264 High 4:2:2 and HEVC Main422 8-bit.
+        // as NV12/P010. Decodes H.264 High 4:2:2 and HEVC Main422 8-bit: which
+        // of the range-named fourccs a stream lands on is its range, not its
+        // codec -- '422v'/'422f' are the bi-planar video/full-range pair (the
+        // measured x265 Main 4:2:2 output), 'x422' the full-range one earlier
+        // streams arrived as. All carry the same NV16 byte layout.
         format = PixelFormat::NV16;
         chromaRows = h;
     } else if (fourcc == kCVPixelFormatType_OneComponent8 ||

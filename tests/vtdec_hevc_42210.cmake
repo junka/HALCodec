@@ -27,6 +27,21 @@
 include("${CMAKE_CURRENT_LIST_DIR}/halcodec_test_prelude.cmake")
 halcodec_require(HAL_DEC FFMPEG FFPROBE INPUT_NV12 WORKDIR)
 
+# Capability gate: the byte-exact P210 assertions below are only meaningful
+# when the backend claims HEVC 4:2:2 10-bit with P210 output. The claim comes
+# from codecinfo, whose answer is a real decode of an embedded Main 4:2:2 10
+# probe stream -- measured, machines whose hardware path has no such output
+# hand back 8-bit 4:2:2 (NV16) instead, which is exactly what a wrong chroma
+# height and a wrong bit depth both look like to a byte count. NO carries the
+# probe's evidence; UNKNOWN (no answer available) keeps the hard-run behavior.
+halcodec_decode_caps(CODECINFO vtbox hevc HEVC_CAPS)
+halcodec_caps_supports(HEVC_CAPS 10 422 P210 WANTP210)
+if(WANTP210 STREQUAL "NO")
+    message("SKIP vtdec.hevc_42210: vtbox does not claim HEVC 4:2:2 10-bit -> "
+            "P210. The embedded-stream probe reports: ${HEVC_CAPS_JSON}")
+    return()
+endif()
+
 set(FRAMES 3)
 
 foreach(size 320x240 640x360)

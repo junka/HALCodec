@@ -9,6 +9,7 @@
 #include <cstring>
 #include <iomanip>
 #include <iostream>
+#include <utility>
 #include <vector>
 
 #include <cuda.h>
@@ -243,6 +244,76 @@ std::string inputFormatsToString(const std::vector<NV_ENC_BUFFER_FORMAT>& format
     return out;
 }
 
+// One row of the structured decode matrix queryDecoderCaps() probes: a
+// codec x chroma x bit-depth combination, tagged with the human-readable
+// profile label the entry reports. The table only says what to ask; whether
+// a row yields an entry is decided at runtime by cuvidGetDecoderCaps.
+struct DecodeCapsProbe {
+    const char* codec;    // registry codec key ("h264", "hevc", ...)
+    cudaVideoCodec id;
+    cudaVideoChromaFormat chroma;
+    int depth;            // bits per component: 8/10/12
+    const char* profile;  // human-readable label for the entry
+};
+
+const DecodeCapsProbe kDecodeCapsProbes[] = {
+    {"h264",  cudaVideoCodec_H264,  cudaVideoChromaFormat_420, 8,  "High"},
+    {"hevc",  cudaVideoCodec_HEVC,  cudaVideoChromaFormat_420, 8,  "Main"},
+    {"hevc",  cudaVideoCodec_HEVC,  cudaVideoChromaFormat_420, 10, "Main 10"},
+    {"hevc",  cudaVideoCodec_HEVC,  cudaVideoChromaFormat_420, 12, "Main 12"},
+    // NVDEC has no 4:2:2 decode: the cudaVideoChromaFormat_422 query comes
+    // back bIsSupported=0 on every GPU. The rows are enumerated anyway (the
+    // honest answer is the query's, not an assumption) and can never produce
+    // an entry.
+    {"hevc",  cudaVideoCodec_HEVC,  cudaVideoChromaFormat_422, 8,  "Main 4:2:2"},
+    {"hevc",  cudaVideoCodec_HEVC,  cudaVideoChromaFormat_422, 10, "Main 4:2:2 10"},
+    {"hevc",  cudaVideoCodec_HEVC,  cudaVideoChromaFormat_422, 12, "Main 4:2:2 12"},
+    {"hevc",  cudaVideoCodec_HEVC,  cudaVideoChromaFormat_444, 8,  "Main 4:4:4"},
+    {"hevc",  cudaVideoCodec_HEVC,  cudaVideoChromaFormat_444, 10, "Main 4:4:4 10"},
+    {"hevc",  cudaVideoCodec_HEVC,  cudaVideoChromaFormat_444, 12, "Main 4:4:4 12"},
+    {"vp9",   cudaVideoCodec_VP9,   cudaVideoChromaFormat_420, 8,  "Profile 0"},
+    {"vp9",   cudaVideoCodec_VP9,   cudaVideoChromaFormat_420, 10, "Profile 2 10"},
+    // AV1 needs Video Codec SDK >= 10.0 for the cudaVideoCodec_AV1 enum; the
+    // driver rejects the query on GPUs without AV1 decode, which skips the
+    // rows at runtime.
+#if NVENCAPI_MAJOR_VERSION >= 10
+    {"av1",   cudaVideoCodec_AV1,   cudaVideoChromaFormat_420, 8,  "Main"},
+    {"av1",   cudaVideoCodec_AV1,   cudaVideoChromaFormat_420, 10, "Main 10"},
+#endif
+    {"mpeg1", cudaVideoCodec_MPEG1, cudaVideoChromaFormat_420, 8,  "Main"},
+    {"mpeg2", cudaVideoCodec_MPEG2, cudaVideoChromaFormat_420, 8,  "Main"},
+    {"mpeg4", cudaVideoCodec_MPEG4, cudaVideoChromaFormat_420, 8,  "Advanced Simple"},
+    {"jpeg",  cudaVideoCodec_JPEG,  cudaVideoChromaFormat_420, 8,  "Baseline"},
+};
+
+// Maps one bit of CUVIDDECODECAPS::nOutputFormatMask (a cudaVideoSurfaceFormat
+// index) to the HAL pixel format the decoded surface carries. Unknown for
+// surfaces HAL has no spelling for -- which is what keeps 10-bit 4:2:0 out of
+// the structured answer: the vendor headers define no P010 surface format
+// (10-bit 4:2:0 decode reports P016, a 12-bit-word layout HAL's P016 does not
+// claim for 10-bit content), so those rows are skipped by queryDecoderCaps
+// instead of mis-mapped. NV16/P216 (SDK >= 13) stay unmapped too: NVDEC does
+// not decode 4:2:2, and P216 has no HAL format either.
+PixelFormat halFormatForSurfaceBit(int bit) {
+    switch (bit) {
+        case cudaVideoSurfaceFormat_NV12: return PixelFormat::NV12;
+        case cudaVideoSurfaceFormat_P016: return PixelFormat::P016;
+        case cudaVideoSurfaceFormat_YUV444: return PixelFormat::YUV444P;
+        case cudaVideoSurfaceFormat_YUV444_16Bit: return PixelFormat::YUV444P16LE;
+        default: return PixelFormat::Unknown;
+    }
+}
+
+// Numeric chroma-subsampling value for a DecodeCapsEntry (Monochrome -> 0).
+int chromaNumber(cudaVideoChromaFormat chroma) {
+    switch (chroma) {
+        case cudaVideoChromaFormat_420: return 420;
+        case cudaVideoChromaFormat_422: return 422;
+        case cudaVideoChromaFormat_444: return 444;
+        default: return 0;
+    }
+}
+
 } // namespace
 
 // Codec-level NVDEC support probe: a single cuvidGetDecoderCaps query at
@@ -347,6 +418,76 @@ public:
                 }
             }
         }
+    }
+
+    // Structured decode caps. Source of truth: cuvidGetDecoderCaps, queried
+    // per (codec, chroma, bit-depth) row of kDecodeCapsProbes on the same
+    // transient context showDecoderCapability() uses -- the identical driver
+    // call, so the human-readable table and this answer cannot drift apart.
+    // A row becomes an entry only when the driver reports bIsSupported AND
+    // its nOutputFormatMask intersects a surface format HAL can spell; a
+    // per-row CUDA error skips just that row. The whole answer degrades to
+    // Unknown only when the query mechanism itself is unavailable (no CUDA
+    // context), per the CapsStatus contract. Available with an empty vector
+    // is a real verdict: this GPU's NVDEC decodes none of the probed classes.
+    CapsStatus queryDecoderCaps(const std::string& codec,
+                                std::vector<DecodeCapsEntry>& out) const override {
+        // cuvidGetDecoderCaps needs a context current on the calling thread.
+        CUDAContext cudaCtx;
+        if (!cudaCtx.create(0)) {
+            return CapsStatus::Unknown;
+        }
+        // "mjpeg" is the same NVDEC decoder as "jpeg" (see codecFromName in
+        // nvdecoder.cc).
+        const std::string key = (codec == "mjpeg") ? "jpeg" : codec;
+        bool codecProbed = false;
+        for (const auto& probe : kDecodeCapsProbes) {
+            if (probe.codec != key) {
+                continue;
+            }
+            codecProbed = true;
+            // 10-bit 4:2:0: the vendor headers have no P010 surface format
+            // and NVDEC reports P016 for these streams, which HAL does not
+            // claim for 10-bit content -- no truthful mapping, no entry.
+            if (probe.chroma == cudaVideoChromaFormat_420 && probe.depth == 10) {
+                continue;
+            }
+            CUVIDDECODECAPS caps = {};
+            caps.eCodecType = probe.id;
+            caps.eChromaFormat = probe.chroma;
+            caps.nBitDepthMinus8 = probe.depth - 8;
+            // A failing row query skips just that combination (the driver
+            // refused to answer for it); bIsSupported=0 means the GPU really
+            // cannot decode it.
+            if (cuvidGetDecoderCaps(&caps) != CUDA_SUCCESS || !caps.bIsSupported) {
+                continue;
+            }
+            std::vector<PixelFormat> formats;
+            for (int bit = 0; bit < 16; ++bit) {
+                if (!(caps.nOutputFormatMask & (1U << bit))) {
+                    continue;
+                }
+                PixelFormat format = halFormatForSurfaceBit(bit);
+                if (format != PixelFormat::Unknown) {
+                    formats.push_back(format);
+                }
+            }
+            if (formats.empty()) {
+                continue;
+            }
+            DecodeCapsEntry entry;
+            entry.profile = probe.profile;
+            entry.bitDepth = probe.depth;
+            entry.chroma = chromaNumber(probe.chroma);
+            entry.outputFormats = std::move(formats);
+            out.push_back(std::move(entry));
+        }
+        // Codecs outside the probe matrix ("vc1"/"vp8"/...): no authoritative
+        // answer, fall back to showDecoderCapability's full sweep.
+        if (!codecProbed) {
+            return CapsStatus::Unknown;
+        }
+        return CapsStatus::Available;
     }
 
     void showEncoderCapability() const override {

@@ -95,3 +95,66 @@ if(NOT COMMAND halcodec_psnr_average)
         endif()
     endmacro()
 endif()
+
+# --- decoder capability gate -----------------------------------------------------
+#
+# Integration cases whose assertions depend on what a decode actually produces
+# (a byte-exact P210 frame, say) gate on the backend's structured capability
+# answer instead of hardcoding platform knowledge: codecinfo -b <backend>
+# --decode-caps <codec> asks the backend to state, per input class, which pixel
+# formats its decode really yields (measured on this machine, VideoToolbox
+# decodes an HEVC Main 4:2:2 10 stream into 8-bit NV16 -- the kind of silent
+# downgrade only a real decode exposes). Two macros cover every site:
+#
+#   halcodec_decode_caps(CODECINFO vtbox hevc HEVC_CAPS)
+#   halcodec_caps_supports(HEVC_CAPS 10 422 P210 WANTP210)
+#   if(WANTP210 STREQUAL "NO")
+#       message("SKIP ...: ${HEVC_CAPS_JSON}")
+#       return()
+#   endif()
+#
+# halcodec_decode_caps runs the query and sets <capsVar> to available, unknown
+# or error (plus <capsVar>_JSON with the single-line answer when available).
+# Only "available" is a claim: unknown covers every honest cannot-answer (the
+# codec has no probe, the data path is a stub), error is codecinfo itself
+# failing -- a gate treats both as "no answer" and the case keeps its
+# historical hard-run behavior, so backends that never adopted the structured
+# query fail their tests exactly as before.
+# halcodec_caps_supports scans the JSON for an entry claiming <bitDepth>/<chroma>
+# with <format> among its outputFormats and sets <outVar> to YES, NO or UNKNOWN
+# (UNKNOWN = no answer available). Pass the depth/chroma as literals.
+
+if(NOT COMMAND halcodec_decode_caps)
+    macro(halcodec_decode_caps codecinfoExe backend codec capsVar)
+        set(${capsVar} unknown)
+        if(${codecinfoExe})
+            execute_process(COMMAND ${${codecinfoExe}} -b ${backend}
+                            --decode-caps ${codec} --json
+                            RESULT_VARIABLE _caps_rc
+                            OUTPUT_VARIABLE _caps_out
+                            ERROR_QUIET OUTPUT_STRIP_TRAILING_WHITESPACE)
+            if(NOT _caps_rc EQUAL 0)
+                set(${capsVar} error)
+            elseif(_caps_out MATCHES "\"status\":\"available\"")
+                set(${capsVar} available)
+                set(${capsVar}_JSON "${_caps_out}")
+            endif()
+        endif()
+    endmacro()
+
+    macro(halcodec_caps_supports capsVar bitDepth chroma format outVar)
+        set(${outVar} UNKNOWN)
+        if("${${capsVar}}" STREQUAL "available")
+            set(${outVar} NO)
+            # string(REGEX MATCH <regex> <output> <input>) -- regex first, the
+            # order the psnr matcher above uses too.
+            string(REGEX MATCHALL
+                "\\{\"profile\":\"[^\"]*\",\"bitDepth\":${bitDepth},\"chroma\":${chroma},\"outputFormats\":\\[[^]]*\"${format}\"[^]]*\\]\\}"
+                _caps_entry
+                "${${capsVar}_JSON}")
+            if(_caps_entry)
+                set(${outVar} YES)
+            endif()
+        endif()
+    endmacro()
+endif()

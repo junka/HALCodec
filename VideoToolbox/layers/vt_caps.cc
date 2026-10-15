@@ -6,12 +6,16 @@
 
 #include <VideoToolbox/VideoToolbox.h>
 
+#include <algorithm>
 #include <iomanip>
 #include <iostream>
 #include <string>
 #include <vector>
 
 #include "capability.h"
+#include "h264au.h"
+#include "vt_probe_streams.h"
+#include "vtdecoder.h"
 
 namespace halcodec {
 namespace vtbox {
@@ -36,6 +40,58 @@ bool AppendDictString(CFDictionaryRef dict, CFStringRef key, CFMutableStringRef 
     }
     CFStringAppend(out, static_cast<CFStringRef>(v));
     return true;
+}
+
+// Decodes one embedded Annex-B probe stream through the real VTDecoder path
+// and returns the HAL pixel format of the frame that comes back, or
+// PixelFormat::Unknown when the hardware refuses the format (session error,
+// no frame out). `paramTypes` lists the parameter-set NAL types the probe's
+// extradata carries (VPS/SPS/PPS for HEVC, SPS/PPS for H.264).
+//
+// This is the honest way to answer "what would decoding produce": the same
+// feed/complete/drain path a real decode takes, on a stream whose format is
+// known exactly. A session-creation probe cannot do this -- VideoToolbox
+// happily opens a session for a format whose frames it then downgrades.
+PixelFormat ProbeDecode(const unsigned char* stream, unsigned int len,
+                        const char* codec,
+                        std::initializer_list<uint8_t> paramTypes) {
+    std::vector<Nal> nals = ScanNals(stream, len, 64);
+    // ScanNals stores Nal.type in the H.264 convention (payload[0] & 0x1F) no
+    // matter the codec; the HEVC paths recompute the real 6-bit type from the
+    // byte. The probe does the same, so {32,33,34} can mean VPS/SPS/PPS.
+    const bool hevc = std::string(codec) == "hevc";
+    auto typeOf = [hevc](const Nal& n) -> uint8_t {
+        return hevc ? static_cast<uint8_t>((n.payload[0] >> 1) & 0x3F) : n.type;
+    };
+    std::vector<uint8_t> extradata;
+    for (size_t i = 0; i < nals.size(); i++) {
+        if (std::find(paramTypes.begin(), paramTypes.end(), typeOf(nals[i])) ==
+            paramTypes.end()) {
+            continue;
+        }
+        std::vector<uint8_t> avcc = BuildAvcc(nals, i, i + 1);
+        extradata.insert(extradata.end(), avcc.begin(), avcc.end());
+    }
+    if (extradata.empty()) {
+        return PixelFormat::Unknown;
+    }
+
+    VTDecoder dec;
+    CodecParams params;
+    params.codec = codec;
+    params.extradata = extradata;
+    if (!dec.Initialize(params)) {
+        return PixelFormat::Unknown;
+    }
+    dec.FillInput(stream, len);
+    dec.SignalInputComplete();
+    CodecFrame frame;
+    PixelFormat fmt = PixelFormat::Unknown;
+    while (dec.GetFrame(frame)) {
+        fmt = frame.format;
+    }
+    dec.Finalize();
+    return fmt;
 }
 
 } // namespace
@@ -89,6 +145,63 @@ public:
         if (!any) {
             std::cout << "  (no hardware decode support detected)" << std::endl;
         }
+    }
+
+    // Structured decoder capability, answered by decoding embedded probe
+    // streams and reading what comes back. See ProbeDecode above for why the
+    // answer goes through a real decode.
+    CapabilityProvider::CapsStatus queryDecoderCaps(
+        const std::string& codec,
+        std::vector<CapabilityProvider::DecodeCapsEntry>& out) const override {
+        if (codec == "h264") {
+            // The probe stream is Constrained Baseline; the hardware path it
+            // exercises is the one every 4:2:0 8-bit profile shares.
+            PixelFormat fmt = ProbeDecode(kH264_420_8Stream, kH264_420_8StreamLen,
+                                          "h264", {7, 8});
+            if (fmt == PixelFormat::Unknown) {
+                return CapsStatus::Unknown;
+            }
+            out.push_back({"Baseline", 8, 420, {fmt}});
+            return CapsStatus::Available;
+        }
+        if (codec == "hevc") {
+            // The 4:2:0 8-bit probe doubles as the sanity check: when even
+            // that refuses, the probe mechanism is broken and the honest
+            // answer is Unknown -- not an empty table.
+            PixelFormat base = ProbeDecode(kHevc_420_8Stream, kHevc_420_8StreamLen,
+                                           "hevc", {32, 33, 34});
+            if (base == PixelFormat::Unknown) {
+                return CapsStatus::Unknown;
+            }
+            out.push_back({"Main", 8, 420, {base}});
+            struct Spec {
+                const unsigned char* stream;
+                unsigned int len;
+                const char* profile;
+                int depth;
+                int chroma;
+            };
+            const Spec specs[] = {
+                {kHevc_420_10Stream, kHevc_420_10StreamLen, "Main 10", 10, 420},
+                {kHevc_422_8Stream, kHevc_422_8StreamLen, "Main 4:2:2", 8, 422},
+                {kHevc_422_10Stream, kHevc_422_10StreamLen, "Main 4:2:2 10", 10, 422},
+            };
+            for (const auto& s : specs) {
+                PixelFormat fmt = ProbeDecode(s.stream, s.len, "hevc", {32, 33, 34});
+                // A refused probe here is a truthful "not supported"; it would
+                // only be suspect if the sanity entry had refused too, which
+                // is handled above.
+                if (fmt == PixelFormat::Unknown) {
+                    continue;
+                }
+                out.push_back({s.profile, s.depth, s.chroma, {fmt}});
+            }
+            return CapsStatus::Available;
+        }
+        // jpeg/av1/prores have no probe stream embedded yet; the honest
+        // answer for them is Unknown until one is.
+        (void)out;
+        return CapsStatus::Unknown;
     }
 
     void showEncoderCapability() const override {

@@ -41,6 +41,18 @@ public:
                   << std::endl;
     }
 
+    // Structured decode caps: always Unknown. The AMF decode data path is a
+    // shell -- Initialize() can create the UVD component but no frame ever
+    // comes out of it -- so there is no measured output-format truth to
+    // state, and the CapsStatus contract forbids claiming Available without
+    // one. Becomes a real per-combo query once the data path lands.
+    CapsStatus queryDecoderCaps(const std::string& codec,
+                                std::vector<DecodeCapsEntry>& out) const override {
+        (void)codec;
+        (void)out;
+        return CapsStatus::Unknown;
+    }
+
     void showEncoderCapability() const override {
         std::cout << "  VCE/AV1 hardware encode: H.264/HEVC/AV1 on AMD GPU"
                   << std::endl;

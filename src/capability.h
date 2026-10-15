@@ -5,6 +5,7 @@
 #include <string>
 #include <vector>
 
+#include "frame.h"
 #include "registry.h"
 
 namespace halcodec {
@@ -41,6 +42,43 @@ public:
 
     virtual void showDecoderCapability() const = 0;
     virtual void showEncoderCapability() const = 0;
+
+    // Structured decoder capability for one codec ("h264" / "hevc" / ...),
+    // consumed by codecinfo --decode-caps and by the tests' capability gate.
+    //
+    // Each entry states one input class (profile label plus the numeric
+    // bit depth and chroma subsampling a gate matches on) and the pixel
+    // formats the decoder actually produces for it. The output side is the
+    // load-bearing part: some hardware accepts a stream and silently
+    // downgrades it -- VideoToolbox on machines whose HEVC hardware path has
+    // no 4:2:2 10-bit output decodes such streams to P010 -- so "decodes
+    // Main 4:2:2 10" and "decodes Main 4:2:2 10 into P210" are different
+    // claims and only the second one lets a byte-exact test run.
+    //
+    // CapsStatus::Unknown means the backend cannot answer truthfully (query
+    // not implemented, probe broken, data path absent). Callers must fall
+    // back to running and seeing; only Available answers gate a test. An
+    // Available codec with no entries is a truthful "this backend does not
+    // decode it at all".
+    //
+    // The default returns Unknown so a backend adopts the structured query
+    // incrementally; showDecoderCapability() stays the human-readable view.
+    enum class CapsStatus {
+        Unknown,
+        Available,
+    };
+    struct DecodeCapsEntry {
+        std::string profile;   // human-readable input class, e.g. "Main 4:2:2 10"
+        int bitDepth = 0;      // bits per component: 8/10/12; 0 = n/a (jpeg)
+        int chroma = 0;        // subsampling: 420/422/444; 0 = mono/n-a
+        std::vector<PixelFormat> outputFormats;
+    };
+    virtual CapsStatus queryDecoderCaps(const std::string& codec,
+                                        std::vector<DecodeCapsEntry>& out) const {
+        (void)codec;
+        (void)out;
+        return CapsStatus::Unknown;
+    }
 };
 
 } // namespace halcodec

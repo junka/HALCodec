@@ -218,6 +218,10 @@ endif()
 # ---------------------------------------------------------------------------
 find_program(FFMPEG_EXE NAMES ffmpeg)
 find_program(FFPROBE_EXE NAMES ffprobe)
+# The capability gate lives in codecinfo (--decode-caps); cases that gate on it
+# receive the executable and degrade to their historical hard-run when it is
+# absent from the build.
+find_program(HAL_CODECINFO_EXE NAMES codecinfo PATHS ${CMAKE_BINARY_DIR}/app NO_DEFAULT_PATH)
 if(FFMPEG_EXE AND EXISTS "${_cars_h264}")
     set(_cars_nv12 "${CMAKE_SOURCE_DIR}/QSV/libvpl-2.17.0/examples/content/cars_320x240.nv12")
     if(EXISTS "${_cars_nv12}" AND HAL_DEC_EXE)
@@ -300,11 +304,13 @@ if(FFMPEG_EXE AND EXISTS "${_cars_h264}")
 
             # 10-bit 4:2:2 ('p422'/'pf22'): the packed rows of 'pf20' with a
             # chroma row against every picture row, so the chroma height -- not
-            # the unpack -- is what this case pins.
+            # the unpack -- is what this case pins. Gated on the backend's own
+            # claim of Main 4:2:2 10 -> P210 (see the case script).
             add_test(NAME vtdec.hevc_42210
                 COMMAND ${CMAKE_COMMAND} -DHAL_DEC=${HAL_DEC_EXE}
                         -DFFMPEG=${FFMPEG_EXE}
                         -DFFPROBE=${FFPROBE_EXE}
+                        -DCODECINFO=${HAL_CODECINFO_EXE}
                         -DINPUT_NV12=${_cars_nv12}
                         -DWORKDIR=${CMAKE_CURRENT_BINARY_DIR}
                         -P ${CMAKE_CURRENT_SOURCE_DIR}/vtdec_hevc_42210.cmake)

@@ -5,6 +5,7 @@
 #include <cstddef>
 #include <cstdint>
 #include <functional>
+#include <string>
 
 namespace halcodec {
 
@@ -146,6 +147,11 @@ struct CodecFrame {
     // unless the frame struct outlives the call.
     std::function<void()> release;
 };
+
+// Canonical name of a pixel format -- the enum's own spelling ("NV12",
+// "P210", ...), shared by codecinfo's structured capability output and the
+// tests that parse it. Defined in frame.cc.
+std::string Name(PixelFormat format);
 
 // Materialize a frame's pixels into `data` as host memory. No-op for
 // FrameLocality::Host. For device frames, performs the detile/copy and flips

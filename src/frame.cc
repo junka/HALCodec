@@ -50,6 +50,33 @@ std::vector<std::function<bool(CodecFrame&)>> snapshotVplHooks() {
 
 }  // namespace
 
+// Exported: codecinfo (and other out-of-dylib consumers) call it, and the
+// build compiles under hidden visibility like the rest of halcodec_core.
+__attribute__((visibility("default")))
+std::string Name(PixelFormat format) {
+    switch (format) {
+        case PixelFormat::NV12: return "NV12";
+        case PixelFormat::P010: return "P010";
+        case PixelFormat::I420: return "I420";
+        case PixelFormat::P016: return "P016";
+        case PixelFormat::NV16: return "NV16";
+        case PixelFormat::P210: return "P210";
+        case PixelFormat::YUV444P: return "YUV444P";
+        case PixelFormat::YUV444P10LE: return "YUV444P10LE";
+        case PixelFormat::YUV444P16LE: return "YUV444P16LE";
+        case PixelFormat::RGB: return "RGB";
+        case PixelFormat::BGR: return "BGR";
+        case PixelFormat::GRAY: return "GRAY";
+        case PixelFormat::GRAY10LE: return "GRAY10LE";
+        case PixelFormat::BGRA: return "BGRA";
+        case PixelFormat::ARGB: return "ARGB";
+        case PixelFormat::RGBA: return "RGBA";
+        case PixelFormat::BAYER16LE: return "BAYER16LE";
+        case PixelFormat::Unknown: break;
+    }
+    return "Unknown";
+}
+
 // Exported (default visibility) so backend .so's loaded at runtime can install
 // their device-frame download path. Mirrors registry_storage()'s export model.
 // DownloadToHost is also exported because the apps call it directly.

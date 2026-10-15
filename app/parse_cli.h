@@ -118,7 +118,15 @@ public:
                  "is created in this mode.")
                 ("publish-frames", po::value<int>(&publishFrames_)->default_value(0),
                  "hal_cam --publish: stop after N frames published (0 = run until "
-                 "Ctrl-C).");
+                 "Ctrl-C).")
+                // codecinfo-only flags. Additive with sentinel defaults so the
+                // other apps (which never read these getters) are unaffected.
+                ("decode-caps", po::value<std::string>(&decodeCapsCodec_),
+                 "codecinfo: instead of the full human-readable dump, query the "
+                 "structured decoder capability for this codec (-b required) and "
+                 "print it; --json makes the output machine-readable.")
+                ("json", po::bool_switch(&jsonOut_),
+                 "codecinfo --decode-caps: emit one single-line JSON object.");
 
             // Parse the command line
             po::variables_map vm;
@@ -221,6 +229,10 @@ public:
     const std::string& getPublishChannel() const { return publishChannel_; }
     int getPublishFrames() const { return publishFrames_; }
 
+    // codecinfo-only.
+    const std::string& getDecodeCapsCodec() const { return decodeCapsCodec_; }
+    bool getJsonOut() const { return jsonOut_; }
+
 private:
     std::vector<std::string> inputFiles_;
     std::string outputFile_;
@@ -276,6 +288,10 @@ private:
     int channelSlots_ = 4;
     std::string publishChannel_;
     int publishFrames_ = 0;
+
+    // codecinfo-only.
+    std::string decodeCapsCodec_;
+    bool jsonOut_ = false;
 };
 
 #endif // PARSE_CLI_H

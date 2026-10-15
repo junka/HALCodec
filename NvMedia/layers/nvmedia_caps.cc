@@ -6,6 +6,7 @@
 
 #include <iostream>
 #include <string>
+#include <utility>
 #include <vector>
 
 #include "capability.h"
@@ -36,6 +37,32 @@ public:
                      "but rejected by the deployed parser runtime on this "
                      "DRIVE build (a full-build SDK lib unlocks them)"
                   << std::endl;
+    }
+
+    // Structured decode caps. NvMedia has no decoder-capability query API
+    // (nvmedia_ide.h exposes creation only; NvMedia2DGetCapabilities belongs
+    // to the 2D engine, not the IDE decoder), so this states only what the
+    // code itself confirms: every output path in nvmediadecoder.cc hardcodes
+    // PixelFormat::NV12, and the deployed parser runtime accepts only H.264
+    // and HEVC (see showDecoderCapability). Those two codecs therefore get a
+    // single 8-bit 4:2:0 -> NV12 entry each; other bit depths / subsamplings
+    // have no confirmed output (the layer never queries the surface bit
+    // depth, so a Main 10 stream's fate on the NV12 path is unmeasured), and
+    // every other codec answers Unknown. Available-with-no-entries would be
+    // a false "decodes none of it" verdict for a backend that demonstrably
+    // decodes -- not an option here.
+    CapsStatus queryDecoderCaps(const std::string& codec,
+                                std::vector<DecodeCapsEntry>& out) const override {
+        if (codec != "h264" && codec != "hevc") {
+            return CapsStatus::Unknown;
+        }
+        DecodeCapsEntry entry;
+        entry.profile = (codec == "h264") ? "High" : "Main";
+        entry.bitDepth = 8;
+        entry.chroma = 420;
+        entry.outputFormats.push_back(PixelFormat::NV12);
+        out.push_back(std::move(entry));
+        return CapsStatus::Available;
     }
 
     void showEncoderCapability() const override {
