@@ -64,6 +64,14 @@ QSV/vpl-gpu-rt-*/
 # Decode test output (raw NV12 produced by hal_dec -f yuv).
 QSV/libvpl-*/examples/content/*.yuv
 
+# libvpl ships several MB of sample content, but the integration tests and
+# scripts/regression_nvenc.sh use only the nv12 + h264 pair; the rest (a 9 MB
+# bgra alone) is dead weight in git. tools/update_sdks.sh qsv restores the
+# full set locally. Tracked-then-untracked, so `git rm --cached` once.
+QSV/libvpl-*/examples/content/*
+!QSV/libvpl-*/examples/content/cars_320x240.nv12
+!QSV/libvpl-*/examples/content/cars_320x240.h264
+
 # Test assets regenerated from cars_320x240.nv12 by scripts/regression_nvenc.sh
 # (JPEG/BMP single-frame, MJPEG AVI + raw concatenated streams).
 test_cars_320x240.jpg
