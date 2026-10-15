@@ -49,7 +49,7 @@ run "jpeg    decode (nvjpeg)" ./hal_dec -b nvjpeg -i t_jpeg.jpg -o /tmp/d_jpeg2.
 # encoder exists, so these are fetched rather than generated). SA00050 is
 # 320x240 Advanced profile, 30 frames — matches the cars test-stream shape.
 run "vc1     decode (demuxer)"  ./hal_dec    -b nvdec -i SA00050.vc1 -o /tmp/d_vc1.yuv
-run "vc1     decode (feed)"     ./hal_session -b nvdec --codec vc1 -i SA00050.vc1 -o /tmp/d_vc1_sess
+run "vc1     decode (feed)"     ./hal_dec -b nvdec --codec vc1 -i SA00050.vc1 -o /tmp/d_vc1_sess
 
 echo
 echo "############ ENCODE (NVENC + NVJPEG) ############"

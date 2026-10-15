@@ -193,7 +193,7 @@ public:
     bool getLowDelay() const { return lowDelay_; }
     bool getZeroCopy() const { return zeroCopy_; }
     // Metrics print interval in ms (0 = no periodic printing; the final
-    // summary always prints). Used by hal_transcode / hal_session.
+    // summary always prints). Used by hal_transcode.
     int getMetricsInterval() const { return metricsInterval_; }
 
     // hal_camera-only options. Other apps ignore these.

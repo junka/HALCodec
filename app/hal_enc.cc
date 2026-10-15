@@ -3,19 +3,21 @@
 #include <fstream>
 #include <iostream>
 #include <regex>
+#include <set>
 #include <string>
 #include <utility>
 #include <vector>
 
-#include <dirent.h>
 #include <unistd.h>
 #include <sys/stat.h>
 #include <sys/types.h>
 
 #include "bmp_write.h"
 #include "encoder.h"
+#include "file_io.h"
 #include "output_paths.h"
 #include "parse_cli.h"
+#include "session.h"
 
 #include "codec_config.h"
 #include "codec_names.h"
@@ -32,7 +34,196 @@ struct RawImage {
     std::string outputPath;
 };
 
+// BMPReader -> CodecFrame: one whole image, rows padded to 4 bytes like the
+// writer lays them out. Returns the pixel buffer for the caller to free, or
+// null when the file does not parse.
+uint8_t* ReadBmpInto(const std::string& path, halcodec::CodecFrame* in) {
+    int w = 0, h = 0, n_chan = 0;
+    BMPReader reader(path);
+    in->data = reader.readBMP(&w, &h, &n_chan);
+    if (!in->data) {
+        return nullptr;
+    }
+    int rowPadding = (4 - ((w * n_chan) % 4)) % 4;
+    in->size = (static_cast<size_t>(w) * n_chan + rowPadding) * h;
+    in->width = w;
+    in->height = h;
+    return in->data;
+}
+
 }  // namespace
+
+// The multi-stream encode driver: N raw inputs through one halcodec::Session,
+// drained in completion order. The single-stream path below keeps the
+// directory walk and the verified feed loop.
+static int RunMultiStream(CommandLineParser& cli) {
+    const std::vector<std::string>& inputs = cli.getInputFiles();
+    const size_t n = inputs.size();
+
+    std::string backend = cli.getBackend();
+    if (backend.empty()) {
+        auto names = halcodec::Registry<halcodec::Encoder>::Names();
+        if (names.empty()) {
+            std::cerr << "No encoder backend available" << std::endl;
+            return -1;
+        }
+        backend = names.front();
+    }
+    // The Session's fan-in drains on a blocking GetFrame loop, so a backend
+    // whose GetFrame only reports what FillFrame already completed has no
+    // place here.
+    {
+        auto probe = halcodec::Encoder::Create(backend);
+        if (!probe) {
+            std::cerr << "Fail to create encoder backend: " << backend
+                      << std::endl;
+            return -1;
+        }
+        if (!probe->isAsync()) {
+            std::cerr << "multi-stream encode needs an async backend; "
+                      << backend << " is synchronous" << std::endl;
+            return -1;
+        }
+    }
+    std::cout << "encoder backend: " << backend << " (" << n << " streams)"
+              << std::endl;
+
+    std::regex pattern(R"((\d+)[xX](\d+))");
+    std::smatch match;
+
+    // One stream per -i: geometry resolved per input (CLI --width/--height
+    // wins, then the WxH pattern in that input's name), everything else from
+    // the CLI and therefore identical across streams.
+    std::vector<halcodec::CodecParams> params(n);
+    std::vector<std::pair<int64_t, int64_t>> geom(n);
+    for (size_t s = 0; s < n; s++) {
+        params[s].inputs.push_back(inputs[s]);
+        params[s].deviceIndex = cli.getGpuIndex();
+        if (!halcodec::FormatToPixelFormat(cli.getFormat(),
+                                           &params[s].inputFormat)) {
+            params[s].inputFormat = halcodec::PixelFormat::I420;
+        }
+        params[s].codec = cli.getCodec();
+        halcodec::ApplyEncodeOverrides(cli, params[s].encode);
+        int64_t w = cli.getWidth(), h = cli.getHeight();
+        if (w <= 0 || h <= 0) {
+            std::smatch m;
+            if (std::regex_search(inputs[s], m, pattern)) {
+                w = std::stoi(m[1].str());
+                h = std::stoi(m[2].str());
+            }
+        }
+        if (w <= 0 || h <= 0) {
+            std::cerr << "Cannot determine frame dimensions for " << inputs[s]
+                      << " (use --width/--height or a WxH in the name)"
+                      << std::endl;
+            return -1;
+        }
+        geom[s] = {w, h};
+        params[s].width = w;
+        params[s].height = h;
+    }
+
+    halcodec::Session session;
+    if (session.open(halcodec::Session::Kind::Encode, backend, params) != n) {
+        std::cerr << "Failed to open " << n << " encode streams on " << backend
+                  << std::endl;
+        return -1;
+    }
+
+    // Outputs: beside each input, or into -o when it names a directory --
+    // the same rule the single-stream directory walk applies. A colliding
+    // name (the same file listed twice) gets the stream index stamped in.
+    const std::string outExt = halcodec::CodecStreamExtension(params[0].codec);
+    std::string outDir;
+    if (cli.hasOutputFile()) {
+        outDir = TrimTrailingSlashes(cli.getOutputFile());
+        if (!EnsureDir(outDir)) {
+            return -1;
+        }
+    }
+    // Buffers must outlive the streams that pubsetbuf into them: declared
+    // before `outs`, since locals destruct in reverse order (see the note in
+    // hal_dec's multi-stream path).
+    std::vector<std::vector<char>> bufs(n, std::vector<char>(kIoBufBytes));
+    std::vector<std::ofstream> outs(n);
+    std::set<std::string> claimed;
+    for (size_t s = 0; s < n; s++) {
+        std::string path = outDir.empty()
+                               ? StripExt(inputs[s])
+                               : outDir + '/' + StripExt(BasenameOf(inputs[s]));
+        path += outExt;
+        if (!claimed.insert(path).second) {
+            path = StripExt(path) + "." + std::to_string(s) + ExtOf(path);
+            claimed.insert(path);
+        }
+        outs[s] = OpenBuffered<std::ofstream>(
+            path, std::ios::out | std::ios::binary, bufs[s]);
+        if (!outs[s]) {
+            std::cerr << "unable to open output file: " << path << std::endl;
+            return -1;
+        }
+        std::cout << path << std::endl;
+    }
+
+    // Feed every stream its raw frames, then its EOS. BMP inputs are one whole
+    // picture; anything else is sliced on the format's frame size.
+    for (size_t s = 0; s < n; s++) {
+        halcodec::CodecFrame in;
+        in.format = params[s].inputFormat;
+        if (cli.getFormat() == "bmp") {
+            in.data = ReadBmpInto(inputs[s], &in);
+            if (!in.data) {
+                std::cerr << "Failed to read BMP: " << inputs[s] << std::endl;
+                return -1;
+            }
+            session.feedEncode(s, in);
+            std::free(in.data);
+        } else {
+            std::vector<uint8_t> raw;
+            if (!halcodec::ReadFile(inputs[s], &raw)) {
+                std::cerr << "Cannot read " << inputs[s] << std::endl;
+                return -1;
+            }
+            const size_t frameBytes =
+                halcodec::FormatFrameBytes(cli.getFormat(), geom[s].first,
+                                           geom[s].second);
+            in.width = geom[s].first;
+            in.height = geom[s].second;
+            for (size_t off = 0; off + frameBytes <= raw.size();
+                 off += frameBytes) {
+                in.data = raw.data() + off;
+                in.size = frameBytes;
+                session.feedEncode(s, in);
+            }
+        }
+        halcodec::CodecFrame eos;
+        eos.format = params[s].inputFormat;
+        session.feedEncode(s, eos);
+        session.signalEncodeEOF(s);
+    }
+
+    // Fan-in drain in completion order.
+    std::vector<uint64_t> perStream(n, 0);
+    int total = 0;
+    halcodec::CodecFrame out;
+    size_t which = 0;
+    while (session.getAnyEncodeFrame(out, which)) {
+        halcodec::DownloadToHost(out);
+        outs[which].write(reinterpret_cast<const char*>(out.data), out.size);
+        perStream[which]++;
+        total++;
+        if (out.release) out.release();
+    }
+    for (size_t s = 0; s < n; s++) {
+        std::cout << "stream " << s << " (" << inputs[s] << "): "
+                  << perStream[s] << " frames" << std::endl;
+    }
+    std::cout << "Encode total frames: " << total << std::endl;
+
+    session.close();
+    return 0;
+}
 
 int main(int argc, char* argv[]) {
     CommandLineParser cli;
@@ -40,6 +231,13 @@ int main(int argc, char* argv[]) {
 
     // Load vendor backends lazily so the binary runs without NVIDIA libs.
     halcodec::LoadBackends();
+
+    // More than one -i means concurrent encode: one Session, N streams,
+    // fan-in drain. The single-stream path below keeps the directory walk and
+    // the streaming raw-file slicer.
+    if (cli.getInputFiles().size() > 1) {
+        return RunMultiStream(cli);
+    }
 
     std::string backend = cli.getBackend();
     if (backend.empty()) {
@@ -107,35 +305,26 @@ int main(int argc, char* argv[]) {
     // anything is read.
     std::string outDir;
     if (cli.hasOutputFile()) {
-        outDir = cli.getOutputFile();
-        while (outDir.size() > 1 && outDir.back() == '/') {
-            outDir.pop_back();
-        }
+        outDir = TrimTrailingSlashes(cli.getOutputFile());
     }
     if (info.st_mode & S_IFDIR) {
-        DIR *dir;
-        struct dirent *ent;
-        while (!input.empty() && input.back() == '/') {
-            input.pop_back();
-        }
+        input = TrimTrailingSlashes(input);
         if (!outDir.empty() && !EnsureDir(outDir)) {
             return -1;
         }
-        if ((dir = opendir(input.c_str())) != NULL) {
-            while ((ent = readdir(dir)) != NULL) {
-                if (ent->d_type == DT_REG) { // Regular file
-                    std::string inputFileName = input + '/' + ent->d_name;
-                    // Picture i keeps the name of the input it was made from, in
-                    // the output directory if one was asked for.
-                    std::string outputFileName =
-                        outDir.empty() ? StripExt(inputFileName)
-                                       : outDir + '/' + StripExt(ent->d_name);
-                    outputFileName += outExt;
-                    images.push_back({std::move(inputFileName),
-                                      std::move(outputFileName)});
-                }
-            }
-            closedir(dir);
+        std::vector<std::string> entries;
+        if (!ListRegularFiles(input, &entries)) {
+            std::cerr << "Cannot open directory " << input << std::endl;
+            return -1;
+        }
+        for (const auto& inputFileName : entries) {
+            // Picture i keeps the name of the input it was made from, in
+            // the output directory if one was asked for.
+            std::string outputFileName =
+                outDir.empty() ? StripExt(inputFileName)
+                               : outDir + '/' + StripExt(BasenameOf(inputFileName));
+            outputFileName += outExt;
+            images.push_back({inputFileName, std::move(outputFileName)});
         }
     } else {
         std::string outputFileName = cli.getOutputFile();
@@ -256,6 +445,11 @@ int main(int argc, char* argv[]) {
     const bool asyncEnc = enc->isAsync();
     auto drainIfSync = [&]() { if (!asyncEnc) drain(); };
 
+    // The BMP single-file path used to be an early return with its own copy of
+    // the finalize epilogue; the flag below keeps the one epilogue at the bottom
+    // and only defers the pixel-buffer free until after the final drain (an
+    // async worker may still be reading in.data when FillFrame returns).
+    bool bmpHeld = false;
     if (info.st_mode & S_IFDIR) {
         // Feed each file in the directory as one whole image, in the order the
         // single scan produced -- which is also the order the pictures are named
@@ -267,17 +461,10 @@ int main(int argc, char* argv[]) {
             }
             const std::string& path = im.inputPath;
             if (cli.getFormat() == "bmp") {
-                int w = 0, h = 0, n_chan = 0;
-                BMPReader reader(path);
-                in.data = reader.readBMP(&w, &h, &n_chan);
-                if (!in.data) {
+                if (!ReadBmpInto(path, &in)) {
                     std::cerr << "Failed to read BMP: " << path << std::endl;
                     continue;
                 }
-                int rowPadding = (4 - ((w * n_chan) % 4)) % 4;
-                in.size = (static_cast<size_t>(w) * n_chan + rowPadding) * h;
-                in.width = w;
-                in.height = h;
                 enc->FillFrame(in);
                 std::free(in.data);
             } else {
@@ -324,41 +511,18 @@ int main(int argc, char* argv[]) {
             }
             drainIfSync();
         }
-    } else {
-        // Single raw file. BMP input is a single whole image (header parsed by
-        // BMPReader); any other input is sliced into fixed-size raw frames.
-        if (cli.getFormat() == "bmp") {
-            int w = 0, h = 0, n_chan = 0;
-            BMPReader reader(input);
-            in.data = reader.readBMP(&w, &h, &n_chan);
-            if (!in.data) {
-                std::cerr << "Failed to read BMP: " << input << std::endl;
-                return -1;
-            }
-            int rowPadding = (4 - ((w * n_chan) % 4)) % 4;
-            in.size = (static_cast<size_t>(w) * n_chan + rowPadding) * h;
-            in.width = w;
-            in.height = h;
-            enc->FillFrame(in);
-            drainIfSync();
-            // Flush trailing packets and finish.
-            halcodec::CodecFrame eos;
-            eos.width = params.width;
-            eos.height = params.height;
-            eos.format = params.inputFormat;
-            enc->FillFrame(eos);
-            if (asyncEnc) enc->SignalInputComplete();
-            drain();
-            // The frame data is only safe to free once the async worker has
-            // drained; for sync backends drainIfSync() already consumed it.
-            std::free(in.data);
-            if (outOpen) {
-                fpout.close();
-            }
-            enc->Finalize();
-            std::cout << "Encode total frames: " << total_frames << std::endl;
-            return 0;
+    } else if (cli.getFormat() == "bmp") {
+        // Single raw file holding one whole BMP image (header parsed by
+        // BMPReader). The epilogue below finishes the encode.
+        if (!ReadBmpInto(input, &in)) {
+            std::cerr << "Failed to read BMP: " << input << std::endl;
+            return -1;
         }
+        enc->FillFrame(in);
+        drainIfSync();
+        bmpHeld = true;
+    } else {
+        // Single raw file: slice it into fixed-size frames of the format.
         std::ifstream fin(input, std::ios::binary | std::ios::ate);
         if (!fin) {
             std::cerr << "Cannot open input file: " << input << std::endl;
@@ -372,23 +536,8 @@ int main(int argc, char* argv[]) {
             std::cerr << "Cannot determine frame dimensions" << std::endl;
             return -1;
         }
-        int64_t w = params.width, h = params.height;
-        std::string fmt = cli.getFormat();
-        size_t frameBytes = 0;
-        if (fmt == "y" || fmt == "gray") {
-            frameBytes = w * h;
-        } else if (fmt == "bgra" || fmt == "rgba") {
-            frameBytes = w * h * 4;
-        } else if (fmt == "p010" || fmt == "p016") {
-            frameBytes = w * h * 3; // 16-bit storage, 4:2:0: 2 bytes * 1.5 samples
-        } else if (fmt == "p210") {
-            frameBytes = w * h * 4; // 16-bit storage, 4:2:2: 2 bytes * 2 samples
-        } else if (fmt == "yuv444" || fmt == "rgb" || fmt == "bgr"
-                   || fmt == "rgbi" || fmt == "bgri") {
-            frameBytes = w * h * 3;
-        } else {
-            frameBytes = w * h * 3 / 2; // nv12/iyuv/yuv default
-        }
+        const size_t frameBytes = halcodec::FormatFrameBytes(
+            cli.getFormat(), params.width, params.height);
         in.width = params.width;
         in.height = params.height;
         for (size_t off = 0; off + frameBytes <= rawBuf.size();
@@ -412,6 +561,11 @@ int main(int argc, char* argv[]) {
     if (asyncEnc) enc->SignalInputComplete();
     drain();
 
+    // The BMP pixel buffer is only safe to free once the async worker has
+    // drained; for sync backends drainIfSync() already consumed it.
+    if (bmpHeld) {
+        std::free(in.data);
+    }
     if (outOpen) {
         fpout.close();
     }

@@ -8,13 +8,13 @@
 #include <utility>
 #include <vector>
 
-#include <dirent.h>
-#include <unistd.h>
 #include <sys/stat.h>
 #include <sys/types.h>
+#include <unistd.h>
 
 #include "parse_cli.h"
 #include "bmp_write.h"
+#include "file_io.h"
 #include "output_paths.h"
 
 #include "codec_config.h"
@@ -23,20 +23,9 @@
 #include "decoder.h"
 #include "frame.h"
 #include "plugin_loader.h"
+#include "session.h"
 
 namespace {
-
-bool ReadFile(const std::string& path, std::vector<uint8_t>* buf) {
-    std::ifstream in(path, std::ios::binary | std::ios::ate);
-    if (!in) {
-        return false;
-    }
-    std::streamsize size = in.tellg();
-    in.seekg(0, std::ios::beg);
-    buf->resize(static_cast<size_t>(size));
-    return static_cast<bool>(
-        in.read(reinterpret_cast<char*>(buf->data()), size));
-}
 
 // Scan an Annex-B H.264/HEVC stream, sniff its codec from the parameter-set
 // NAL types, and pack the sets it carries into AVCC extradata
@@ -46,13 +35,9 @@ bool ReadFile(const std::string& path, std::vector<uint8_t>* buf) {
 // -c), so it just asks whether anything usable was found.
 bool ExtractParameterSets(const uint8_t* data, size_t size,
                           std::vector<uint8_t>* extradata) {
-    std::vector<halcodec::AnnexBNal> nals = halcodec::SplitAnnexB(data, size);
-    halcodec::CodecHint codec = halcodec::DetectCodec(nals);
-    if (codec == halcodec::CodecHint::kUnknown) return false;
-    if (halcodec::ParamSetMask(nals, codec) & (halcodec::kSpsBit | halcodec::kPpsBit)) {
-        halcodec::AppendParamSetsAvcc(nals, codec, extradata);
-    }
-    return true;
+    return halcodec::ExtractParameterSets(data, size, extradata, nullptr,
+                                          /*onlyWithSpsPps=*/true) !=
+           halcodec::CodecHint::kUnknown;
 }
 
 // IVF: the container AV1 and VP9 test streams travel in (a 32-byte file header
@@ -194,8 +179,8 @@ const char* kDefaultDecoder = "";
 
 // The --format values whose file is a BMP rather than a dump of the frame's own
 // bytes. They are the ones that ask the decoder for converted pixels; the list
-// itself lives with the other name tables (codec_names.h) so this app and
-// hal_session cannot disagree about which formats convert.
+// itself lives with the other name tables (codec_names.h), so every app that
+// answers --format agrees on which ones convert.
 bool IsBmpFormat(const std::string& format) {
     return halcodec::IsConverterFormat(format);
 }
@@ -224,7 +209,232 @@ const char* PixelFormatName(halcodec::PixelFormat format) {
     return "unknown";
 }
 
+// Everything one decode stream needs: its bytes, the codec/extradata verdicts
+// the sniffs produced, and — for IVF — the record walker that strips the
+// container while feeding. Shared by the single-stream path below and the
+// multi-stream Session path at the bottom of main().
+struct DecodeStream {
+    std::vector<uint8_t> raw;
+    std::unique_ptr<IvfPayloadReader> ivf;
+};
+
+// What a single input file is, judged once, before any decoder opens: IVF
+// (codec from the fourcc, first packet as extradata, record walker attached),
+// ProRes (header as extradata), JPEG (whole file as extradata), or an
+// Annex-B elementary stream (parameter sets as extradata, codec from -c /
+// the extension). Fills *params and *stream; false when the file cannot be
+// read.
+bool PrepareDecodeStream(const std::string& path, halcodec::CodecParams* params,
+                         DecodeStream* stream) {
+    if (!halcodec::ReadFile(path, &stream->raw)) {
+        return false;
+    }
+    size_t headerSize = 0;
+    std::string ivfCodec;
+    const uint8_t* packet = nullptr;
+    size_t packetSize = 0;
+    if (IsIvf(stream->raw.data(), stream->raw.size(), &headerSize, &ivfCodec) &&
+        !ivfCodec.empty() &&
+        FirstIvfPacket(stream->raw.data(), stream->raw.size(), headerSize,
+                       &packet, &packetSize)) {
+        // An IVF/AV01 or VP90 input says which codec its bytes are, which
+        // the name has to carry because the frame records make the stream
+        // look like nothing to the Annex-B sniff below.
+        params->codec = ivfCodec;
+        params->extradata.assign(packet, packet + packetSize);
+        stream->ivf.reset(new IvfPayloadReader(headerSize));
+    } else if (IsProRes(stream->raw.data(), stream->raw.size())) {
+        // The name has to say ProRes before the feed starts: a picture's own
+        // byte count is what the decoder splits on, and no other codec's
+        // bytes are delimited that way.
+        params->codec = "prores";
+        const size_t headerBytes = stream->raw.size() < 20 ? stream->raw.size() : 20;
+        params->extradata.assign(stream->raw.begin(),
+                                 stream->raw.begin() + headerBytes);
+    } else if (stream->raw.size() >= 2 && stream->raw[0] == 0xFF &&
+               stream->raw[1] == 0xD8) {
+        // A JPEG file is one image and says so with its own two magic bytes.
+        // It has no parameter set to hand over, so the codestream itself is
+        // the extradata: the decoder reads the picture size out of its frame
+        // header before opening a session, and the feed below then streams
+        // the same bytes as usual.
+        params->codec = "jpeg";
+        params->extradata = stream->raw;
+    } else {
+        ExtractParameterSets(stream->raw.data(), stream->raw.size(),
+                             &params->extradata);
+    }
+    return true;
+}
+
 } // namespace
+
+// The multi-stream decode driver: N inputs through one halcodec::Session,
+// drained in completion order. It shares the single-stream app's per-file
+// container sniffs: an IVF payload reader strips the frame records on the
+// way in, which a plain chunk feed would have sent to the decoders as
+// garbage between packets.
+static int RunMultiStream(CommandLineParser& cli) {
+    const std::vector<std::string>& inputs = cli.getInputFiles();
+    const size_t n = inputs.size();
+
+    std::string backend = cli.getBackend();
+#ifndef __APPLE__
+    if (backend.empty()) {
+        auto names = halcodec::Registry<halcodec::Decoder>::Names();
+        if (names.empty()) {
+            std::cerr << "No decoder backend available" << std::endl;
+            return -1;
+        }
+        backend = names.front();
+    }
+#endif
+
+    // One stream per -i. Each is read fully and fed from memory in chunks
+    // below; the Session's fan-in is built on the async backends, so a
+    // backend that drains synchronously (PullFrames) has no place here.
+    {
+        auto probe = halcodec::Decoder::Create(backend);
+        if (!probe) {
+            std::cerr << "Fail to create decoder backend: " << backend
+                      << std::endl;
+            return -1;
+        }
+        if (!probe->isAsync()) {
+            std::cerr << "multi-stream decode needs an async backend; "
+                      << backend << " is synchronous" << std::endl;
+            return -1;
+        }
+    }
+    std::cout << "decoder backend: " << backend << " (" << n << " streams)"
+              << std::endl;
+
+    std::vector<DecodeStream> streams(n);
+    std::vector<halcodec::CodecParams> params(n);
+    for (size_t s = 0; s < n; s++) {
+        params[s].deviceIndex = cli.getGpuIndex();
+        params[s].zeroCopy = cli.getZeroCopy();
+        // Feed mode: the codec comes from the extension (or the container
+        // sniffs), never from params.inputs — passing the path would make
+        // NVDEC-style backends open an internal demuxer and ignore FillInput.
+        params[s].codec = cli.getCodec();
+        if (params[s].codec.empty()) {
+            params[s].codec = halcodec::CodecFromExtension(ExtOf(inputs[s]));
+        }
+        if (!PrepareDecodeStream(inputs[s], &params[s], &streams[s])) {
+            std::cerr << "Cannot read " << inputs[s] << std::endl;
+            return -1;
+        }
+        // Still nothing after -c, the extension and the container sniffs:
+        // default to h264. The feed-mode backends that
+        // cannot sniff (nvdec) need a name to build their decoder, and the
+        // parameter-set sniff in PrepareDecodeStream already overrode it for
+        // every stream that carries SPS/VPS.
+        if (params[s].codec.empty()) {
+            params[s].codec = "h264";
+        }
+        // Converting formats only; anything else leaves outputFormat Unknown
+        // so the backend hands out its native layout.
+        if (IsBmpFormat(cli.getFormat())) {
+            halcodec::FormatToPixelFormat(cli.getFormat(),
+                                          &params[s].outputFormat);
+        }
+    }
+
+    halcodec::Session session;
+    if (session.open(halcodec::Session::Kind::Decode, backend, params) != n) {
+        std::cerr << "Failed to open " << n << " decode streams on " << backend
+                  << std::endl;
+        return -1;
+    }
+
+    // Per-stream outputs: alongside each input, or into -o when it names a
+    // directory. The single-stream path derives names the same way.
+    std::string outDir;
+    if (cli.hasOutputFile()) {
+        outDir = TrimTrailingSlashes(cli.getOutputFile());
+        if (!EnsureDir(outDir)) {
+            return -1;
+        }
+    }
+    const std::string outExt =
+        IsBmpFormat(cli.getFormat()) ? "bmp" : cli.getFormat();
+    // Buffers must outlive the streams that pubsetbuf into them -- declared
+    // before `outs`, since locals destruct in reverse order and a flushed-at-
+    // exit filebuf whose buffer died first writes nothing (measured: both
+    // outputs stayed 0 bytes with the declarations swapped).
+    std::vector<std::vector<char>> bufs(n, std::vector<char>(kIoBufBytes));
+    std::vector<std::ofstream> outs(n);
+    std::set<std::string> claimed;
+    for (size_t s = 0; s < n; s++) {
+        std::string name = BasenameOf(inputs[s]);
+        std::string path = outDir.empty()
+                               ? StripExt(inputs[s])
+                               : outDir + '/' + StripExt(name);
+        path += "." + outExt;
+        // Two inputs can derive the same name (the same file listed twice, or
+        // two directories of stills with identical names). The second ofstream
+        // would truncate the first's file mid-run, so a colliding stream gets
+        // its index stamped in.
+        if (!claimed.insert(path).second) {
+            path = StripExt(path) + "." + std::to_string(s) + ExtOf(path);
+            claimed.insert(path);
+        }
+        outs[s] = OpenBuffered<std::ofstream>(
+            path, std::ios::out | std::ios::binary, bufs[s]);
+        if (!outs[s]) {
+            std::cerr << "unable to open output file: " << path << std::endl;
+            return -1;
+        }
+        std::cout << path << std::endl;
+    }
+
+    // Feed every stream its bytes, then signal EOF. IVF packets go in as
+    // their own spans, container bytes left behind.
+    const size_t kChunk = 1 << 20;
+    for (size_t s = 0; s < n; s++) {
+        size_t off = 0;
+        while (off < streams[s].raw.size()) {
+            size_t chunk = std::min(kChunk, streams[s].raw.size() - off);
+            const uint8_t* data = streams[s].raw.data() + off;
+            if (streams[s].ivf) {
+                streams[s].ivf->Feed(data, chunk,
+                                     [&session, s](const uint8_t* span,
+                                                   size_t spanSize) {
+                                         session.feedDecode(s, span, spanSize);
+                                     });
+            } else {
+                session.feedDecode(s, data, chunk);
+            }
+            off += chunk;
+        }
+        session.signalDecodeEOF(s);
+    }
+
+    // Fan-in drain: pull frames in completion order until every stream is done.
+    std::vector<uint64_t> perStream(n, 0);
+    int total = 0;
+    halcodec::CodecFrame frame;
+    size_t which = 0;
+    while (session.getAnyDecodeFrame(frame, which)) {
+        if (!halcodec::DownloadToHost(frame)) {
+            std::cerr << "decoder produced a device frame this build cannot "
+                         "download to host" << std::endl;
+        }
+        outs[which].write(reinterpret_cast<const char*>(frame.data), frame.size);
+        perStream[which]++;
+        total++;
+        if (frame.release) frame.release();
+    }
+    for (size_t s = 0; s < n; s++) {
+        std::cout << "stream " << s << " (" << inputs[s] << "): "
+                  << perStream[s] << " frames" << std::endl;
+    }
+    std::cout << "Decode total frames: " << total << std::endl;
+
+    session.close();
+    return 0;
+}
 
 int main(int argc, char* argv[]) {
     CommandLineParser cli;
@@ -237,6 +447,13 @@ int main(int argc, char* argv[]) {
 
     // Load vendor backends lazily so the binary runs without vendor libs.
     halcodec::LoadBackends();
+
+    // More than one -i means concurrent decode: one Session, N streams,
+    // fan-in drain. The single-stream path below keeps the directory/BMP
+    // machinery and the verified zero-copy feed loop.
+    if (cli.getInputFiles().size() > 1) {
+        return RunMultiStream(cli);
+    }
 
     std::string backend = cli.getBackend().empty() ? kDefaultDecoder
                                                    : cli.getBackend();
@@ -276,41 +493,10 @@ int main(int argc, char* argv[]) {
     }
     // Decoders that build a format description from parameter sets (vtbox)
     // need SPS/PPS; extract them from the Annex-B input stream when present.
-    std::vector<uint8_t> raw;
-    std::unique_ptr<IvfPayloadReader> ivf;
-    if (ReadFile(cli.getInputFile(), &raw)) {
-        size_t headerSize = 0;
-        std::string ivfCodec;
-        const uint8_t* packet = nullptr;
-        size_t packetSize = 0;
-        if (IsIvf(raw.data(), raw.size(), &headerSize, &ivfCodec) &&
-            !ivfCodec.empty() &&
-            FirstIvfPacket(raw.data(), raw.size(), headerSize, &packet,
-                           &packetSize)) {
-            // An IVF/AV01 or VP90 input says which codec its bytes are, which
-            // the name has to carry because the frame records make the stream
-            // look like nothing to the Annex-B sniff below.
-            params.codec = ivfCodec;
-            params.extradata.assign(packet, packet + packetSize);
-            ivf.reset(new IvfPayloadReader(headerSize));
-        } else if (IsProRes(raw.data(), raw.size())) {
-            // The name has to say ProRes before the feed starts: a picture's own
-            // byte count is what the decoder splits on, and no other codec's
-            // bytes are delimited that way.
-            params.codec = "prores";
-            const size_t headerBytes = raw.size() < 20 ? raw.size() : 20;
-            params.extradata.assign(raw.begin(), raw.begin() + headerBytes);
-        } else if (raw.size() >= 2 && raw[0] == 0xFF && raw[1] == 0xD8) {
-            // A JPEG file is one image and says so with its own two magic bytes.
-            // It has no parameter set to hand over, so the codestream itself is
-            // the extradata: the decoder reads the picture size out of its frame
-            // header before opening a session, and the feed below then streams
-            // the same bytes as usual.
-            params.codec = "jpeg";
-            params.extradata = raw;
-        } else {
-            ExtractParameterSets(raw.data(), raw.size(), &params.extradata);
-        }
+    DecodeStream stream;
+    if (!PrepareDecodeStream(cli.getInputFile(), &params, &stream)) {
+        std::cerr << "Cannot read " << cli.getInputFile() << std::endl;
+        return -1;
     }
     if (!dec->Initialize(params)) {
         std::cerr << "Fail to initialize decoder backend: " << backend << std::endl;
@@ -335,36 +521,28 @@ int main(int argc, char* argv[]) {
     const std::string outExt =
         IsBmpFormat(cli.getFormat()) ? "bmp" : cli.getFormat();
     if (info.st_mode & S_IFDIR) {
-        DIR *dir;
-        struct dirent *ent;
-        std::string dirPath = input;
-        while (!dirPath.empty() && dirPath.back() == '/') {
-            dirPath.pop_back();
-        }
         // -o names the output directory here, as it does for hal_enc: every
         // picture needs a file of its own, so a single name cannot be the answer.
+        std::string dirPath = TrimTrailingSlashes(input);
         std::string outDir;
         if (cli.hasOutputFile()) {
-            outDir = cli.getOutputFile();
-            while (outDir.size() > 1 && outDir.back() == '/') {
-                outDir.pop_back();
-            }
+            outDir = TrimTrailingSlashes(cli.getOutputFile());
         }
         if (!outDir.empty() && !EnsureDir(outDir)) {
             return -1;
         }
-        if ((dir = opendir(dirPath.c_str())) != NULL) {
-            while ((ent = readdir(dir)) != NULL) {
-                if (ent->d_type == DT_REG) { // Regular file
-                    std::string inputFileName = dirPath + '/' + ent->d_name;
-                    std::string stem = outDir.empty()
-                                           ? StripExt(inputFileName)
-                                           : outDir + '/' + StripExt(ent->d_name);
-                    files.emplace_back(stem + "." + outExt);
-                    srcs.emplace_back(inputFileName);
-                }
-            }
-            closedir(dir);
+        std::vector<std::string> entries;
+        if (!ListRegularFiles(dirPath, &entries)) {
+            std::cerr << "Cannot open directory " << dirPath << std::endl;
+            return -1;
+        }
+        for (const auto& inputFileName : entries) {
+            std::string stem = outDir.empty()
+                                   ? StripExt(inputFileName)
+                                   : outDir + '/' +
+                                         StripExt(BasenameOf(inputFileName));
+            files.emplace_back(stem + "." + outExt);
+            srcs.emplace_back(inputFileName);
         }
     } else {
         srcs.push_back(input);
@@ -576,15 +754,15 @@ int main(int argc, char* argv[]) {
             }
             const size_t gotSize = static_cast<size_t>(got);
             int ready = 0;
-            if (ivf) {
+            if (stream.ivf) {
                 // Each packet goes in as its own span, container bytes left
                 // behind. Only the last FillInput count matters: it is the queue
                 // this chunk leaves, while an earlier one is stale by exactly the
                 // frames that arrived since.
-                ivf->Feed(chunk.data(), gotSize,
-                          [&dec, &ready](const uint8_t* span, size_t spanSize) {
-                              ready = dec->FillInput(span, spanSize);
-                          });
+                stream.ivf->Feed(chunk.data(), gotSize,
+                                 [&dec, &ready](const uint8_t* span, size_t spanSize) {
+                                     ready = dec->FillInput(span, spanSize);
+                                 });
             } else {
                 ready = dec->FillInput(chunk.data(), gotSize);
             }

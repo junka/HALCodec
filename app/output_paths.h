@@ -7,6 +7,7 @@
 #include <string>
 #include <vector>
 
+#include <dirent.h>
 #include <sys/stat.h>
 #include <sys/types.h>
 
@@ -86,6 +87,46 @@ inline bool EnsureDir(const std::string& path) {
         std::cerr << "Cannot create output directory " << path << std::endl;
         return false;
     }
+    return true;
+}
+
+// Drop trailing slashes, but never the final character: a lone "/" stays "/",
+// and every real path keeps at least its first byte. hal_dec and hal_enc both
+// trimmed `-i`/`-o` directory arguments by hand before joining names onto them.
+inline std::string TrimTrailingSlashes(const std::string& path) {
+    std::string p = path;
+    while (p.size() > 1 && p.back() == '/') {
+        p.pop_back();
+    }
+    return p;
+}
+
+// The part of `path` after its final slash (the whole string when there is
+// none).
+inline std::string BasenameOf(const std::string& path) {
+    size_t slash = path.find_last_of('/');
+    return slash == std::string::npos ? path : path.substr(slash + 1);
+}
+
+// The regular files directly inside `dirPath` (not recursive), each spelled
+// `<dirPath>/<name>`, in readdir order -- the order hal_dec and hal_enc both
+// fed and named their pictures in, so directory runs stay reproducible
+// relative to what the filesystem reports. False when opendir fails; *out is
+// still emptied first either way.
+inline bool ListRegularFiles(const std::string& dirPath,
+                             std::vector<std::string>* out) {
+    out->clear();
+    DIR* dir = opendir(dirPath.c_str());
+    if (!dir) {
+        return false;
+    }
+    struct dirent* ent;
+    while ((ent = readdir(dir)) != nullptr) {
+        if (ent->d_type == DT_REG) {
+            out->push_back(dirPath + '/' + ent->d_name);
+        }
+    }
+    closedir(dir);
     return true;
 }
 

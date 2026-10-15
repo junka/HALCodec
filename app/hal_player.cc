@@ -77,7 +77,7 @@ static inline double NsToSec(uint64_t ns) { return (double)ns / 1e9; }
 // 32(VPS),33(SPS),34(PPS),16-21 不会出现在 H.264.
 //
 // 返回检测到的 codec: 1=HEVC, 0=H.264, -1=未能判定.
-// 本文件与 hal_dec/hal_session 的差别只在策略:播放器要自己定 codec,所以必须
+// 本文件与 hal_dec 的差别只在策略:播放器要自己定 codec,所以必须
 // 同时抓到 SPS 和 PPS 才认(否则交给下面的扩展名兜底).
 static int ExtractAnnexBParamSets(const uint8_t* data, size_t size,
                                   std::vector<uint8_t>* out) {

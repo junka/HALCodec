@@ -26,8 +26,8 @@
 // (`i + 3 <= size`, `j + 3 <= size`) are the same fix h264au.cc carries.
 //
 // Codec evidence is deliberately narrow: only an H.264 SPS (type 7) counts for
-// H.264 and only a VPS (32, or a bare 33) for HEVC. The old hal_dec/hal_session
-// copies also accepted a type-8 NAL as H.264, but a real HEVC type-4 VCL NAL has
+// H.264 and only a VPS (32, or a bare 33) for HEVC. The old app-local copies
+// also accepted a type-8 NAL as H.264, but a real HEVC type-4 VCL NAL has
 // b0 == 0x08 and reads as an H.264 PPS, so that "evidence" is a false positive;
 // the only streams the difference shows on are ones carrying a PPS and no SPS
 // at all, whose extradata no decoder can use anyway. hal_player was already
@@ -196,6 +196,32 @@ inline void AppendAllNalsAvcc(const uint8_t* data, size_t size,
     for (const auto& n : SplitAnnexB(data, size)) {
         if (n.size) AppendAvccNal(out, n);
     }
+}
+
+// The one-stop front end the apps used to each wrap in their own
+// ExtractParameterSets: scan `data`, sniff the codec from the parameter-set
+// NAL types, and pack the sets it carries into AVCC extradata
+// ([len:4][nalu]...), which is what the decoders' Initialize() consumes.
+//
+// Returns the detected codec hint (kUnknown when nothing usable was seen).
+// `mask`, when not null, receives the ParamSetMask the caller wants to judge
+// itself (hal_player requires both SPS and PPS before trusting the verdict).
+// `onlyWithSpsPps` keeps the decode-side policy of appending nothing unless at
+// least an SPS or a PPS was seen; the plain form appends whatever the stream
+// carries for the detected codec.
+inline CodecHint ExtractParameterSets(const uint8_t* data, size_t size,
+                                      std::vector<uint8_t>* extradata,
+                                      unsigned* mask = nullptr,
+                                      bool onlyWithSpsPps = false) {
+    std::vector<AnnexBNal> nals = SplitAnnexB(data, size);
+    CodecHint codec = DetectCodec(nals);
+    unsigned m = codec == CodecHint::kUnknown ? 0u : ParamSetMask(nals, codec);
+    if (mask) *mask = m;
+    if (codec == CodecHint::kUnknown) return codec;
+    if (!onlyWithSpsPps || (m & (kSpsBit | kPpsBit))) {
+        AppendParamSetsAvcc(nals, codec, extradata);
+    }
+    return codec;
 }
 
 } // namespace halcodec

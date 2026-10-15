@@ -7,11 +7,12 @@
 // One copy each, with union semantics: every spelling any app accepts is listed
 // once here, so a flag that works in one app is not silently unknown in
 // another. The tables had drifted three ways -- hal_enc mapped bmp to BGR and
-// knew nv12/p010/p210/p016, hal_transcode knew nv16, hal_dec/hal_session knew
-// the BMP pixel formats -- and hal_session's extension table answered "mjpeg"
-// where every other site and most backends say "jpeg".
+// knew nv12/p010/p210/p016, hal_transcode knew nv16, hal_dec and the old
+// multi-stream app knew the BMP pixel formats -- and one extension table
+// answered "mjpeg" where every other site and most backends say "jpeg".
 
 #include <cctype>
+#include <cstddef>
 #include <string>
 
 #include "codec_config.h"
@@ -60,7 +61,7 @@ inline bool FormatToPixelFormat(const std::string& format, PixelFormat* out) {
 // The --format values that ask a decoder for converted pixels (RGB/BGR/GRAY)
 // rather than a dump of the frame's own bytes. A dump must leave outputFormat
 // Unknown so every backend stays on its native layout; only these reach
-// FormatToPixelFormat on the decode side. Shared so hal_dec and hal_session
+// FormatToPixelFormat on the decode side. Shared so the decode-side apps
 // cannot drift on which formats are converters.
 inline bool IsConverterFormat(const std::string& format) {
     return format == "y" || format == "bgr" || format == "rgb" ||
@@ -95,6 +96,30 @@ inline std::string CodecFromExtension(std::string ext) {
     if (ext == "mp4" || ext == "mpeg4") return "mpeg4";
     if (ext == "prores" || ext == "appleprores") return "appleprores";
     return std::string();
+}
+
+// The bytes one raw frame of `format` occupies at WxH. hal_enc slices raw
+// input files on this; the 16-bit storage note is why p010/p016 read 3 (not
+// 1.5) and p210 reads 4 bytes per pixel.
+inline size_t FormatFrameBytes(const std::string& format, int64_t w,
+                               int64_t h) {
+    if (format == "y" || format == "gray") {
+        return static_cast<size_t>(w * h);
+    }
+    if (format == "bgra" || format == "rgba") {
+        return static_cast<size_t>(w * h * 4);
+    }
+    if (format == "p010" || format == "p016") {
+        return static_cast<size_t>(w * h * 3);  // 16-bit storage, 4:2:0
+    }
+    if (format == "p210") {
+        return static_cast<size_t>(w * h * 4);  // 16-bit storage, 4:2:2
+    }
+    if (format == "yuv444" || format == "rgb" || format == "bgr" ||
+        format == "rgbi" || format == "bgri") {
+        return static_cast<size_t>(w * h * 3);
+    }
+    return static_cast<size_t>(w * h * 3 / 2);  // nv12/iyuv/yuv default
 }
 
 // The extension a stream of this codec gets, dot included. Only the names that

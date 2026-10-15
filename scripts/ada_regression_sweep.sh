@@ -38,10 +38,10 @@ check "nvjpeg decode" \
 check "nvjpegenc encode" \
     ./hal_enc -b nvjpegenc -i test_cars_320x240.bmp -o /tmp/r7.jpg -f bmp
 check "codecinfo" ./codecinfo
-check "multi-stream session" \
-    ./hal_session -b nvdec --codec h264 \
+check "multi-stream decode (3 streams)" \
+    ./hal_dec -b nvdec --codec h264 \
         -i cars_320x240.h264 -i cars_320x240.h264 -i cars_320x240.h264 \
-        -o /tmp/ms.yuv
+        -o /tmp/ms
 
 echo "-----"
 echo "$pass passed, $fail failed"

@@ -13,7 +13,7 @@ build="$root/build"
 remote=${ADA_DIR:-halcodec_nv}
 
 cmake --build "$build" -j"$(nproc)" --target \
-    nvenc_layers nvjpeg_layers hal_dec hal_transcode hal_session hal_enc codecinfo
+    nvenc_layers nvjpeg_layers hal_dec hal_transcode hal_enc codecinfo
 
 cp "$build/NVEnc/layers/libnvenc_layers.so"   "$build/app/libnvenc_layers.so"
 cp "$build/NVJpeg/layers/libnvjpeg_layers.so" "$build/app/libnvjpeg_layers.so" 2>/dev/null || true
@@ -22,7 +22,7 @@ scp -q "$build/app/libnvenc_layers.so" \
        "$build/app/libnvjpeg_layers.so" \
        "$build/libhalcodec_core.so" \
        "$build/app/hal_dec" "$build/app/hal_enc" \
-       "$build/app/hal_transcode" "$build/app/hal_session" \
+       "$build/app/hal_transcode" \
        "$build/app/codecinfo" \
        "ada:~/$remote/"
 echo "deployed to ada:~/$remote/"

@@ -183,7 +183,7 @@ endif()
 # it needs no backend, no ffmpeg and no sample material.
 # ---------------------------------------------------------------------------
 set(_cli_apps "")
-foreach(_tool hal_dec hal_enc hal_transcode hal_session hal_cam codecinfo)
+foreach(_tool hal_dec hal_enc hal_transcode hal_cam codecinfo)
     find_program(_exe_${_tool} NAMES ${_tool} PATHS ${CMAKE_BINARY_DIR}/app NO_DEFAULT_PATH)
     if(_exe_${_tool})
         list(APPEND _cli_apps ${_exe_${_tool}})

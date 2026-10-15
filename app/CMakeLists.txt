@@ -18,8 +18,6 @@ add_executable(codecinfo codecinfo.cc)
 
 add_executable(hal_dec hal_dec.cc parse_cli.h)
 
-add_executable(hal_session hal_session.cc parse_cli.h)
-
 add_executable(hal_transcode hal_transcode.cc parse_cli.h)
 
 # hal_cam:统一相机→编码应用(归并 hal_camera/hal_camera_v4l2)。源实现按平台
@@ -110,7 +108,6 @@ endif()
 target_link_libraries(hal_enc PUBLIC halcodec_core Boost::program_options ${CMAKE_DL_LIBS})
 target_link_libraries(codecinfo PUBLIC halcodec_core Boost::program_options ${CMAKE_DL_LIBS})
 target_link_libraries(hal_dec PUBLIC halcodec_core Boost::program_options ${CMAKE_DL_LIBS})
-target_link_libraries(hal_session PUBLIC halcodec_core Boost::program_options ${CMAKE_DL_LIBS})
 target_link_libraries(hal_transcode PUBLIC halcodec_core Boost::program_options ${CMAKE_DL_LIBS})
 target_link_libraries(hal_cam PUBLIC halcodec_core Boost::program_options ${CMAKE_DL_LIBS})
 
@@ -156,7 +153,7 @@ foreach(_layer ${_halcodec_backends})
     list(APPEND _halcodec_staged ${_staged_lib})
 endforeach()
 add_custom_target(halcodec_stage_backends DEPENDS ${_halcodec_staged})
-foreach(_tgt hal_enc codecinfo hal_dec hal_session hal_transcode hal_cam)
+foreach(_tgt hal_enc codecinfo hal_dec hal_transcode hal_cam)
     if(TARGET ${_tgt})
         add_dependencies(${_tgt} halcodec_stage_backends)
     endif()

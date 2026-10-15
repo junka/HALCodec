@@ -17,16 +17,26 @@
 // The encoder's geometry is taken from the first decoded frame, so width and
 // height need not be given on the command line; -f selects the encoder's input
 // pixel format when the decoder's is not the default NV12.
+//
+// Repeating -i transcodes several streams concurrently through one
+// halcodec::Session: N independent decoders feed N independent encoders on the
+// same backend pair, and the outputs land beside the inputs (or in -o, which
+// then names a directory) named after each input. Zero-copy is a
+// single-stream option: the -z plumbing (shared VADisplay/CUDA context across
+// the pair) is verified for one stream and is rejected for many.
 
 #include <algorithm>
 #include <chrono>
 #include <cstdint>
 #include <fstream>
 #include <iostream>
+#include <set>
 #include <string>
 #include <vector>
 
 #include "parse_cli.h"
+#include "file_io.h"
+#include "output_paths.h"
 
 #include "codec_config.h"
 #include "codec_names.h"
@@ -37,35 +47,269 @@
 #include "frame.h"
 #include "metrics.h"
 #include "plugin_loader.h"
+#include "session.h"
 
 namespace {
 
-bool ReadFile(const std::string& path, std::vector<uint8_t>* buf) {
-    std::ifstream in(path, std::ios::binary | std::ios::ate);
-    if (!in) return false;
-    std::streamsize size = in.tellg();
-    in.seekg(0, std::ios::beg);
-    buf->resize(static_cast<size_t>(size));
-    return static_cast<bool>(in.read(reinterpret_cast<char*>(buf->data()), size));
-}
-
-// Sniff the stream's codec from its parameter-set NAL types and pack what it
-// carries into AVCC extradata. The scan itself is shared (src/annexb.h); this
-// app gated on the codec name before calling, and has no verdict to report, so
-// the wrapper only keeps that gating policy at the call site.
-bool ExtractParameterSets(const uint8_t* data, size_t size,
-                          std::vector<uint8_t>* extradata) {
-    std::vector<halcodec::AnnexBNal> nals = halcodec::SplitAnnexB(data, size);
-    halcodec::CodecHint codec = halcodec::DetectCodec(nals);
-    if (codec == halcodec::CodecHint::kUnknown) return false;
-    if (halcodec::ParamSetMask(nals, codec) & (halcodec::kSpsBit | halcodec::kPpsBit)) {
-        halcodec::AppendParamSetsAvcc(nals, codec, extradata);
-    }
-    return true;
-}
-
 const char* kDefaultDecoder = "nvdec";
 const char* kDefaultEncoder = "nvenc";
+
+// Per-stream encoder params: the CLI-derived template, plus the geometry that
+// only the first decoded frame can supply. One per -i.
+struct TranscodeStream {
+    std::vector<uint8_t> raw;       // whole compressed input
+    halcodec::CodecParams eparams;  // CLI template; geometry filled lazily
+    bool encOpen = false;
+    size_t encIdx = 0;
+    uint64_t inFrames = 0;
+    uint64_t outFrames = 0;
+};
+
+// The multi-stream transcode driver: N inputs through one mixed
+// halcodec::Session (N decoders opened up front, N encoders opened lazily as
+// each stream's first frame reveals its geometry). The single-stream path
+// below keeps the verified zero-copy chain; this path is host-frames only.
+static int RunMultiStream(CommandLineParser& cli) {
+    const std::vector<std::string>& inputs = cli.getInputFiles();
+    const size_t n = inputs.size();
+
+    if (cli.getZeroCopy()) {
+        std::cerr << "-z is a single-stream option: multi-stream transcode "
+                     "runs on host frames" << std::endl;
+        return -1;
+    }
+
+    std::string decBackend = cli.getBackend().empty() ? kDefaultDecoder
+                                                      : cli.getBackend();
+    std::string encBackend = cli.getEncoderBackend().empty()
+                                 ? kDefaultEncoder
+                                 : cli.getEncoderBackend();
+
+    // The Session's fan-in drains on blocking GetFrame loops, so both sides
+    // have to be async backends; a synchronous encoder would also stall the
+    // per-stream drainer between packets.
+    {
+        auto dec = halcodec::Decoder::Create(decBackend);
+        if (!dec) {
+            std::cerr << "Fail to create decoder backend: " << decBackend
+                      << std::endl;
+            return -1;
+        }
+        if (!dec->isAsync()) {
+            std::cerr << "multi-stream transcode needs async backends; "
+                      << decBackend << " is synchronous" << std::endl;
+            return -1;
+        }
+        auto enc = halcodec::Encoder::Create(encBackend);
+        if (!enc) {
+            std::cerr << "Fail to create encoder backend: " << encBackend
+                      << std::endl;
+            return -1;
+        }
+        if (!enc->isAsync()) {
+            std::cerr << "multi-stream transcode needs async backends; "
+                      << encBackend << " is synchronous" << std::endl;
+            return -1;
+        }
+    }
+    std::cout << "transcode: " << decBackend << " -> " << encBackend << " ("
+              << n << " streams)" << std::endl;
+
+    // One entry per -i: the input bytes, the encoder template from the CLI,
+    // and the per-stream counters.
+    std::vector<TranscodeStream> streams(n);
+    std::vector<halcodec::CodecParams> dparams(n);
+    for (size_t s = 0; s < n; s++) {
+        if (!halcodec::ReadFile(inputs[s], &streams[s].raw)) {
+            std::cerr << "Cannot read " << inputs[s] << std::endl;
+            return -1;
+        }
+        // Feed mode: codec name, never the path (an inputs path would send
+        // NVDEC into its internal demuxer and FillInput would be ignored).
+        dparams[s].codec = cli.getCodec();
+        if (dparams[s].codec.empty()) {
+            dparams[s].codec = halcodec::CodecFromExtension(ExtOf(inputs[s]));
+        }
+        dparams[s].deviceIndex = cli.getGpuIndex();
+        // Extradata for the backends that open on parameter sets (vtbox), as
+        // the single-stream path does.
+        if (dparams[s].codec == "h264" || dparams[s].codec == "hevc" ||
+            dparams[s].codec.empty()) {
+            halcodec::ExtractParameterSets(streams[s].raw.data(),
+                                           streams[s].raw.size(),
+                                           &dparams[s].extradata, nullptr,
+                                           /*onlyWithSpsPps=*/true);
+        }
+
+        // Encoder template: the same CLI-derived settings the single-stream
+        // path builds, minus geometry (per-stream, from the first frame).
+        streams[s].eparams.codec = dparams[s].codec;
+        streams[s].eparams.deviceIndex = cli.getGpuIndex();
+        streams[s].eparams.inputFormat = halcodec::PixelFormat::NV12;
+        if (cli.getFormat() != "yuv" && cli.getFormat() != "iyuv" &&
+            cli.getFormat() != "i420") {
+            halcodec::FormatToPixelFormat(cli.getFormat(),
+                                          &streams[s].eparams.inputFormat);
+        }
+        // The p010 -> P016 remap is deliberate and stays: this app's encoders
+        // read the 16-bit samples right-aligned, so a left-aligned P010 frame
+        // must be declared as P016.
+        if (cli.getFormat() == "p010") {
+            streams[s].eparams.inputFormat = halcodec::PixelFormat::P016;
+        }
+        halcodec::ApplyEncodeOverrides(cli, streams[s].eparams.encode);
+    }
+
+    halcodec::Session session;
+    if (session.open(halcodec::Session::Kind::Decode, decBackend, dparams) !=
+        n) {
+        std::cerr << "Failed to open " << n << " decode streams on "
+                  << decBackend << std::endl;
+        return -1;
+    }
+
+    // Outputs: beside each input, or in -o when it names a directory. The
+    // extension follows each stream's codec, so a mixed batch of h264/hevc
+    // inputs does not get one format stamped on all outputs.
+    std::string outDir;
+    if (!cli.getOutputFile().empty()) {
+        outDir = TrimTrailingSlashes(cli.getOutputFile());
+        if (!EnsureDir(outDir)) {
+            return -1;
+        }
+    }
+    // Buffers must outlive the streams that pubsetbuf into them (see the
+    // note in hal_dec's multi-stream path for what happens otherwise).
+    std::vector<std::vector<char>> bufs(n, std::vector<char>(kIoBufBytes));
+    std::vector<std::ofstream> outs(n);
+    std::set<std::string> claimed;
+    for (size_t s = 0; s < n; s++) {
+        std::string codec = streams[s].eparams.codec.empty()
+                                ? "h264"
+                                : streams[s].eparams.codec;
+        std::string name = BasenameOf(inputs[s]);
+        std::string path = outDir.empty()
+                               ? StripExt(inputs[s])
+                               : outDir + '/' + StripExt(name);
+        path += "_transcoded" + halcodec::CodecStreamExtension(codec);
+        // Two inputs can derive the same name (the same file listed twice);
+        // stamp the stream index into the second one so the ofstreams do not
+        // truncate each other's files mid-run.
+        if (!claimed.insert(path).second) {
+            path = StripExt(path) + "." + std::to_string(s) + ExtOf(path);
+            claimed.insert(path);
+        }
+        outs[s] = OpenBuffered<std::ofstream>(
+            path, std::ios::out | std::ios::binary, bufs[s]);
+        if (!outs[s]) {
+            std::cerr << "unable to open output file: " << path << std::endl;
+            return -1;
+        }
+        std::cout << path << std::endl;
+    }
+
+    // Feed every decoder its whole stream, then signal EOF. Feeding everything
+    // first lets the async backends pipeline hardware submissions, as the
+    // single-stream path does.
+    const size_t kChunk = 1 << 20;
+    for (size_t s = 0; s < n; s++) {
+        for (size_t off = 0; off < streams[s].raw.size(); off += kChunk) {
+            size_t len = std::min(kChunk, streams[s].raw.size() - off);
+            if (session.feedDecode(s, streams[s].raw.data() + off, len) < 0) {
+                std::cerr << "decoder rejected input for stream " << s
+                          << std::endl;
+                return -1;
+            }
+        }
+        session.signalDecodeEOF(s);
+    }
+
+    // Decode fan-in; each stream's encoder opens lazily on its first frame.
+    // getAnyEncodeFrame must wait until every encoder is open (the fan-in
+    // drainer is fixed to the encoders present at its first call), so the
+    // encoded packets queue here until the decode side is exhausted.
+    int encodersOpened = 0;
+    halcodec::CodecFrame frame;
+    size_t s = 0;
+    while (session.getAnyDecodeFrame(frame, s)) {
+        TranscodeStream& st = streams[s];
+        st.inFrames++;
+        if (!st.encOpen) {
+            // Geometry comes from this stream's first decoded frame;
+            // --width/--height, when given, override it (same rule as the
+            // single-stream path).
+            st.eparams.width =
+                cli.getWidth() > 0 ? cli.getWidth() : frame.width;
+            st.eparams.height =
+                cli.getHeight() > 0 ? cli.getHeight() : frame.height;
+            if (st.eparams.inputFormat == halcodec::PixelFormat::Unknown) {
+                st.eparams.inputFormat = frame.format;
+            }
+            // One open call per stream appends exactly one encoder; its index
+            // is the number opened so far minus one.
+            if (session.open(halcodec::Session::Kind::Encode, encBackend,
+                             {st.eparams}) != 1) {
+                std::cerr << "Failed to open encoder for stream " << s
+                          << std::endl;
+                return -1;
+            }
+            st.encIdx = static_cast<size_t>(encodersOpened++);
+            st.encOpen = true;
+        }
+        if (!session.feedEncode(st.encIdx, frame)) {
+            std::cerr << "encoder rejected a frame on stream " << s
+                      << std::endl;
+            return -1;
+        }
+        // The encoder copied the host bytes already (same contract the
+        // single-stream path relies on when it releases right after FillFrame).
+        if (frame.release) {
+            frame.release();
+        }
+    }
+
+    // The decode side is done: every stream either produced frames (encoder
+    // open) or produced none (no encoder to close). Signal EOS on the ones
+    // that encode, then start the fan-in drain -- safe now that all encoders
+    // exist.
+    for (size_t i = 0; i < n; i++) {
+        if (!streams[i].encOpen) {
+            std::cout << "stream " << i << " (" << inputs[i]
+                      << "): no frames decoded" << std::endl;
+            continue;
+        }
+        halcodec::CodecFrame eos;
+        eos.width = streams[i].eparams.width;
+        eos.height = streams[i].eparams.height;
+        eos.format = streams[i].eparams.inputFormat;
+        session.feedEncode(streams[i].encIdx, eos);
+        session.signalEncodeEOF(streams[i].encIdx);
+    }
+    halcodec::CodecFrame packet;
+    size_t which = 0;
+    while (session.getAnyEncodeFrame(packet, which)) {
+        outs[which].write(reinterpret_cast<const char*>(packet.data),
+                          packet.size);
+        streams[which].outFrames++;
+        if (packet.release) packet.release();
+    }
+
+    uint64_t totalIn = 0, totalOut = 0;
+    for (size_t i = 0; i < n; i++) {
+        std::cout << "stream " << i << " (" << inputs[i] << "): "
+                  << streams[i].inFrames << " in, " << streams[i].outFrames
+                  << " out" << std::endl;
+        totalIn += streams[i].inFrames;
+        totalOut += streams[i].outFrames;
+    }
+    std::cout << "Transcode frames: " << totalIn << " in, " << totalOut
+              << " out" << std::endl;
+
+    // Host frames only on this path, so no shared VADisplay/CUDA-context
+    // teardown order to preserve: close() resets all backends in one go.
+    session.close();
+    return 0;
+}
 
 } // namespace
 
@@ -78,11 +322,19 @@ int main(int argc, char* argv[]) {
         std::cerr << "missing input file (-i <file>)" << std::endl;
         return 2;
     }
+
+    halcodec::LoadBackends();
+
+    // More than one -i means concurrent transcode: one mixed Session, N
+    // decoders -> N lazily-opened encoders. The single-stream path below
+    // keeps the zero-copy chain.
+    if (cli.getInputFiles().size() > 1) {
+        return RunMultiStream(cli);
+    }
+
     const std::string output = cli.getOutputFile().empty()
                                    ? std::string("out.h264")
                                    : cli.getOutputFile();
-
-    halcodec::LoadBackends();
 
     std::string decBackend = cli.getBackend().empty() ? kDefaultDecoder
                                                       : cli.getBackend();
@@ -104,7 +356,7 @@ int main(int argc, char* argv[]) {
               << (cli.getZeroCopy() ? " (zero-copy)" : "") << std::endl;
 
     std::vector<uint8_t> raw;
-    if (!ReadFile(input, &raw)) {
+    if (!halcodec::ReadFile(input, &raw)) {
         std::cerr << "Cannot read " << input << std::endl;
         return -1;
     }
@@ -116,13 +368,14 @@ int main(int argc, char* argv[]) {
     dparams.codec = cli.getCodec();
     dparams.deviceIndex = cli.getGpuIndex();
     dparams.zeroCopy = cli.getZeroCopy();
-    
+
     // Extract SPS/PPS (or VPS/SPS/PPS for HEVC) from the input stream for backends
     // that need extradata (e.g. vtbox on macOS). This mirrors what hal_dec does.
     if (dparams.codec == "h264" || dparams.codec == "hevc" || dparams.codec.empty()) {
-        ExtractParameterSets(raw.data(), raw.size(), &dparams.extradata);
+        halcodec::ExtractParameterSets(raw.data(), raw.size(), &dparams.extradata,
+                                       nullptr, /*onlyWithSpsPps=*/true);
     }
-    
+
     if (!dec->Initialize(dparams)) {
         std::cerr << "Fail to initialize decoder backend" << std::endl;
         return -1;

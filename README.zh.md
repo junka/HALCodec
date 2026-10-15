@@ -12,9 +12,9 @@ NVIDIA / AMD / Intel / Apple / NVIDIA DRIVE 的硬件编解码，无需为每个
 ```
                 ┌─────────────────── app/ (命令行工具) ──────────────┐
                 │                                                    │
-   文件/流      │  hal_dec   hal_enc   hal_transcode   codecinfo     │  相机
+   文件/流      │  hal_dec   hal_enc   hal_transcode                 │  相机
    ────────────►│                                              hal_cam│◄──────────
-                │       (parse_cli.h, encode_config.h)             │  SIPL/V4L2/AV
+                │  codecinfo     (parse_cli.h, encode_overrides.h)   │  SIPL/V4L2/AV
                 └───────────────┬──────────────────────┬────────────┘
                                  │                      │
                   统一 C++ 接口                  CameraSource
@@ -55,7 +55,7 @@ NVENC)                                                macOS)       aarch64)
 | 后端 | 解码器 | 编码器 | 能力自省 | 平台 |
 |------|--------|--------|----------|------|
 | NVIDIA NVENC/NVDEC | `nvdec` | `nvenc` | `nvidia` | Linux + CUDA |
-| NVIDIA NVJPEG | `nvjpeg` | — | — | Linux + CUDA |
+| NVIDIA NVJPEG | `nvjpeg` | `nvjpegenc` | `nvjpeg` | Linux + CUDA |
 | AMD AMF | —（数据通路 TODO）| — | `amf` | Linux + AMD |
 | Intel QSV | `qsvdec` | `qsvenc` | `qsv` | Linux + Intel iGPU |
 | NVIDIA DRIVE NvMedia | `nvmedia` | `nvmedia` | `nvmedia` | Linux（DRIVE OS）aarch64 |
@@ -67,8 +67,10 @@ NVENC)                                                macOS)       aarch64)
 - **AMF** 仅当 `AMF/AMF-*/amf/public/include` 下有 SDK 头文件时构建，运行时 dlopen
   `libamfrt64.so.1`（运行机器上需有）。AMF 解码/编码类参与编译但**刻意不注册**：
   数据通路（`FillInput`/`GetFrame`）尚未实现，注册空壳会让 `hal_*` 静默选中它作为
-  默认后端、输出 0 帧。`amf` 能力 provider 正常注册，`codecinfo` 照常展示 AMD 能力；
-  数据通路落地后取消 `amfdecoder.cc`/`amfencoder.cc` 里 `HALCODEC_CONNECT` 的注释即可。
+  默认后端、输出 0 帧。`amf` 能力 provider 仅在运行时存在于本机时注册（无
+  `libamfrt64.so.1` 或非 AMD 机器上根本不会进入注册表），在 AMD 机器上 `codecinfo`
+  照常展示 AMD 能力；数据通路落地后取消 `amfdecoder.cc`/`amfencoder.cc` 里
+  `HALCODEC_CONNECT` 的注释即可。
 - **QSV** 仅当 `QSV/libvpl-*/api` 下有 libvpl 头文件时构建，运行时需 `libvpl.so.2`
   + Intel media driver。
 
@@ -101,15 +103,18 @@ NVENC)                                                macOS)       aarch64)
 
 | 工具 | 默认后端 | 可选后端 |
 |------|----------|----------|
-| `hal_dec` | macOS: `vtbox`；Linux aarch64: `nvmedia`；其它 Linux: `nvdec` | `nvjpeg`、`qsvdec` |
-| `hal_enc` | 第一个注册的编码后端：macOS `vtenc`，Linux+CUDA `nvenc` | `qsvenc`、`nvmedia`、`nvjpegenc` |
-| `hal_transcode` | 由 `-b <dec>:<enc>` 指定解码+编码对；`-z` 帧留显存零拷贝 | 任意解码→编码组合 |
+| `hal_dec` | macOS：`vtbox`；其它平台：第一个注册的解码后端 | `nvjpeg`、`qsvdec`；`-i` 可重复以并发解码 N 路流 |
+| `hal_enc` | 第一个注册的编码后端：macOS `vtenc`，Linux+CUDA `nvenc` | `qsvenc`、`nvmedia`、`nvjpegenc`；`-i` 可重复以并发编码 N 路流 |
+| `hal_transcode` | 由 `-b <dec> -B <enc>` 指定解码+编码对；`-z` 帧留显存零拷贝 | 任意解码→编码组合；`-i` 可重复以并发转码 N 路流（仅 host 帧，`-z` 只限单路） |
 | `hal_cam` | 按采集源：`sipl`→`nvmedia`、`v4l2`→`qsvenc`、`av`→`vtenc` | 任意编码后端（`-B`） |
 | `codecinfo` | 所有注册的能力 provider | `-b` 限定单个 |
 
+Linux 上没有硬编码的解码默认后端：`hal_dec` 在运行时取第一个注册的
+解码后端；NvMedia **刻意不做**这个默认，需要时用 `-b nvmedia` 显式指定。
+
 常用选项（来自 `app/parse_cli.h`）：`-i/--input`、`-o/--output`、`-b/--backend`、
 `--gpu <idx>`、`-c/--codec`、`-f/--format`、`-z/--zero-copy`（解码帧留在显存）。
-跨后端转码用 `hal_transcode -b <dec>:<enc>`。
+跨后端转码用 `hal_transcode -b <dec> -B <enc>`。
 
 ## QSV codec 状态
 
@@ -213,7 +218,7 @@ HEVC Main 10 72。
 
 `app/hal_player.cc` 是跨平台 C++17 硬解播放器,走完整硬解 + GPU 帧渲染通路。
 
-- **解码**: `halcodec::Decoder` 抽象工厂,后端由平台自动选择 — macOS = vtbox (VideoToolbox),Linux = qsvdec,Windows = nvdec
+- **解码**: `halcodec::Decoder` 抽象工厂,后端由 `--backend` 指定;省略时取第一个可用后端(无平台硬编码)
 - **渲染**: SDL2 + legacy OpenGL (fixed-function pipeline),macOS / Linux / Windows 统一
 - **色彩**: NV12 → BGRA CPU 转换 (BT.601 整数近似,~3ns/pixel)
 
@@ -279,7 +284,10 @@ cmake -B build && cmake --build build
 
 Linux + CUDA 下 NVEnc/NVJPEG 目标自动启用；macOS 下 VideoToolbox 自动启用；QSV/AMF
 按各自 SDK 头文件存在与否启用；NvMedia 仅在 aarch64 且 `NvMedia/include/nvmedia_6x`
-存在时启用。交叉编译到 DRIVE OS：
+存在时启用。各后端编成 `*_layers.so`（`.dylib`），由 `halcodec_stage_backends`
+目标（`copy_if_different`）拷到可执行文件旁，而非链接进去；`plugin_loader` 启动时
+从可执行文件所在目录 dlopen 它们，缺某个后端的驱动只会跳过该后端（见[架构](#架构)）。
+交叉编译到 DRIVE OS：
 
 ```sh
 cmake -B build-drive -DCMAKE_TOOLCHAIN_FILE=tools/cmake/driveos-aarch64.cmake \

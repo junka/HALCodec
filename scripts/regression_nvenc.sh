@@ -10,7 +10,7 @@
 #   2. async NVENC encode  (NV12 -> H.264, 30 frames)  + NVDEC round-trip,
 #      asserting Y/UV PSNR >= threshold on every frame (catches chroma-layout
 #      regressions like feeding NV12 bytes as I420).
-#   3. multi-stream async NVDEC via hal_session (3 streams, fan-in), asserting
+#   3. multi-stream async NVDEC via hal_dec (3 streams, fan-in), asserting
 #      every stream's output is byte-identical to the single-stream decode.
 #
 # Usage:
@@ -44,7 +44,7 @@ JPEG_ASSET="$REPO/test_cars_320x240.jpg"
 BMP_ASSET="$REPO/test_cars_320x240.bmp"
 # MJPEG test streams for the NVDEC JPEG-decode path: an AVI container (demuxer
 # mode, 30 frames) and a raw concatenated-MJPEG stream (feed mode, exercised
-# via hal_session). Both generated from the original NV12 via ffmpeg.
+# via hal_dec). Both generated from the original NV12 via ffmpeg.
 MJPEG_AVI_ASSET="$REPO/test_cars_mjpeg.avi"
 MJPEG_RAW_ASSET="$REPO/test_cars_mjpeg.mjpeg"
 CUDART_LOCAL="$(ldd "$BUILD/app/libnvjpeg_layers.so" 2>/dev/null | grep -oE '/[^ ]*libcudart\.so\.[0-9]+' | head -1)"
@@ -55,7 +55,7 @@ NVJPEG_LOCAL="$(ldd "$BUILD/app/libnvjpeg_layers.so" 2>/dev/null | grep -oE '/[^
 # ---------------------------------------------------------------------------
 log "build (local)"
 cmake --S "$REPO" --B "$BUILD" -DCMAKE_BUILD_TYPE=Release >/dev/null 2>&1 || true
-cmake --build "$BUILD" --target hal_dec hal_enc hal_session nvenc_layers nvjpeg_layers -j
+cmake --build "$BUILD" --target hal_dec hal_enc nvenc_layers nvjpeg_layers -j
 
 # POST_BUILD copy only fires on exe relink; refresh the app-dir copy explicitly
 # so the deployed .so matches the freshly built one.
@@ -86,7 +86,7 @@ log "stage dependency tree"
 STAGE="$(mktemp -d)"
 trap 'rm -rf "$STAGE"' EXIT
 
-cp "$BUILD/app/hal_dec" "$BUILD/app/hal_enc" "$BUILD/app/hal_session" \
+cp "$BUILD/app/hal_dec" "$BUILD/app/hal_enc" \
    "$BUILD/app/libnvenc_layers.so" "$BUILD/app/libnvjpeg_layers.so" \
    "$BUILD/app/libamf_layers.so" "$BUILD/app/libqsv_layers.so" \
    "$BUILD/libhalcodec_core.so" "$STAGE/"
@@ -103,7 +103,7 @@ cp "$ASSET_H264" "$ASSET_NV12" "$JPEG_ASSET" "$BMP_ASSET" \
    "$MJPEG_AVI_ASSET" "$MJPEG_RAW_ASSET" "$STAGE/"
 
 # Recursively resolve every .so the binaries/layer-libs need; copy real paths.
-ldd "$BUILD/app/hal_dec" "$BUILD/app/hal_enc" "$BUILD/app/hal_session" \
+ldd "$BUILD/app/hal_dec" "$BUILD/app/hal_enc" \
     "$BUILD/app/libnvenc_layers.so" "$BUILD/app/libnvjpeg_layers.so" \
     "$BUILD/app/libamf_layers.so" "$BUILD/app/libqsv_layers.so" 2>&1 \
   | grep -oE '/[^ ]+\.so\.[0-9.]+' | sort -u \
@@ -183,13 +183,16 @@ RTCFG_BYTES=$(run 'stat -c %s rt_cfg.yuv')
 # 6. Regression 3: multi-stream async NVDEC (3 streams, fan-in).
 # ---------------------------------------------------------------------------
 log "regression 3: multi-stream async NVDEC (3 streams)"
-run ./hal_session -b nvdec \
+run ./hal_dec -b nvdec \
     -i cars_320x240.h264 -i cars_320x240.h264 -i cars_320x240.h264 \
     -o sess -f nv12 2>&1 | tail -3
-for s in 0 1 2; do
-    SZ=$(run "stat -c %s sess.$s.nv12")
+# -o names a directory; the two colliding streams after the first get their
+# stream index stamped into the name.
+run "cmp -s dec.yuv sess/cars_320x240.nv12" || fail "stream 0 not byte-identical to single-stream decode"
+for s in 1 2; do
+    SZ=$(run "stat -c %s sess/cars_320x240.$s.nv12")
     [ "$SZ" = "3456000" ] || fail "stream $s size $SZ != 3456000"
-    run "cmp -s dec.yuv sess.$s.nv12" || fail "stream $s not byte-identical to single-stream decode"
+    run "cmp -s dec.yuv sess/cars_320x240.$s.nv12" || fail "stream $s not byte-identical to single-stream decode"
 done
 
 # ---------------------------------------------------------------------------
@@ -216,7 +219,7 @@ run 'bash -c "od -A n -t x1 -N 2 nvjpeg_enc.jpg | grep -qi \"ff d8\""' \
 # ---------------------------------------------------------------------------
 # 8. Regression 5: NVDEC MJPEG decode.
 #    Exercises NVDEC's cudaVideoCodec_JPEG path two ways: demuxer mode (AVI
-#    container) and feed mode (raw concatenated MJPEG via hal_session). Both
+#    container) and feed mode (raw concatenated MJPEG via hal_dec). Both
 #    must produce 30 frames of correctly-sized NV12. Byte-identity between
 #    single-stream demuxer decode and multi-stream feed decode is asserted.
 #
@@ -232,14 +235,16 @@ MJPEG_DEC_BYTES=$(run 'stat -c %s mjpeg_dec.yuv')
 [ "$MJPEG_DEC_BYTES" = "3456000" ] || fail "mjpeg decode size $MJPEG_DEC_BYTES != 3456000 (30 * 320*240*1.5)"
 run 'python3 -c "d=open(\"mjpeg_dec.yuv\",\"rb\").read()[:320*240]; assert 10 < sum(d)/len(d) < 246, \"Y mean out of range\""'
 
-log "regression 5b: NVDEC MJPEG multi-stream (raw feed mode via hal_session)"
-run ./hal_session -b nvdec \
+log "regression 5b: NVDEC MJPEG multi-stream (raw feed mode via hal_dec)"
+run ./hal_dec -b nvdec \
     -i test_cars_mjpeg.mjpeg -i test_cars_mjpeg.mjpeg -i test_cars_mjpeg.mjpeg \
     -o msess -f nv12 2>&1 | tail -3
-for s in 0 1 2; do
-    SZ=$(run "stat -c %s msess.$s.nv12")
+run "cmp -s mjpeg_dec.yuv msess/test_cars_mjpeg.nv12" \
+    || fail "mjpeg stream 0 not byte-identical to single-stream demuxer decode"
+for s in 1 2; do
+    SZ=$(run "stat -c %s msess/test_cars_mjpeg.$s.nv12")
     [ "$SZ" = "3456000" ] || fail "mjpeg stream $s size $SZ != 3456000"
-    run "cmp -s mjpeg_dec.yuv msess.$s.nv12" \
+    run "cmp -s mjpeg_dec.yuv msess/test_cars_mjpeg.$s.nv12" \
         || fail "mjpeg stream $s not byte-identical to single-stream demuxer decode"
 done
 

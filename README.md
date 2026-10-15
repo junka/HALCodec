@@ -54,8 +54,9 @@ headers are present under `AMF/AMF-*/amf/public/include`; the AMF runtime
 where the binary runs. The AMF decoder/encoder classes compile but are
 deliberately not registered: their data paths (`FillInput`/`GetFrame`) are
 still TODO, and registering an empty shell would let `hal_*` silently pick it
-as the default backend and produce 0 frames. The `amf` caps provider is
-registered, so `codecinfo` still reports AMD capabilities; uncomment
+as the default backend and produce 0 frames. The `amf` caps provider registers
+itself once the runtime is present, so on an AMD host `codecinfo` reports AMD
+capabilities; uncomment
 `HALCODEC_CONNECT` in `amfdecoder.cc`/`amfencoder.cc` when the data paths land.
 Same for QSV: built only when libvpl headers exist
 under `QSV/libvpl-*/api`, with `libvpl.so.2` + an Intel media driver expected
@@ -72,7 +73,7 @@ VideoToolbox/layers/ Apple adapter (vtbox namespace)
 AMF/layers/          AMD adapter (amd namespace), Linux-only
 QSV/layers/          Intel QSV/libvpl adapter (qsv namespace), Linux-only
 NvMedia/layers/      NVIDIA DRIVE OS adapter (nvmedia namespace), Linux-aarch64-only
-app/                 example CLIs (hal_dec/hal_enc/hal_transcode/hal_cam/codecinfo)
+app/                 example CLIs (hal_dec/hal_enc/hal_transcode/hal_cam/codecinfo, plus hal_player when SDL2 is present)
 tools/               helper scripts (SDK update/import)
 ```
 
@@ -81,9 +82,9 @@ tools/               helper scripts (SDK update/import)
 ```
                 ┌─────────────────── app/ (CLIs) ───────────────────┐
                 │                                                    │
-   file/stream  │  hal_dec   hal_enc   hal_transcode   codecinfo     │  camera
+   file/stream  │  hal_dec   hal_enc   hal_transcode                 │  camera
    ────────────►│                                              hal_cam│◄──────────
-                │       (parse_cli.h, encode_config.h)             │  SIPL/V4L2/AV
+                │  codecinfo     (parse_cli.h, encode_overrides.h)   │  SIPL/V4L2/AV
                 └───────────────┬──────────────────────┬────────────┘
                                  │                      │
                   unified C++ interface           CameraSource
@@ -298,11 +299,15 @@ work against any registered backend without recompilation. Pick a backend with
 
 | Tool      | Default backend         | Alternative backends |
 |-----------|-------------------------|----------------------|
-| `hal_dec` | macOS: `vtbox`; Linux aarch64: `nvmedia`; other Linux: `nvdec` | `nvjpeg`, `qsvdec` |
-| `hal_enc` | the first registered encoder backend: `vtenc` on macOS, `nvenc` on Linux + CUDA | `qsvenc`, `nvmedia`, `nvjpegenc` |
-| `hal_transcode` | decode+encode pair from `-b <dec>:<enc>`; `-z` keeps frames in device memory | any decode→encode combo |
+| `hal_dec` | macOS: `vtbox`; other platforms: the first registered decoder backend | `nvjpeg`, `qsvdec`; repeat `-i` to decode N streams concurrently |
+| `hal_enc` | the first registered encoder backend: `vtenc` on macOS, `nvenc` on Linux + CUDA | `qsvenc`, `nvmedia`, `nvjpegenc`; repeat `-i` to encode N streams concurrently |
+| `hal_transcode` | decode+encode pair from `-b <dec> -B <enc>`; `-z` keeps frames in device memory | any decode→encode combo; repeat `-i` to transcode N streams concurrently (host frames; `-z` is single-stream) |
 | `hal_cam` | per source: `sipl`→`nvmedia`, `v4l2`→`qsvenc`, `av`→`vtenc` | any encoder backend (`-B`) |
 | `codecinfo` | all registered capability providers | `-b` restricts to one |
+
+There is no hard-coded decoder default on Linux: `hal_dec` takes the first
+registered decoder backend at runtime. NvMedia is deliberately *not*
+that default — pass `-b nvmedia` to select it.
 
 Common options (from `app/parse_cli.h`):
 
@@ -317,7 +322,7 @@ Common options (from `app/parse_cli.h`):
 | `-c, --codec <name>` | stream codec (default `h264`; the vtbox/vtenc backend also answers for `hevc`, `av1`, `jpeg`, `prores`) |
 
 Exit codes — `hal_dec`: `0` success, `2` missing/invalid input, `255` decoder
-create/initialize failure; `hal_enc`: `0` success, `1` backend
+create/initialize failure; `hal_enc`: `0` success, `255` backend
 create/initialize failure.
 
 ### hal_dec — decode
@@ -625,8 +630,9 @@ the fixed tree.
 `app/hal_player.cc` is a cross-platform C++17 hard-decode player that exercises
 the full decode + GPU-frame render path end to end.
 
-- **Decode**: `halcodec::Decoder` abstraction factory — backend picked by
-  platform: macOS = vtbox (VideoToolbox), Linux = qsvdec, Windows = nvdec.
+- **Decode**: `halcodec::Decoder` abstraction factory — `--backend` picks one;
+  when omitted the first available decoder backend is used (there is no
+  platform hard-coding).
 - **Render**: SDL2 + legacy OpenGL (fixed-function pipeline), uniform across
   macOS / Linux / Windows.
 - **Color**: NV12 → BGRA CPU conversion (BT.601 integer approximation, ~3 ns/pixel).
@@ -693,5 +699,21 @@ upload; well within 30 fps real-time playback capacity.
 cmake -B build && cmake --build build
 ```
 
-On Linux + CUDA, the NVEnc/NVJPEG targets are enabled automatically;
-`app/CMakeLists.txt` force-loads the shared layers (`--no-as-needed`) so their
+On Linux + CUDA the NVEnc/NVJPEG targets are enabled automatically; QSV and AMF
+when their SDK headers are found, and NvMedia only on aarch64 with
+`NvMedia/include/nvmedia_6x` present. The backends are built as `*_layers.so`
+(`.dylib`) shared libraries and *staged* next to the executables by the
+`halcodec_stage_backends` target — a `copy_if_different` rule, so a rebuilt
+backend always lands a fresh copy and no executable is ever stale. They are not
+linked in: `plugin_loader` dlopens them from the executable's own directory at
+startup, so a machine missing one backend's driver only skips that backend (see
+[Architecture](#architecture)).
+
+To cross-compile for DRIVE OS:
+
+```sh
+cmake -B build-drive -DCMAKE_TOOLCHAIN_FILE=tools/cmake/driveos-aarch64.cmake \
+      -DBoost_NO_BOOST_CMAKE=ON -DBOOST_ROOT=/tmp/boost-aarch64/sysroot/usr \
+      -DBoost_NO_SYSTEM_PATHS=ON
+cmake --build build-drive -j
+```
