@@ -29,8 +29,10 @@
 #include "parse_cli.h"
 
 #include "codec_config.h"
+#include "codec_names.h"
+#include "annexb.h"
 #include "decoder.h"
-#include "encode_config.h"
+#include "encode_overrides.h"
 #include "encoder.h"
 #include "frame.h"
 #include "metrics.h"
@@ -47,117 +49,17 @@ bool ReadFile(const std::string& path, std::vector<uint8_t>* buf) {
     return static_cast<bool>(in.read(reinterpret_cast<char*>(buf->data()), size));
 }
 
-// Packs one NAL unit into AVCC layout ([len:4][nalu]...) for extradata.
-void AppendAvcc(std::vector<uint8_t>* avcc, const uint8_t* data, size_t n) {
-    avcc->push_back(static_cast<uint8_t>((n >> 24) & 0xFF));
-    avcc->push_back(static_cast<uint8_t>((n >> 16) & 0xFF));
-    avcc->push_back(static_cast<uint8_t>((n >> 8) & 0xFF));
-    avcc->push_back(static_cast<uint8_t>(n & 0xFF));
-    avcc->insert(avcc->end(), data, data + n);
-}
-
+// Sniff the stream's codec from its parameter-set NAL types and pack what it
+// carries into AVCC extradata. The scan itself is shared (src/annexb.h); this
+// app gated on the codec name before calling, and has no verdict to report, so
+// the wrapper only keeps that gating policy at the call site.
 bool ExtractParameterSets(const uint8_t* data, size_t size,
                           std::vector<uint8_t>* extradata) {
-    std::vector<uint8_t> vps, sps, pps;
-    bool isHEVC = false;
-    size_t i = 0;
-    
-    // First pass: detect if this is HEVC by checking the first VCL/parameter NAL.
-    while (i + 4 <= size) {
-        if (!(data[i] == 0 && data[i + 1] == 0 &&
-              (data[i + 2] == 1 ||
-               (i + 3 < size && data[i + 2] == 0 && data[i + 3] == 1)))) {
-            ++i;
-            continue;
-        }
-        size_t sc = (data[i + 2] == 1) ? 3 : 4;
-        size_t start = i + sc;
-        if (start < size) {
-            // H.264 header: 5-bit type at b0 & 0x1F (SPS=7, PPS=8).
-            // HEVC header: 6-bit type at (b0 >> 1) & 0x3F (VPS/SPS/PPS=32/33/34).
-            uint8_t h264Type = data[start] & 0x1F;
-            uint8_t hevcType = static_cast<uint8_t>((data[start] >> 1) & 0x3F);
-            if (hevcType == 32 || hevcType == 33 || hevcType == 34) {
-                isHEVC = true;
-                break;
-            } else if (h264Type == 7 || h264Type == 8) {
-                isHEVC = false;
-                break;
-            }
-        }
-        // Skip this NAL to find the next one
-        size_t j = start + 1;
-        for (; j + 4 <= size; ++j) {
-            if (data[j] != 0 || data[j + 1] != 0) continue;
-            if (data[j + 2] == 1 ||
-                (j + 3 < size && data[j + 2] == 0 && data[j + 3] == 1)) {
-                break;
-            }
-        }
-        i = j;
-    }
-    
-    // Second pass: extract parameter sets
-    i = 0;
-    while (i + 4 <= size) {
-        if (!(data[i] == 0 && data[i + 1] == 0 &&
-              (data[i + 2] == 1 ||
-               (i + 3 < size && data[i + 2] == 0 && data[i + 3] == 1)))) {
-            ++i;
-            continue;
-        }
-        size_t sc = (data[i + 2] == 1) ? 3 : 4;
-        size_t start = i + sc;
-        
-        size_t j = start + 1;
-        for (; j + 4 <= size; ++j) {
-            if (data[j] != 0 || data[j + 1] != 0) continue;
-            if (data[j + 2] == 1 ||
-                (j + 3 < size && data[j + 2] == 0 && data[j + 3] == 1)) {
-                break;
-            }
-        }
-        size_t end = j;
-        
-        if (start < size) {
-            uint8_t type = isHEVC
-                              ? static_cast<uint8_t>((data[start] >> 1) & 0x3F)
-                              : static_cast<uint8_t>(data[start] & 0x1F);
-            if (isHEVC) {
-                if (type == 32 && vps.empty()) {
-                    vps.assign(data + start, data + end);
-                } else if (type == 33 && sps.empty()) {
-                    sps.assign(data + start, data + end);
-                } else if (type == 34 && pps.empty()) {
-                    pps.assign(data + start, data + end);
-                }
-            } else {
-                if (type == 7 && sps.empty()) {
-                    sps.assign(data + start, data + end);
-                } else if (type == 8 && pps.empty()) {
-                    pps.assign(data + start, data + end);
-                }
-            }
-        }
-        
-        bool haveEnough = isHEVC ? (!sps.empty() && !pps.empty()) 
-                                  : (!sps.empty() && !pps.empty());
-        if (haveEnough) break;
-        i = j;
-    }
-    
-    if ((isHEVC && sps.empty() && pps.empty()) || 
-        (!isHEVC && sps.empty() && pps.empty())) {
-        return false;
-    }
-    
-    if (isHEVC) {
-        if (!vps.empty()) AppendAvcc(extradata, vps.data(), vps.size());
-        if (!sps.empty()) AppendAvcc(extradata, sps.data(), sps.size());
-        if (!pps.empty()) AppendAvcc(extradata, pps.data(), pps.size());
-    } else {
-        if (!sps.empty()) AppendAvcc(extradata, sps.data(), sps.size());
-        if (!pps.empty()) AppendAvcc(extradata, pps.data(), pps.size());
+    std::vector<halcodec::AnnexBNal> nals = halcodec::SplitAnnexB(data, size);
+    halcodec::CodecHint codec = halcodec::DetectCodec(nals);
+    if (codec == halcodec::CodecHint::kUnknown) return false;
+    if (halcodec::ParamSetMask(nals, codec) & (halcodec::kSpsBit | halcodec::kPpsBit)) {
+        halcodec::AppendParamSetsAvcc(nals, codec, extradata);
     }
     return true;
 }
@@ -236,30 +138,22 @@ int main(int argc, char* argv[]) {
     // initialized for video-memory input. When -z is off the encoder takes the
     // host path (IN_SYSTEM_MEMORY).
     eparams.zeroCopy = cli.getZeroCopy();
-    if (cli.getFormat() == "yuv444") {
-        eparams.inputFormat = halcodec::PixelFormat::YUV444P;
-    } else if (cli.getFormat() == "p010" || cli.getFormat() == "p016") {
+    // --format names the layout the encoder should accept. NV12 is the default
+    // here and -f yuv (the CLI default) must keep meaning it: the decoders hand
+    // NV12 to the encoder, so unlike hal_enc -- where the same sentinel selects
+    // I420 for raw input -- the yuv spellings are left at NV12.
+    eparams.inputFormat = halcodec::PixelFormat::NV12;
+    if (cli.getFormat() != "yuv" && cli.getFormat() != "iyuv" &&
+        cli.getFormat() != "i420") {
+        halcodec::FormatToPixelFormat(cli.getFormat(), &eparams.inputFormat);
+    }
+    // The p010 -> P016 remap is deliberate and stays: this app's encoders read
+    // the 16-bit samples right-aligned, so a left-aligned P010 frame must be
+    // declared as P016.
+    if (cli.getFormat() == "p010") {
         eparams.inputFormat = halcodec::PixelFormat::P016;
-    } else if (cli.getFormat() == "nv16") {
-        eparams.inputFormat = halcodec::PixelFormat::NV16;
-    } else {
-        eparams.inputFormat = halcodec::PixelFormat::NV12;
     }
-    if (!cli.getEncodeConfigFile().empty()) {
-        halcodec::LoadEncodeConfig(cli.getEncodeConfigFile(), eparams.encode);
-    }
-    if (!cli.getPreset().empty())      eparams.encode.preset = cli.getPreset();
-    if (!cli.getTuning().empty())      eparams.encode.tuningInfo = cli.getTuning();
-    if (!cli.getRateControl().empty()) eparams.encode.rateControl = cli.getRateControl();
-    if (cli.getBitrateKbps() >= 0)     eparams.encode.bitrateKbps = cli.getBitrateKbps();
-    if (cli.getMaxBitrateKbps() >= 0)  eparams.encode.maxBitrateKbps = cli.getMaxBitrateKbps();
-    if (cli.getQp() >= 0)              eparams.encode.qp = cli.getQp();
-    if (cli.getGopLength() >= 0)       eparams.encode.gopLength = cli.getGopLength();
-    if (cli.getNumBFrames() >= 0)      eparams.encode.numBFrames = cli.getNumBFrames();
-    if (cli.getFps() > 0)              eparams.encode.frameRateNum = cli.getFps();
-    if (!cli.getProfile().empty())     eparams.encode.profile = cli.getProfile();
-    if (!cli.getLevel().empty())       eparams.encode.level = cli.getLevel();
-    if (cli.getLowDelay())             eparams.encode.lowDelay = true;
+    halcodec::ApplyEncodeOverrides(cli, eparams.encode);
 
     std::ofstream fpout(output, std::ios::binary);
     if (!fpout) {

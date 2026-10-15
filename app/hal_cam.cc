@@ -42,12 +42,12 @@
 #include "frame_channel.h"
 #include "frame_router.h"
 #include "encoder.h"
-#include "encode_config.h"
+#include "encode_overrides.h"
+#include "frame.h"
+#include "output_paths.h"
 #include "parse_cli.h"
 #include "plugin_loader.h"
 
-#include "codec_config.h"
-#include "frame.h"
 
 namespace {
 
@@ -327,19 +327,7 @@ int main(int argc, char* argv[]) {
         params.height = u->src->height();
         params.inputFormat = halcodec::PixelFormat::NV12;
         if (source == "sipl") params.zeroCopy = true;
-        if (!cli.getEncodeConfigFile().empty()) {
-            LoadEncodeConfig(cli.getEncodeConfigFile(), params.encode);
-        }
-        if (!cli.getRateControl().empty()) params.encode.rateControl = cli.getRateControl();
-        if (cli.getBitrateKbps() >= 0)    params.encode.bitrateKbps = cli.getBitrateKbps();
-        if (cli.getMaxBitrateKbps() >= 0) params.encode.maxBitrateKbps = cli.getMaxBitrateKbps();
-        if (cli.getQp() >= 0)             params.encode.qp = cli.getQp();
-        if (cli.getGopLength() >= 0)      params.encode.gopLength = cli.getGopLength();
-        if (cli.getNumBFrames() >= 0)     params.encode.numBFrames = cli.getNumBFrames();
-        if (cli.getFps() > 0)             params.encode.frameRateNum = cli.getFps();
-        if (!cli.getProfile().empty())    params.encode.profile = cli.getProfile();
-        if (!cli.getLevel().empty())      params.encode.level = cli.getLevel();
-        if (cli.getLowDelay())            params.encode.lowDelay = true;
+        halcodec::ApplyEncodeOverrides(cli, params.encode);
         if (!enc->Initialize(params)) {
             std::cerr << "hal_cam: encoder Initialize failed for cam "
                       << i << " (" << encoderBackend << ")\n";
@@ -355,11 +343,13 @@ int main(int argc, char* argv[]) {
         const std::string& o = cli.getOutputFile();
         if (units.size() == 1) return o.empty() ? "out.h264" : o;
         std::string base = o.empty() ? "out.h264" : o;
-        size_t dot = base.find_last_of('.');
-        if (dot == std::string::npos) {
+        // Split at the extension with the shared helpers, so a dot inside a
+        // directory name ("in.put/f0") is not mistaken for one.
+        const std::string ext = ExtOf(base);
+        if (ext.empty()) {
             return base + "_cam" + std::to_string(i);
         }
-        return base.substr(0, dot) + "_cam" + std::to_string(i) + base.substr(dot);
+        return StripExt(base) + "_cam" + std::to_string(i) + ext;
     };
     for (size_t i = 0; i < units.size(); ++i) {
         outs[i].open(deriveName(static_cast<int>(i)),

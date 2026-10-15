@@ -18,7 +18,8 @@
 #include "parse_cli.h"
 
 #include "codec_config.h"
-#include "encode_config.h"
+#include "codec_names.h"
+#include "encode_overrides.h"
 #include "frame.h"
 #include "plugin_loader.h"
 
@@ -30,20 +31,6 @@ struct RawImage {
     std::string inputPath;
     std::string outputPath;
 };
-
-// The default output extension comes from the codec rather than from --format.
-// --format describes the raw layout of the input, so an encoded picture named
-// after that extension lands on the frame it was made from -- a directory of
-// .nv12 frames fed to `-c jpeg -f nv12` used to overwrite its own inputs.
-std::string CodecStreamExt(const std::string& codec) {
-    // Only the names that differ from the codec string need a case: h264, av1,
-    // prores and vp9 already read as elementary-stream extensions.
-    if (codec == "hevc" || codec == "h265") return ".h265";
-    if (codec == "jpeg" || codec == "mjpeg") return ".jpg";
-    if (codec == "appleprores") return ".prores";
-    if (codec == "mpeg2") return ".mpg2";
-    return "." + codec;
-}
 
 }  // namespace
 
@@ -78,23 +65,10 @@ int main(int argc, char* argv[]) {
     halcodec::CodecParams params;
     params.inputs.push_back(input);
     params.deviceIndex = cli.getGpuIndex();
-    if (cli.getFormat() == "rgb" || cli.getFormat() == "rgbi") {
-        params.inputFormat = halcodec::PixelFormat::RGB;
-    } else if (cli.getFormat() == "bgr" || cli.getFormat() == "bgri"
-               || cli.getFormat() == "bmp") {
-        params.inputFormat = halcodec::PixelFormat::BGR;
-    } else if (cli.getFormat() == "nv12") {
-        params.inputFormat = halcodec::PixelFormat::NV12;
-    } else if (cli.getFormat() == "p010") {
-        params.inputFormat = halcodec::PixelFormat::P010;
-    } else if (cli.getFormat() == "p210") {
-        params.inputFormat = halcodec::PixelFormat::P210;
-    } else if (cli.getFormat() == "p016") {
-        params.inputFormat = halcodec::PixelFormat::P016;
-    } else if (cli.getFormat() == "yuv444") {
-        params.inputFormat = halcodec::PixelFormat::YUV444P;
-    } else {
-        params.inputFormat = halcodec::PixelFormat::I420; // yuv/iyuv default
+    // --format -> the layout the input pixels arrive in; I420 (yuv/iyuv) is the
+    // historical default for raw input.
+    if (!halcodec::FormatToPixelFormat(cli.getFormat(), &params.inputFormat)) {
+        params.inputFormat = halcodec::PixelFormat::I420;
     }
     if (cli.getWidth() > 0)  params.width  = cli.getWidth();
     if (cli.getHeight() > 0) params.height = cli.getHeight();
@@ -108,25 +82,9 @@ int main(int argc, char* argv[]) {
     }
 
     // Encoder tuning: load JSON config (if any), then apply CLI single-item
-    // overrides on top. CLI items left at their sentinels are skipped so they
-    // don't clobber values that came from the JSON file.
+    // overrides on top.
     params.codec = cli.getCodec();
-    if (!cli.getEncodeConfigFile().empty()) {
-        halcodec::LoadEncodeConfig(cli.getEncodeConfigFile(), params.encode);
-    }
-    if (!cli.getPreset().empty())       params.encode.preset = cli.getPreset();
-    if (!cli.getTuning().empty())       params.encode.tuningInfo = cli.getTuning();
-    if (!cli.getRateControl().empty())  params.encode.rateControl = cli.getRateControl();
-    if (cli.getBitrateKbps() >= 0)      params.encode.bitrateKbps = cli.getBitrateKbps();
-    if (cli.getMaxBitrateKbps() >= 0)   params.encode.maxBitrateKbps = cli.getMaxBitrateKbps();
-    if (cli.getQp() >= 0)               params.encode.qp = cli.getQp();
-    if (cli.getQuality() >= 0)          params.encode.quality = cli.getQuality();
-    if (cli.getGopLength() >= 0)        params.encode.gopLength = cli.getGopLength();
-    if (cli.getNumBFrames() >= 0)       params.encode.numBFrames = cli.getNumBFrames();
-    if (cli.getFps() > 0)               params.encode.frameRateNum = cli.getFps();
-    if (!cli.getProfile().empty())      params.encode.profile = cli.getProfile();
-    if (!cli.getLevel().empty())        params.encode.level = cli.getLevel();
-    if (cli.getLowDelay())              params.encode.lowDelay = true;
+    halcodec::ApplyEncodeOverrides(cli, params.encode);
 
     if (!enc->Initialize(params)) {
         std::cerr << "Fail to initialize encoder backend: " << backend << std::endl;
@@ -143,7 +101,7 @@ int main(int argc, char* argv[]) {
     // the outputs this run creates are regular files in the same directory, so a
     // codestream could be read back as raw pixels.
     std::vector<RawImage> images;
-    const std::string outExt = CodecStreamExt(params.codec);
+    const std::string outExt = halcodec::CodecStreamExtension(params.codec);
     // Where the default names go: alongside each input, or into -o when it names
     // a directory. Resolved before the scan so a bad -o is reported before
     // anything is read.

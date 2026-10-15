@@ -1,12 +1,12 @@
 // hal_player — 跨平台硬解播放器,HAL Decoder + SDL2 + OpenGL.
 //
-//   解码 : HAL Decoder 抽象 (vtbox/nvdec/qsvdec/amfdec) — 平台无关 API.
+//   解码 : HAL Decoder 抽象 (vtbox/nvdec/qsvdec) — 平台无关 API.
 //   渲染 : SDL2 + OpenGL (跨 macOS / Linux / Windows).
 //   数据流: Annex-B → HAL Decoder::FillInput → GetFrame (CodecFrame)
 //           → DownloadToHost (仅 device 内存帧) → NV12→BGRA (CPU) → GL texture
 //
 // 跨平台关键:
-//   - 解码走 HAL 抽象层,后端由平台决定 (macOS=vtbox,Linux=qsvdec,Windows=amfdec).
+//   - 解码走 HAL 抽象层,后端由平台决定 (macOS=vtbox,Linux=qsvdec,Windows=nvdec).
 //   - 渲染用 SDL2 + OpenGL,所有平台统一.
 //   - NV12→BGRA 转换在 bench 模式下跳过 (纯吞吐不渲染).
 //
@@ -37,9 +37,12 @@
 #include <SDL2/SDL.h>
 #include <SDL2/SDL_opengl.h>
 
+#include "annexb.h"
 #include "codec_config.h"
+#include "codec_names.h"
 #include "decoder.h"
 #include "frame.h"
+#include "output_paths.h"
 #include "plugin_loader.h"
 #include "yuv_to_bgra.h"
 
@@ -68,102 +71,38 @@ static inline double NsToSec(uint64_t ns) { return (double)ns / 1e9; }
 // 从 Annex-B 流中提取 SPS+PPS (H.264) 或 VPS+SPS+PPS (HEVC),输出 AVCC 格式
 // [4-byte BE len][nalu][4-byte len][nalu]...  — VT/VTDecoder backend 要求.
 //
-// Codec detect:不能靠 forbidden_zero_bit (byte & 0x80) 区分 — H.264 和 HEVC
-// 的 forbidden_zero_bit 都必须是 0!正确做法是看 type 值范围:
-//   H.264 types  7(SPS),8(PPS),5(IDR),6(SEI)   不会出现在 HEVC;
-//   HEVC  types 32(VPS),33(SPS),34(PPS),16-21  不会出现在 H.264.
+// 扫描与 codec 判定都在 src/annexb.h:不能靠 forbidden_zero_bit (byte & 0x80)
+// 区分 — H.264 和 HEVC 的 forbidden_zero_bit 都必须是 0!正确做法是看 type 值
+// 范围: H.264 types 7(SPS),8(PPS),5(IDR),6(SEI) 不会出现在 HEVC;HEVC types
+// 32(VPS),33(SPS),34(PPS),16-21 不会出现在 H.264.
+//
 // 返回检测到的 codec: 1=HEVC, 0=H.264, -1=未能判定.
+// 本文件与 hal_dec/hal_session 的差别只在策略:播放器要自己定 codec,所以必须
+// 同时抓到 SPS 和 PPS 才认(否则交给下面的扩展名兜底).
 static int ExtractAnnexBParamSets(const uint8_t* data, size_t size,
                                   std::vector<uint8_t>* out) {
-    // First pass:扫描所有 NALs,精确 detect codec
-    int seenHEVCVPS = 0, seenH264SPS = 0;
-    std::vector<std::pair<uint8_t*, size_t>> nals;  // (nalu ptr, nalu size, NO start code)
-    size_t i = 0;
-    while (i + 3 < size) {
-        size_t sc = 0;
-        if (data[i]==0 && data[i+1]==0 && data[i+2]==1) sc = 3;
-        else if (i+3<size && data[i]==0 && data[i+1]==0 && data[i+2]==0 && data[i+3]==1) sc = 4;
-        if (!sc) { ++i; continue; }
-        uint8_t* nalStart = const_cast<uint8_t*>(data + i + sc);
-        size_t j = i + sc + 1;
-        while (j + 3 < size) {
-            if (data[j]==0 && data[j+1]==0 && (data[j+2]==1 || (j+3<size && data[j+2]==0 && data[j+3]==1))) break;
-            ++j;
-        }
-        size_t nalSize = j - (i + sc);
-        uint8_t h264type = nalStart[0] & 0x1F;
-        uint8_t hevctype = (nalStart[0] >> 1) & 0x3F;
-        nals.push_back({nalStart, nalSize});
-        if (h264type == 7) seenH264SPS = 1;
-        if (hevctype == 32) seenHEVCVPS = 1;
-        i = j;
+    std::vector<halcodec::AnnexBNal> nals = halcodec::SplitAnnexB(data, size);
+    halcodec::CodecHint codec = halcodec::DetectCodec(nals);
+    unsigned mask = halcodec::ParamSetMask(nals, codec);
+    if (codec != halcodec::CodecHint::kUnknown) {
+        halcodec::AppendParamSetsAvcc(nals, codec, out);
     }
-    // 判定优先级:见到 H.264 SPS 就是 H.264(VPS 的 32 是 H.264 里可能出现的
-    // 误命中,顺序相关),否则看 HEVC VPS,再退回 HEVC SPS(33).
-    int isHEVC = (!seenH264SPS && seenHEVCVPS) ? 1 : 0;
-    if (!isHEVC && !seenH264SPS) {
-        for (auto& [p, sz] : nals) if (((p[0] >> 1) & 0x3F) == 33) { isHEVC = 1; break; }
-    }
-
-    // Second pass:按 codec 的正确 type 位提取 PS
-    int gotVPS = 0, gotSPS = 0, gotPPS = 0;
-    for (auto& [p, sz] : nals) {
-        uint8_t t = isHEVC ? ((p[0] >> 1) & 0x3F) : (p[0] & 0x1F);
-        bool isParam = false;
-        if (!isHEVC) {
-            if (t == 7 && !gotSPS) { gotSPS = 1; isParam = true; }
-            else if (t == 8 && !gotPPS && gotSPS) { gotPPS = 1; isParam = true; }
-        } else {
-            if (t == 32 && !gotVPS) { gotVPS = 1; isParam = true; }
-            else if (t == 33 && !gotSPS && gotVPS) { gotSPS = 1; isParam = true; }
-            else if (t == 34 && !gotPPS && gotSPS) { gotPPS = 1; isParam = true; }
-        }
-        if (isParam) {
-            out->push_back((sz>>24)&0xFF); out->push_back((sz>>16)&0xFF);
-            out->push_back((sz>>8)&0xFF);   out->push_back(sz&0xFF);
-            out->insert(out->end(), p, p + sz);
-        }
-        if (gotSPS && gotPPS) break;
-    }
+    int isHEVC = codec == halcodec::CodecHint::kHEVC ? 1 : 0;
     std::cerr << "[hal_player] AnnexB PS: isHEVC=" << isHEVC
-              << " gotVPS=" << gotVPS << " gotSPS=" << gotSPS << " gotPPS=" << gotPPS
+              << " gotVPS=" << ((mask & halcodec::kVpsBit) ? 1 : 0)
+              << " gotSPS=" << ((mask & halcodec::kSpsBit) ? 1 : 0)
+              << " gotPPS=" << ((mask & halcodec::kPpsBit) ? 1 : 0)
               << " extradata=" << out->size() << " bytes\n";
-    if (!gotSPS || !gotPPS) return -1;   // 没抓到关键 PS → 交给 caller 的扩展名兜底
+    // 没抓到关键 PS → 交给 caller 的扩展名兜底
+    if ((mask & (halcodec::kSpsBit | halcodec::kPpsBit)) !=
+        (halcodec::kSpsBit | halcodec::kPpsBit)) return -1;
     return isHEVC;
 }
 
-// NV12 (semi-planar YUV420) → BGRA (packed,row-major).
-// 逐像素计算 chroma,独立支持 luma/chroma stride.
-// x86 benchmark: ~3ns/pixel,即 720p 单帧 ~2.7ms — 不成为瓶颈.
-static void NV12ToBGRA(const uint8_t* y, const uint8_t* uv, int w, int h,
-                       size_t yStride, size_t uvStride,
-                       uint8_t* outBGRA) {
-    // BT.601 限定范围 (video range):Y=[16,235],chroma=[16,240].
-    // 用整数近似:R = Y + 1.402*(V-128),G = Y - 0.34414*(U-128) - 0.71414*(V-128),B = Y + 1.772*(U-128).
-    for (int row = 0; row < h; row++) {
-        const uint8_t* yRow = y + row * yStride;
-        const uint8_t* uvRow = uv + (row >> 1) * uvStride;  // chroma 半高
-        uint8_t* outRow = outBGRA + row * w * 4;
-        for (int col = 0; col < w; col++) {
-            uint8_t Yv = yRow[col];
-            // UV 交错:偶索引 U,奇索引 V
-            int cu = (col & ~1);
-            // NV12 chroma 是无符号字节,中性点 128 —— 必须减 128 才是 BT.601 的有符号 Cb/Cr.
-            int U = (int)uvRow[cu] - 128;
-            int V = (int)uvRow[cu + 1] - 128;
-            int R = Yv + (141 * V) / 100;
-            int G = Yv - (34 * U) / 100 - (71 * V) / 100;
-            int B = Yv + (177 * U) / 100;
-            if (R < 0) R = 0; else if (R > 255) R = 255;
-            if (G < 0) G = 0; else if (G > 255) G = 255;
-            if (B < 0) B = 0; else if (B > 255) B = 255;
-            outRow[col*4+0] = (uint8_t)B;
-            outRow[col*4+1] = (uint8_t)G;
-            outRow[col*4+2] = (uint8_t)R;
-            outRow[col*4+3] = 0xFF;
-        }
-    }
-}
+// YUV → BGRA 转换移到 app/yuv_to_bgra.h:播放器消费的格式不止 NV12(见那里的
+// 说明与 dispatch 表),转换按 frame.format 分派。原来的单格式版本只认半平面
+// 8-bit 4:2:0,UV 基址在 renderFrame 里按 strides[0]*height 算 —— 平面格式
+// (I420/YUV444P)在那一步就已经读错了。
 
 struct Player {
     SDL_Window* window = nullptr;
@@ -260,7 +199,7 @@ struct Player {
 int main(int argc, char* argv[]) {
     if (argc < 2) {
         std::cerr << "usage: hal_player [--backend NAME] [--bench] <file.h264|file.hevc|file.mp4>\n"
-                  << "  --backend  decoder backend (vtbox/nvdec/qsvdec/amfdec); default: first available\n"
+                  << "  --backend  decoder backend (vtbox/nvdec/qsvdec); default: first available\n"
                   << "  --bench    no window,pure decode throughput\n";
         return 1;
     }
@@ -315,16 +254,10 @@ int main(int argc, char* argv[]) {
     if (det >= 0) {
         params.codec = det ? "hevc" : "h264";
     } else {
-        auto ext = path.substr(path.find_last_of('.') + 1);
-        if (ext == "h264" || ext == "264") params.codec = "h264";
-        else if (ext == "h265" || ext == "hevc" || ext == "265") params.codec = "hevc";
-        else if (ext == "av1" || ext == "obu") params.codec = "av1";
-        else if (ext == "vp9") params.codec = "vp9";
-        else if (ext == "vp8") params.codec = "vp8";
-        else if (ext == "mjpeg" || ext == "mjpg" || ext == "jpg" || ext == "jpeg") params.codec = "jpeg";
-        else if (ext == "vc1") params.codec = "vc1";
-        else if (ext == "mpeg2" || ext == "mpg") params.codec = "mpeg2";
-        else params.codec = "h264";
+        // Shared extension table; "h264" stays the fallback when the extension
+        // says nothing (the same default the inline chain used).
+        params.codec = halcodec::CodecFromExtension(ExtOf(path));
+        if (params.codec.empty()) params.codec = "h264";
     }
     std::cerr << "[hal_player] codec: " << params.codec
               << " (detected=" << det << ")\n";

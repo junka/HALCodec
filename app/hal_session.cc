@@ -17,8 +17,11 @@
 #include <sys/stat.h>
 
 #include "parse_cli.h"
+#include "output_paths.h"
 
 #include "codec_config.h"
+#include "codec_names.h"
+#include "annexb.h"
 #include "frame.h"
 #include "plugin_loader.h"
 #include "session.h"
@@ -34,117 +37,16 @@ bool ReadFile(const std::string& path, std::vector<uint8_t>* buf) {
     return static_cast<bool>(in.read(reinterpret_cast<char*>(buf->data()), size));
 }
 
-void AppendAvcc(std::vector<uint8_t>* avcc, const uint8_t* data, size_t n) {
-    avcc->push_back(static_cast<uint8_t>((n >> 24) & 0xFF));
-    avcc->push_back(static_cast<uint8_t>((n >> 16) & 0xFF));
-    avcc->push_back(static_cast<uint8_t>((n >> 8) & 0xFF));
-    avcc->push_back(static_cast<uint8_t>(n & 0xFF));
-    avcc->insert(avcc->end(), data, data + n);
-}
-
+// Sniff the stream's codec from its parameter-set NAL types and pack what it
+// carries into AVCC extradata. The scan is shared (src/annexb.h); this app
+// gated on the extension-derived codec name before calling and ignores the
+// result, so the bool below just keeps the original signature.
 bool ExtractParameterSets(const uint8_t* data, size_t size,
                           std::vector<uint8_t>* extradata) {
-    std::vector<uint8_t> vps, sps, pps;
-    bool isHEVC = false;
-    size_t i = 0;
-    
-    // First pass: detect if this is HEVC by checking the first VCL/parameter NAL.
-    while (i + 4 <= size) {
-        if (!(data[i] == 0 && data[i + 1] == 0 &&
-              (data[i + 2] == 1 ||
-               (i + 3 < size && data[i + 2] == 0 && data[i + 3] == 1)))) {
-            ++i;
-            continue;
-        }
-        size_t sc = (data[i + 2] == 1) ? 3 : 4;
-        size_t start = i + sc;
-        if (start < size) {
-            // H.264 header: 5-bit type at b0 & 0x1F (SPS=7, PPS=8).
-            // HEVC header: 6-bit type at (b0 >> 1) & 0x3F (VPS/SPS/PPS=32/33/34).
-            uint8_t h264Type = data[start] & 0x1F;
-            uint8_t hevcType = static_cast<uint8_t>((data[start] >> 1) & 0x3F);
-            if (hevcType == 32 || hevcType == 33 || hevcType == 34) {
-                isHEVC = true;
-                break;
-            } else if (h264Type == 7 || h264Type == 8) {
-                isHEVC = false;
-                break;
-            }
-        }
-        // Skip this NAL to find the next one
-        size_t j = start + 1;
-        for (; j + 4 <= size; ++j) {
-            if (data[j] != 0 || data[j + 1] != 0) continue;
-            if (data[j + 2] == 1 ||
-                (j + 3 < size && data[j + 2] == 0 && data[j + 3] == 1)) {
-                break;
-            }
-        }
-        i = j;
-    }
-    
-    // Second pass: extract parameter sets
-    i = 0;
-    while (i + 4 <= size) {
-        if (!(data[i] == 0 && data[i + 1] == 0 &&
-              (data[i + 2] == 1 ||
-               (i + 3 < size && data[i + 2] == 0 && data[i + 3] == 1)))) {
-            ++i;
-            continue;
-        }
-        size_t sc = (data[i + 2] == 1) ? 3 : 4;
-        size_t start = i + sc;
-        
-        size_t j = start + 1;
-        for (; j + 4 <= size; ++j) {
-            if (data[j] != 0 || data[j + 1] != 0) continue;
-            if (data[j + 2] == 1 ||
-                (j + 3 < size && data[j + 2] == 0 && data[j + 3] == 1)) {
-                break;
-            }
-        }
-        size_t end = j;
-        
-        if (start < size) {
-            uint8_t type = isHEVC
-                              ? static_cast<uint8_t>((data[start] >> 1) & 0x3F)
-                              : static_cast<uint8_t>(data[start] & 0x1F);
-            if (isHEVC) {
-                if (type == 32 && vps.empty()) {
-                    vps.assign(data + start, data + end);
-                } else if (type == 33 && sps.empty()) {
-                    sps.assign(data + start, data + end);
-                } else if (type == 34 && pps.empty()) {
-                    pps.assign(data + start, data + end);
-                }
-            } else {
-                if (type == 7 && sps.empty()) {
-                    sps.assign(data + start, data + end);
-                } else if (type == 8 && pps.empty()) {
-                    pps.assign(data + start, data + end);
-                }
-            }
-        }
-        
-        bool haveEnough = isHEVC ? (!sps.empty() && !pps.empty()) 
-                                  : (!sps.empty() && !pps.empty());
-        if (haveEnough) break;
-        i = j;
-    }
-    
-    if ((isHEVC && sps.empty() && pps.empty()) || 
-        (!isHEVC && sps.empty() && pps.empty())) {
-        return false;
-    }
-    
-    if (isHEVC) {
-        if (!vps.empty()) AppendAvcc(extradata, vps.data(), vps.size());
-        if (!sps.empty()) AppendAvcc(extradata, sps.data(), sps.size());
-        if (!pps.empty()) AppendAvcc(extradata, pps.data(), pps.size());
-    } else {
-        if (!sps.empty()) AppendAvcc(extradata, sps.data(), sps.size());
-        if (!pps.empty()) AppendAvcc(extradata, pps.data(), pps.size());
-    }
+    std::vector<halcodec::AnnexBNal> nals = halcodec::SplitAnnexB(data, size);
+    halcodec::CodecHint codec = halcodec::DetectCodec(nals);
+    if (codec == halcodec::CodecHint::kUnknown) return false;
+    halcodec::AppendParamSetsAvcc(nals, codec, extradata);
     return true;
 }
 
@@ -191,20 +93,13 @@ int main(int argc, char* argv[]) {
     // pass the codec name (derived from the input extension) rather than the
     // file path. Passing inputs[] would make NVDEC/NVDEC-style backends open
     // an internal demuxer and ignore FillInput().
+    // The extension picks the codec (lowercased); anything the shared table does
+    // not know falls back to h264, the sample material's usual codec.
     auto codecFromExt = [](const std::string& path) {
-        auto dot = path.find_last_of('.');
-        std::string ext = (dot == std::string::npos) ? "" : path.substr(dot + 1);
-        if (ext == "h264" || ext == "264") return "h264";
-        if (ext == "hevc" || ext == "h265" || ext == "265") return "hevc";
-        if (ext == "av1")  return "av1";
-        if (ext == "jpg" || ext == "jpeg" || ext == "mjpeg"
-            || ext == "mjpg" || ext == "avi") return "mjpeg";
-        if (ext == "mpg2" || ext == "m2v") return "mpeg2";
-        if (ext == "mp4")  return "mpeg4";
-        if (ext == "vc1" || ext == "wmv" || ext == "wmv3") return "vc1";
-        if (ext == "vp8")  return "vp8";
-        if (ext == "vp9")  return "vp9";
-        return "h264"; // default
+        // CodecFromExtension takes the extension with or without its dot and in
+        // any case, so no trimming happens here.
+        std::string codec = halcodec::CodecFromExtension(ExtOf(path));
+        return codec.empty() ? std::string("h264") : codec;
     };
     std::vector<halcodec::CodecParams> params(N);
     for (size_t s = 0; s < N; s++) {
@@ -216,12 +111,10 @@ int main(int argc, char* argv[]) {
             ExtractParameterSets(raw[s].data(), raw[s].size(), &params[s].extradata);
         }
         
-        if (cli.getFormat() == "rgb" || cli.getFormat() == "rgbi") {
-            params[s].outputFormat = halcodec::PixelFormat::RGB;
-        } else if (cli.getFormat() == "bgr" || cli.getFormat() == "bgri") {
-            params[s].outputFormat = halcodec::PixelFormat::BGR;
-        } else if (cli.getFormat() == "y") {
-            params[s].outputFormat = halcodec::PixelFormat::GRAY;
+        // Converting formats only; anything else leaves outputFormat Unknown so
+        // the backend hands out its native layout. Shared with hal_dec's table.
+        if (halcodec::IsConverterFormat(cli.getFormat())) {
+            halcodec::FormatToPixelFormat(cli.getFormat(), &params[s].outputFormat);
         }
     }
 

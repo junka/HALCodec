@@ -5,6 +5,8 @@
 #include <iostream>
 #include <string>
 
+#include "output_paths.h"
+
 namespace po = boost::program_options;
 
 class CommandLineParser {
@@ -133,10 +135,12 @@ public:
             outputExplicit_ = vm.count("output") != 0;
             if (!outputExplicit_ && !inputFiles_.empty()) {
                 std::string inputFileName = inputFiles_.front();
-                size_t lastDot = inputFileName.find_last_of('.');
-                if (lastDot != std::string::npos) {
-                    input_format_ = inputFileName.substr(lastDot+1);
-                    inputFileName = inputFileName.substr(0, lastDot);
+                // The extension must be the final component's: a bare
+                // find_last_of('.') turns "in.put/f0" into format "put/f0".
+                std::string ext = ExtOf(inputFileName);
+                if (!ext.empty()) {
+                    input_format_ = ext.substr(1);   // drop the dot
+                    inputFileName = StripExt(inputFileName);
                 }
                 outputFile_ = inputFileName + "." + format_;
             }
@@ -166,8 +170,9 @@ public:
     const std::string& getCodec() const { return codec_; }
 
     // Encoder config: returns the JSON file path (may be empty) plus the
-    // single-item CLI overrides. The caller (hal_enc) is responsible for
-    // loading the JSON first, then applying these overrides on top.
+    // single-item CLI overrides. Load the JSON first and apply these on top, or
+    // hand the parser to halcodec::ApplyEncodeOverrides (app/encode_overrides.h),
+    // which does both in the order that keeps CLI winning.
     const std::string& getEncodeConfigFile() const { return encodeConfigFile_; }
     const std::string& getPreset() const { return preset_; }
     const std::string& getTuning() const { return tuning_; }

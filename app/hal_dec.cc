@@ -18,6 +18,8 @@
 #include "output_paths.h"
 
 #include "codec_config.h"
+#include "codec_names.h"
+#include "annexb.h"
 #include "decoder.h"
 #include "frame.h"
 #include "plugin_loader.h"
@@ -36,119 +38,19 @@ bool ReadFile(const std::string& path, std::vector<uint8_t>* buf) {
         in.read(reinterpret_cast<char*>(buf->data()), size));
 }
 
-// Scan an Annex-B H.264 stream for SPS (nalu type 7) and PPS (nalu type 8)
-// and pack them into AVCC extradata ([len:4][nalu]...), which is what the
-// decoders' Initialize() consumes.
-void AppendAvcc(std::vector<uint8_t>* avcc, const uint8_t* data, size_t n) {
-    avcc->push_back(static_cast<uint8_t>((n >> 24) & 0xFF));
-    avcc->push_back(static_cast<uint8_t>((n >> 16) & 0xFF));
-    avcc->push_back(static_cast<uint8_t>((n >> 8) & 0xFF));
-    avcc->push_back(static_cast<uint8_t>(n & 0xFF));
-    avcc->insert(avcc->end(), data, data + n);
-}
-
+// Scan an Annex-B H.264/HEVC stream, sniff its codec from the parameter-set
+// NAL types, and pack the sets it carries into AVCC extradata
+// ([len:4][nalu]...), which is what the decoders' Initialize() consumes.
+// The scan itself is shared (src/annexb.h); the policy that stays here is only
+// the caller's: this app has no codec verdict to report (the codec comes from
+// -c), so it just asks whether anything usable was found.
 bool ExtractParameterSets(const uint8_t* data, size_t size,
                           std::vector<uint8_t>* extradata) {
-    std::vector<uint8_t> vps, sps, pps;
-    bool isHEVC = false;
-    size_t i = 0;
-    
-    // First pass: detect if this is HEVC by checking the first VCL/parameter NAL.
-    while (i + 4 <= size) {
-        if (!(data[i] == 0 && data[i + 1] == 0 &&
-              (data[i + 2] == 1 ||
-               (i + 3 < size && data[i + 2] == 0 && data[i + 3] == 1)))) {
-            ++i;
-            continue;
-        }
-        size_t sc = (data[i + 2] == 1) ? 3 : 4;
-        size_t start = i + sc;
-        if (start < size) {
-            // H.264 header: 5-bit type at b0 & 0x1F (SPS=7, PPS=8).
-            // HEVC header: 6-bit type at (b0 >> 1) & 0x3F (VPS/SPS/PPS=32/33/34).
-            uint8_t h264Type = data[start] & 0x1F;
-            uint8_t hevcType = static_cast<uint8_t>((data[start] >> 1) & 0x3F);
-            if (hevcType == 32 || hevcType == 33 || hevcType == 34) {
-                isHEVC = true;
-                break;
-            } else if (h264Type == 7 || h264Type == 8) {
-                isHEVC = false;
-                break;
-            }
-        }
-        // Skip this NAL to find the next one
-        size_t j = start + 1;
-        for (; j + 4 <= size; ++j) {
-            if (data[j] != 0 || data[j + 1] != 0) continue;
-            if (data[j + 2] == 1 ||
-                (j + 3 < size && data[j + 2] == 0 && data[j + 3] == 1)) {
-                break;
-            }
-        }
-        i = j;
-    }
-    
-    // Second pass: extract parameter sets
-    i = 0;
-    while (i + 4 <= size) {
-        if (!(data[i] == 0 && data[i + 1] == 0 &&
-              (data[i + 2] == 1 ||
-               (i + 3 < size && data[i + 2] == 0 && data[i + 3] == 1)))) {
-            ++i;
-            continue;
-        }
-        size_t sc = (data[i + 2] == 1) ? 3 : 4;
-        size_t start = i + sc;
-        
-        size_t j = start + 1;
-        for (; j + 4 <= size; ++j) {
-            if (data[j] != 0 || data[j + 1] != 0) continue;
-            if (data[j + 2] == 1 ||
-                (j + 3 < size && data[j + 2] == 0 && data[j + 3] == 1)) {
-                break;
-            }
-        }
-        size_t end = j;
-        
-        if (start < size) {
-            uint8_t type = isHEVC
-                              ? static_cast<uint8_t>((data[start] >> 1) & 0x3F)
-                              : static_cast<uint8_t>(data[start] & 0x1F);
-            if (isHEVC) {
-                if (type == 32 && vps.empty()) {
-                    vps.assign(data + start, data + end);
-                } else if (type == 33 && sps.empty()) {
-                    sps.assign(data + start, data + end);
-                } else if (type == 34 && pps.empty()) {
-                    pps.assign(data + start, data + end);
-                }
-            } else {
-                if (type == 7 && sps.empty()) {
-                    sps.assign(data + start, data + end);
-                } else if (type == 8 && pps.empty()) {
-                    pps.assign(data + start, data + end);
-                }
-            }
-        }
-        
-        bool haveEnough = isHEVC ? (!sps.empty() && !pps.empty()) 
-                                  : (!sps.empty() && !pps.empty());
-        if (haveEnough) break;
-        i = j;
-    }
-    
-    if ((isHEVC && sps.empty() && pps.empty()) || 
-        (!isHEVC && sps.empty() && pps.empty())) {
-        return false;
-    }
-    
-    if (isHEVC) {
-        if (!vps.empty()) AppendAvcc(extradata, vps.data(), vps.size());
-        if (!sps.empty()) AppendAvcc(extradata, sps.data(), sps.size());
-        if (!pps.empty()) AppendAvcc(extradata, pps.data(), pps.size());
-    } else {
-        if (!sps.empty()) AppendAvcc(extradata, sps.data(), sps.size());
-        if (!pps.empty()) AppendAvcc(extradata, pps.data(), pps.size());
+    std::vector<halcodec::AnnexBNal> nals = halcodec::SplitAnnexB(data, size);
+    halcodec::CodecHint codec = halcodec::DetectCodec(nals);
+    if (codec == halcodec::CodecHint::kUnknown) return false;
+    if (halcodec::ParamSetMask(nals, codec) & (halcodec::kSpsBit | halcodec::kPpsBit)) {
+        halcodec::AppendParamSetsAvcc(nals, codec, extradata);
     }
     return true;
 }
@@ -291,10 +193,11 @@ const char* kDefaultDecoder = "";
 #endif
 
 // The --format values whose file is a BMP rather than a dump of the frame's own
-// bytes. They are the ones that ask the decoder for converted pixels.
+// bytes. They are the ones that ask the decoder for converted pixels; the list
+// itself lives with the other name tables (codec_names.h) so this app and
+// hal_session cannot disagree about which formats convert.
 bool IsBmpFormat(const std::string& format) {
-    return format == "y" || format == "bgr" || format == "rgb" ||
-           format == "rgbi" || format == "bgri";
+    return halcodec::IsConverterFormat(format);
 }
 
 const char* PixelFormatName(halcodec::PixelFormat format) {
@@ -365,12 +268,11 @@ int main(int argc, char* argv[]) {
     // that don't support it ignore the flag (still produce host frames); the
     // output writer calls DownloadToHost on every frame regardless.
     params.zeroCopy = cli.getZeroCopy();
-    if (cli.getFormat() == "rgb" || cli.getFormat() == "rgbi") {
-        params.outputFormat = halcodec::PixelFormat::RGB;
-    } else if (cli.getFormat() == "bgr" || cli.getFormat() == "bgri") {
-        params.outputFormat = halcodec::PixelFormat::BGR;
-    } else if (cli.getFormat() == "y") {
-        params.outputFormat = halcodec::PixelFormat::GRAY;
+    // Only the converting formats are looked up in the shared table: a dump of
+    // the frame's own bytes (-f nv12/p010/...) is not an output-format request,
+    // and leaving outputFormat Unknown keeps every backend on its native layout.
+    if (IsBmpFormat(cli.getFormat())) {
+        halcodec::FormatToPixelFormat(cli.getFormat(), &params.outputFormat);
     }
     // Decoders that build a format description from parameter sets (vtbox)
     // need SPS/PPS; extract them from the Annex-B input stream when present.

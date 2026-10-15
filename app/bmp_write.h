@@ -7,6 +7,8 @@
 #include <fstream>
 #include <vector>
 
+#include "output_paths.h"
+
 #pragma pack(push, 1)
 
 struct BMPFileHeader {
@@ -42,12 +44,9 @@ struct BMPColor {
 class BMPWriter {
 public:
     BMPWriter(const std::string filename, std::string format = "rgb"): format_(format) {
-        std::string bmp_filename;
-        size_t lastDot = filename.find_last_of('.');
-        if (lastDot != std::string::npos) {
-            bmp_filename = filename.substr(0, lastDot);
-        }
-        bmp_filename = bmp_filename + ".bmp";
+        // StripExt leaves a path like "in.put/f0" alone (no extension to strip),
+        // where a bare find_last_of('.') would cut it at the directory dot.
+        std::string bmp_filename = StripExt(filename) + ".bmp";
         file_.open(bmp_filename, std::ios::out|std::ios::binary);
     }
     ~BMPWriter() {

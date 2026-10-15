@@ -1,9 +1,17 @@
-#ifndef APP_ENCODE_CONFIG_H
-#define APP_ENCODE_CONFIG_H
+#ifndef SRC_ENCODE_CONFIG_H
+#define SRC_ENCODE_CONFIG_H
 
-// Loads encoder tuning from a JSON config file and applies CLI single-item
-// overrides on top. Uses boost::property_tree (Boost is already a project
-// dependency) so no new external lib is introduced.
+// Loads encoder tuning (EncodeConfig, see codec_config.h) from a JSON file.
+//
+// This lives beside the struct it fills rather than in app/: EncodeConfig is the
+// type every backend's Initialize receives, so the loader has no business being
+// reachable only from the three apps that happen to load it today. It is a
+// separate header from codec_config.h on purpose: that one is included by every
+// backend layer header and is vendor-header-free, and it should not pull
+// boost/property_tree into 24 translation units to serve three.
+//
+// boost::property_tree is header-only for read_json, so including this from the
+// core library's consumers adds no link dependency.
 //
 // JSON schema (all fields optional; missing => backend default):
 //   {
@@ -67,4 +75,4 @@ inline bool LoadEncodeConfig(const std::string& path, EncodeConfig& cfg) {
 
 } // namespace halcodec
 
-#endif // APP_ENCODE_CONFIG_H
+#endif // SRC_ENCODE_CONFIG_H
