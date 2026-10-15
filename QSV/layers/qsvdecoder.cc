@@ -145,7 +145,14 @@ bool DownloadVPLSurfaceToHost(const QSVRuntime& rt, mfxSession sess,
     if (f.release) f.release();
     f.data = host;
     f.size = static_cast<size_t>(f.width) * f.height * 3 / 2;
+    // CopyNV12 emits tightly packed NV12: Y stride = w, interleaved UV stride = w.
+    // strides[1] MUST be set here: it arrives as 0 from pushZeroCopyFrameLocked
+    // (which sets no strides at all), and 0 is the "tightly packed" sentinel —
+    // a consumer that forwards it verbatim (hal_player's NV12ToBGRA does
+    // uvRow = uv + (row >> 1) * uvStride) would collapse every output row onto
+    // UV row 0, tinting the whole frame with row 0's chroma.
     f.strides[0] = static_cast<size_t>(f.width);
+    f.strides[1] = static_cast<size_t>(f.width);
     f.locality = FrameLocality::Host;
     f.device.vplExportedHeader = nullptr;
     f.device.vplVaDisplay = nullptr;
@@ -728,6 +735,7 @@ public:
             frame.format = PixelFormat::NV12;
             frame.size = static_cast<size_t>(frame.width) * frame.height * 3 / 2;
             frame.strides[0] = static_cast<size_t>(frame.width);
+            frame.strides[1] = static_cast<size_t>(frame.width);  // tight NV12: UV tied to luma width
             frame.data = CopyNV12(p.surf);
             // Wrap the malloc'd buffer in a shared_ptr so that copies of the
             // CodecFrame (e.g. the encoder's async input queue holding a copy
@@ -783,6 +791,8 @@ public:
             frame.format = PixelFormat::NV12;
             frame.size = static_cast<size_t>(w) * h * 3 / 2;
             frame.strides[0] = static_cast<size_t>(w);
+            // copySurfaceToHost packs both planes at stride = w.
+            frame.strides[1] = static_cast<size_t>(w);
             frame.data = px;
             auto owned = std::shared_ptr<uint8_t>(
                 static_cast<uint8_t*>(frame.data), std::free);
