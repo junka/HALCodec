@@ -43,7 +43,7 @@
 #include "decoder.h"
 #include "frame.h"
 #include "output_paths.h"
-#if defined(__linux__)
+#if defined(__linux__) || defined(__APPLE__)
 #include "shm_ring.h"  // live input over a shm ring (shm:NAME)
 #endif
 #include "plugin_loader.h"
@@ -204,9 +204,10 @@ int main(int argc, char* argv[]) {
         std::cerr << "usage: hal_player [--backend NAME] [--bench] <file.h264|file.hevc|shm:NAME>\n"
                   << "  --backend  decoder backend (vtbox/nvdec/qsvdec); default: first available\n"
                   << "  --bench    no window,pure decode throughput\n"
-                  << "  shm:NAME   live stream from a producer process (Linux; app/hal_push.cc)\n"
-                  << "             -- the player hosts the shm ring + eventfds, waits for the\n"
-                  << "             producer, bootstraps on the stream's parameter sets, plays\n";
+                  << "  shm:NAME   live stream from a producer process (Linux/macOS;\n"
+                  << "             app/hal_push.cc) -- the player hosts the shm ring +\n"
+                  << "             wakeup channels, waits for the producer, bootstraps on\n"
+                  << "             the stream's parameter sets, plays (macOS: name <= 21 chars)\n";
         return 1;
     }
 
@@ -245,7 +246,7 @@ int main(int argc, char* argv[]) {
     params.zeroCopy = true;  // 让 backend 优先 device memory (NV12 on GPU)
     std::vector<uint8_t> raw;
     bool live = false;
-#if defined(__linux__)
+#if defined(__linux__) || defined(__APPLE__)
     std::thread feeder;                                   // live: feeds FillInput
     std::unique_ptr<halcodec::ShmRingHost> ring;          // live: the transport
     if (path.rfind("shm:", 0) == 0) {
@@ -331,7 +332,7 @@ int main(int argc, char* argv[]) {
     // deadlock against a full ring). Async backends run FillInput and
     // GetFrame from different threads safely -- the Session fan-in relies
     // on the same contract.
-#if defined(__linux__)
+#if defined(__linux__) || defined(__APPLE__)
     if (live) {
         feeder = std::thread([&dec, &raw, &ring] {
             constexpr size_t kFeedChunk = 256 * 1024;
@@ -434,7 +435,7 @@ int main(int argc, char* argv[]) {
         }
     }
 
-#if defined(__linux__)
+#if defined(__linux__) || defined(__APPLE__)
     if (live) {
         // Release the feeder if the window closed while the producer still
         // streams; after a natural end-of-stream this is a no-op.

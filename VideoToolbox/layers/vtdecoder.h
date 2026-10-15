@@ -70,9 +70,10 @@ private:
     // finished once the queue has drained and no sample is in flight.
     bool inputDone_ = false;
 
-    // H.264 picture order front end. Used by the feed path only (PumpInput
-    // classifies each access unit before submitting it), so it needs no lock;
-    // the callback only reads the delay, which is mirrored into reorderDelay_.
+    // H.264 picture order front end. Only the feed path touches it (PumpInput
+    // classifies each access unit before submitting it), which inputMtx_
+    // serializes; the callback only reads the delay, which is mirrored into
+    // reorderDelay_.
     H264Poc poc_;
     HEVCPoc hevcPoc_;  // HEVC counterpart, used when codec is HEVC
     bool isHEVC_ = false;  // true if current stream is HEVC, false for H.264
@@ -118,11 +119,19 @@ private:
     // the trailing NAL has no end yet (feed chunks are fixed-size reads, so a
     // NAL can straddle a chunk boundary and splitting each chunk in isolation
     // would truncate its slices).
+    //
+    // Guarded by inputMtx_: the live feed path (FillInput) and the drain path
+    // (GetFrame -> PumpInput) run on different threads and both rewrite this
+    // buffer. Lock order is inputMtx_ before mtx_ (PumpInput takes mtx_ inside
+    // for the window bookkeeping); nothing takes inputMtx_ while holding mtx_.
+    std::mutex inputMtx_;
     std::vector<uint8_t> pending_;
     size_t pendingPos_ = 0;
 
     // Submits as many complete access units as the live-frame window allows.
+    // Takes inputMtx_; PumpInputLocked assumes it is already held.
     void PumpInput();
+    void PumpInputLocked();
     // The AV1 feed path, reached from PumpInput: cuts pending_ into temporal
     // units and submits each one's raw OBU bytes.
     void PumpAv1Input();

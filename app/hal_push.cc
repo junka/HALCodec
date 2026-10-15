@@ -4,7 +4,7 @@
 //   ./hal_push demo stream.hevc            # this: stream the file, exit
 //
 // Bytes go in as fast as the player consumes them; when the ring fills,
-// write() blocks on the space-eventfd until the player drains. --sleep-us
+// write() blocks on the reader's space-event until the player drains. --sleep-us
 // paces per 256KiB chunk to simulate a capture rate. The input is an
 // Annex-B elementary stream (h264/hevc) whose head carries the parameter
 // sets -- the player bootstraps its decoder from them.

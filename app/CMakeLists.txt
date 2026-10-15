@@ -159,10 +159,10 @@ foreach(_tgt hal_enc codecinfo hal_dec hal_transcode hal_cam)
     endif()
 endforeach()
 
-# hal_push: Linux-only producer for hal_player's shm live mode (app/shm_ring.h)
-# -- streams an Annex-B file/stdin into the player's ring. Depends on nothing
-# but the header (the producer side never touches a codec).
-if(UNIX AND NOT APPLE)
+# hal_push: producer for hal_player's shm live mode (app/shm_ring.h) --
+# streams an Annex-B file/stdin into the player's ring. POSIX (Linux/macOS).
+# Depends on nothing but the header (the producer side never touches a codec).
+if(UNIX)
     add_executable(hal_push hal_push.cc)
     set_target_properties(hal_push PROPERTIES
         CXX_STANDARD 17

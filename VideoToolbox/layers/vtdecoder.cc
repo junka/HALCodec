@@ -569,9 +569,12 @@ bool VTDecoder::CreateSession(OSType requestedFormat) {
 }
 
 int VTDecoder::FillInput(const uint8_t* data, size_t size) {
+    // The feed path may run on its own thread while GetFrame() pumps the same
+    // buffer from the caller's thread; serialize the pending_ rewrite.
+    std::lock_guard<std::mutex> lk(inputMtx_);
     CompactPending();
     pending_.insert(pending_.end(), data, data + size);
-    PumpInput();
+    PumpInputLocked();
     return QueuedFrames();
 }
 
@@ -596,6 +599,11 @@ void VTDecoder::CompactPending() {
 // simply consumes no input, and GetFrame() pumps again once it has handed a
 // frame (and therefore a slot) to the caller.
 void VTDecoder::PumpInput() {
+    std::lock_guard<std::mutex> lk(inputMtx_);
+    PumpInputLocked();
+}
+
+void VTDecoder::PumpInputLocked() {
     // A ProRes stream is neither a NAL assembly nor an OBU run, and it has its
     // own delimiting: every picture states its byte count.
     if (isProRes_) {
@@ -954,8 +962,11 @@ void VTDecoder::Finalize() {
         liveFrames_ = 0;
     }
     cv_.notify_all();
-    pending_.clear();
-    pendingPos_ = 0;
+    {
+        std::lock_guard<std::mutex> lk(inputMtx_);
+        pending_.clear();
+        pendingPos_ = 0;
+    }
     poc_.Reset();
     hevcPoc_.Reset();
     reorderDelay_.store(0, std::memory_order_relaxed);
