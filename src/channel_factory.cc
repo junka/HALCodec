@@ -7,43 +7,46 @@
 #include "frame_channel.h"
 
 #include <map>
-#include <mutex>
+
+#include "registry.h"
 
 namespace camera {
 
 namespace {
-std::map<std::string, FrameChannelFactoryFn>& table() {
-    static std::map<std::string, FrameChannelFactoryFn> t;
-    return t;
-}
-std::mutex& mu() {
-    static std::mutex m;
-    return m;
-}
+
+// 表与锁都由 registry 层持有(见 registry.h):backend .so 与本库共享同一份,
+// 而文件局部 static 在 hidden visibility 下每个 .so 各有一份。
+struct FactoryTable {
+    std::map<std::string, FrameChannelFactoryFn> factories;
+};
+
+constexpr const char* kFactoryKey = "halcodec.camera.channel_factory";
+
 } // namespace
 
 __attribute__((visibility("default")))
 void RegisterFrameChannelFactory(const std::string& kind, FrameChannelFactoryFn fn) {
-    std::lock_guard<std::mutex> lk(mu());
-    table()[kind] = std::move(fn);
+    halcodec::with_locked_table<FactoryTable>(
+        kFactoryKey, [&](FactoryTable& t) { t.factories[kind] = std::move(fn); });
 }
 
 __attribute__((visibility("default")))
 bool FrameChannelFactoryRegistered(const std::string& kind) {
-    std::lock_guard<std::mutex> lk(mu());
-    return table().count(kind) != 0;
+    return halcodec::with_locked_table<FactoryTable>(
+        kFactoryKey, [&](FactoryTable& t) { return t.factories.count(kind) != 0; });
 }
 
 __attribute__((visibility("default")))
 std::unique_ptr<FrameChannel> CreateFrameChannel(const std::string& kind,
                                                  const ChannelConfig& cfg) {
-    FrameChannelFactoryFn fn;
-    {
-        std::lock_guard<std::mutex> lk(mu());
-        auto it = table().find(kind);
-        if (it == table().end()) return nullptr;
-        fn = it->second;
-    }
+    // 工厂函数拷出后在锁外调用:它要构造 backend 对象,可能反过来查/注册表。
+    FrameChannelFactoryFn fn = halcodec::with_locked_table<FactoryTable>(
+        kFactoryKey, [&](FactoryTable& t) -> FrameChannelFactoryFn {
+            auto it = t.factories.find(kind);
+            if (it == t.factories.end()) return nullptr;
+            return it->second;
+        });
+    if (!fn) return nullptr;
     return fn(cfg);
 }
 

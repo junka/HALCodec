@@ -4,9 +4,10 @@
 #include <cstdio>
 #include <cstring>
 #include <dlfcn.h>
-#include <mutex>
 #include <string>
 #include <vector>
+
+#include "registry.h"
 
 namespace halcodec {
 
@@ -31,16 +32,14 @@ double nowSecs() {
 
 // Process-wide registry of live stream stats. A std::vector<StreamStats*> is
 // fine: backends register/unregister infrequently (Initialize/Finalize) and
-// snapshotStreams() is called at most a few times per second. The mutex keeps
-// registration and snapshot consistent across threads / .so boundaries.
-std::mutex& registryMu() {
-    static std::mutex m;
-    return m;
-}
-std::vector<StreamStats*>& registry() {
-    static std::vector<StreamStats*> v;
-    return v;
-}
+// snapshotStreams() is called at most a few times per second. The
+// vector and its mutex live in the shared registry layer (see registry.h), so
+// the registering backends -- dlopen'd .so's, or camera sources compiled into
+// hal_cam -- write into the same list this library snapshots.
+struct StreamStatsRegistry {
+    std::vector<StreamStats*> streams;
+};
+constexpr const char* kStatsKey = "halcodec.metrics.stream_stats";
 
 // --- NVML dlopen (Layer 3, NVIDIA) ---
 //
@@ -188,31 +187,35 @@ double StreamStats::avgBitrateKbps() const {
 
 HALCODEC_API void registerStreamStats(StreamStats* s) {
     if (!s) return;
-    std::lock_guard<std::mutex> lk(registryMu());
-    registry().push_back(s);
+    with_locked_table<StreamStatsRegistry>(kStatsKey, [s](StreamStatsRegistry& r) {
+        r.streams.push_back(s);
+    });
 }
 
 HALCODEC_API void unregisterStreamStats(StreamStats* s) {
     if (!s) return;
-    std::lock_guard<std::mutex> lk(registryMu());
-    auto& v = registry();
-    for (size_t i = 0; i < v.size(); ++i) {
-        if (v[i] == s) {
-            v[i] = v.back();
-            v.pop_back();
-            return;
+    with_locked_table<StreamStatsRegistry>(kStatsKey, [s](StreamStatsRegistry& r) {
+        auto& v = r.streams;
+        for (size_t i = 0; i < v.size(); ++i) {
+            if (v[i] == s) {
+                v[i] = v.back();
+                v.pop_back();
+                return;
+            }
         }
-    }
+    });
 }
 
 HALCODEC_API std::vector<StreamStats> snapshotStreams() {
-    std::lock_guard<std::mutex> lk(registryMu());
-    std::vector<StreamStats> out;
-    out.reserve(registry().size());
-    for (StreamStats* s : registry()) {
-        if (s) out.push_back(*s);  // copy the live struct out
-    }
-    return out;
+    return with_locked_table<StreamStatsRegistry>(
+        kStatsKey, [](StreamStatsRegistry& r) {
+            std::vector<StreamStats> out;
+            out.reserve(r.streams.size());
+            for (StreamStats* s : r.streams) {
+                if (s) out.push_back(*s);  // copy the live struct out
+            }
+            return out;
+        });
 }
 
 HALCODEC_API GpuUtil snapshotGpu(int deviceIndex) {

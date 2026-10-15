@@ -3,6 +3,7 @@
 
 #include <functional>
 #include <memory>
+#include <mutex>
 #include <string>
 #include <typeinfo>
 #include <unordered_map>
@@ -18,6 +19,60 @@ namespace detail {
 struct RegistryEntry {
     std::function<void*()> make; // returns a unique_ptr<T> as void*
 };
+
+// Exported from the core library (registry.cc). One process-wide object per
+// key, built by `create` on the first request and shared by every later caller
+// -- in this executable or in a .so dlopen'd afterwards. `create` must return a
+// fresh heap object; it is never destroyed (the object is a process-wide
+// singleton, and leaking it deliberately avoids static-destruction order
+// against backends that unregister during teardown).
+//
+// Deliberately not cached in a function-local static by the template below: an
+// inline template's static is COMDAT-folded within one .so but *not* across
+// .so's under a hidden-visibility preset, so a cache there would hand a
+// dlopen'd backend a different table from the executable's -- the exact split
+// this shared storage exists to prevent. A keyed lookup under a short lock is
+// the price, and it is far below the frame work these tables gate.
+void* shared_object_storage(const char* key, void* (*create)());
+
+} // namespace detail
+
+// A process-wide table of `T` together with the mutex that guards it. Both live
+// in the core library (see shared_table), so a backend .so loaded at runtime
+// writes into the same table the executable reads from.
+template <class T>
+struct SharedTable {
+    T table;
+    mutable std::mutex mutex;
+};
+
+// The process-wide instance of `SharedTable<T>` under `key`. Each registry that
+// needs a table no other registry shares picks its own key. The template never
+// itself holds state, so nothing here is duplicated per .so -- the table is
+// always the one inside shared_object_storage().
+template <class T>
+SharedTable<T>& shared_table(const char* key) {
+    return *static_cast<SharedTable<T>*>(
+        detail::shared_object_storage(key, []() -> void* {
+            return new SharedTable<T>();
+        }));
+}
+
+// Run `fn` against a table's contents with that table's mutex held. Every
+// registry accessor in the core goes through here, so registration and lookup
+// stay consistent across threads and .so boundaries without each hand-rolling
+// its own mutex + guard pair.
+//
+// `fn` is called with `T&` and its result (if any) is returned; the reference
+// it receives must not be stashed, as it is only valid while the lock is held.
+template <class T, class F>
+auto with_locked_table(const char* key, F&& fn) -> decltype(fn(std::declval<T&>())) {
+    SharedTable<T>& st = shared_table<T>(key);
+    std::lock_guard<std::mutex> lk(st.mutex);
+    return fn(st.table);
+}
+
+namespace detail {
 
 // Exported from the core library (registry.cc). One process-wide storage
 // shared across all .so's (linked or dlopen'd) so a backend registered at

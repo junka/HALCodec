@@ -8,7 +8,8 @@
 #include "frame_share.h"
 
 #include <array>
-#include <mutex>
+
+#include "registry.h"
 
 namespace halcodec {
 
@@ -21,14 +22,13 @@ struct Entry {
 };
 
 // 每 locality 一格。locality 是小枚举,固定数组足够,免去 map。
-std::array<Entry, 8>& table() {
-    static std::array<Entry, 8> t;
-    return t;
-}
-std::mutex& mu() {
-    static std::mutex m;
-    return m;
-}
+struct ShareTable {
+    std::array<Entry, 8> entries;
+};
+
+// 表与锁都由 registry 层持有(见 registry.h):backend .so 与本库共享同一份,
+// 而文件局部 static 在 hidden visibility 下每个 .so 各有一份。
+constexpr const char* kShareKey = "halcodec.frame.share";
 
 size_t index(FrameLocality l) {
     return static_cast<size_t>(l);
@@ -38,65 +38,65 @@ size_t index(FrameLocality l) {
 
 __attribute__((visibility("default")))
 void RegisterFrameShare(FrameLocality locality, FrameExportFn e, FrameImportFn i) {
-    std::lock_guard<std::mutex> lk(mu());
     size_t idx = index(locality);
-    if (idx >= table().size()) return;
-    table()[idx].exportFn = std::move(e);
-    table()[idx].importFn = std::move(i);
+    with_locked_table<ShareTable>(kShareKey, [&](ShareTable& t) {
+        if (idx >= t.entries.size()) return;
+        t.entries[idx].exportFn = std::move(e);
+        t.entries[idx].importFn = std::move(i);
+    });
 }
 
 // 与 RegisterFrameShare 分开:多数 backend 无需在端点关闭时做清理,把 close 做成
 // 独立注册可避免为它们强塞一个空函数(maintainer 只需在真有缓存时安装)。
 __attribute__((visibility("default")))
 void RegisterFrameTransportClose(FrameLocality locality, FrameTransportCloseFn f) {
-    std::lock_guard<std::mutex> lk(mu());
     size_t idx = index(locality);
-    if (idx >= table().size()) return;
-    table()[idx].closeFn = std::move(f);
+    with_locked_table<ShareTable>(kShareKey, [&](ShareTable& t) {
+        if (idx >= t.entries.size()) return;
+        t.entries[idx].closeFn = std::move(f);
+    });
 }
 
 __attribute__((visibility("default")))
 void CloseSharedTransport(FrameLocality locality, uint64_t transport) {
-    FrameTransportCloseFn fn;
-    {
-        std::lock_guard<std::mutex> lk(mu());
-        size_t idx = index(locality);
-        if (idx >= table().size()) return;
-        fn = table()[idx].closeFn;
-    }
+    size_t idx = index(locality);
+    FrameTransportCloseFn fn = with_locked_table<ShareTable>(
+        kShareKey, [&](ShareTable& t) -> FrameTransportCloseFn {
+            if (idx >= t.entries.size()) return nullptr;
+            return t.entries[idx].closeFn;
+        });
     if (fn) fn(transport);  // 未注册 = 该 backend 无传输态需要释放
 }
 
 __attribute__((visibility("default")))
 bool FrameShareRegistered(FrameLocality locality) {
-    std::lock_guard<std::mutex> lk(mu());
     size_t idx = index(locality);
-    if (idx >= table().size()) return false;
-    return static_cast<bool>(table()[idx].exportFn) &&
-           static_cast<bool>(table()[idx].importFn);
+    return with_locked_table<ShareTable>(kShareKey, [&](ShareTable& t) {
+        if (idx >= t.entries.size()) return false;
+        return static_cast<bool>(t.entries[idx].exportFn) &&
+               static_cast<bool>(t.entries[idx].importFn);
+    });
 }
 
 __attribute__((visibility("default")))
 bool ExportSharedFrame(const CodecFrame& frame, SharedFrameDesc& desc) {
-    FrameExportFn fn;
-    {
-        std::lock_guard<std::mutex> lk(mu());
-        size_t idx = index(frame.locality);
-        if (idx >= table().size()) return false;
-        fn = table()[idx].exportFn;
-    }
+    size_t idx = index(frame.locality);
+    FrameExportFn fn = with_locked_table<ShareTable>(
+        kShareKey, [&](ShareTable& t) -> FrameExportFn {
+            if (idx >= t.entries.size()) return nullptr;
+            return t.entries[idx].exportFn;
+        });
     return fn ? fn(frame, desc) : false;
 }
 
 __attribute__((visibility("default")))
 bool ImportSharedFrame(const SharedFrameDesc& desc, CodecFrame& frame) {
-    FrameImportFn fn;
-    {
-        std::lock_guard<std::mutex> lk(mu());
-        size_t idx = index(desc.locality);
-        if (idx >= table().size()) return false;
-        fn = table()[idx].importFn;
-    }
+    size_t idx = index(desc.locality);
+    FrameImportFn fn = with_locked_table<ShareTable>(
+        kShareKey, [&](ShareTable& t) -> FrameImportFn {
+            if (idx >= t.entries.size()) return nullptr;
+            return t.entries[idx].importFn;
+        });
     return fn ? fn(desc, frame) : false;
 }
 
