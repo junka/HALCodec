@@ -266,6 +266,34 @@ Annex-B .h264/.hevc 文件
 | ❌ | macOS | `hal_player.mm` (Apple 专有 ObjC++ fallback) |
 | ❌ | Linux/Windows | 跳过 hal_player target |
 
+### 跨进程活流输入 (`shm:NAME`,Linux)
+
+播放器可以**边收边解**另一个进程产出的 Annex-B 裸流 —— 比如别的程序刚解出的
+raw H.265。传输层 (`app/shm_ring.h`) 是 POSIX 共享内存里的 SPSC 字节环 +
+每个方向一个 eventfd:
+
+- **player 是 rendezvous 宿主**:创建 shm 对象 `/halcodec-shm-<NAME>` 并监听一个
+  abstract unix socket;生产者 (`app/hal_push.cc`,`ShmRingWriter`) 连上后经
+  SCM_RIGHTS 一次性收到两个 eventfd —— 不落文件系统、不轮询。
+- **背压而非丢帧**:环形缓冲默认 4 MiB(约 2 s 的 4K HEVC);写满时生产者的
+  `write()` 阻塞等播放器消费(space 事件),慢的渲染端反过来节流生产端。
+- **从流头自举**:Annex-B 流以参数集开头,播放器先累积字节直到抓到
+  SPS/PPS(上限 16 MiB)再初始化解码器,然后边到边解 —— feeder 线程把
+  ring→FillInput 与渲染循环解耦。
+- **对端死亡即收尾**:socket 上的 `MSG_PEEK` 探测能唤醒阻塞中的等待者,生产者
+  中途被杀则播放结束而非卡死;播放器关窗同样会用 `abort()` 放开还在推流的
+  生产者。
+
+```sh
+# 终端 1:player 作为宿主等待生产者(名字独占,同一时刻只允许一个 player)
+./app/hal_player shm:demo --bench          # 或窗口模式:./app/hal_player shm:demo
+
+# 终端 2:把文件(或 stdin,用 -)推进去;--sleep-us N 按每 256 KiB 限速,
+# 模拟采集速率
+./app/hal_push demo stream.hevc
+cat stream.hevc | ./app/hal_push demo -
+```
+
 ### hal_player 性能
 
 macOS (Intel UHD 630 iGPU,Release 构建) 实测,测试素材 720p 短序列:

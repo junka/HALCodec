@@ -43,6 +43,9 @@
 #include "decoder.h"
 #include "frame.h"
 #include "output_paths.h"
+#if defined(__linux__)
+#include "shm_ring.h"  // live input over a shm ring (shm:NAME)
+#endif
 #include "plugin_loader.h"
 #include "yuv_to_bgra.h"
 
@@ -198,9 +201,12 @@ struct Player {
 
 int main(int argc, char* argv[]) {
     if (argc < 2) {
-        std::cerr << "usage: hal_player [--backend NAME] [--bench] <file.h264|file.hevc|file.mp4>\n"
+        std::cerr << "usage: hal_player [--backend NAME] [--bench] <file.h264|file.hevc|shm:NAME>\n"
                   << "  --backend  decoder backend (vtbox/nvdec/qsvdec); default: first available\n"
-                  << "  --bench    no window,pure decode throughput\n";
+                  << "  --bench    no window,pure decode throughput\n"
+                  << "  shm:NAME   live stream from a producer process (Linux; app/hal_push.cc)\n"
+                  << "             -- the player hosts the shm ring + eventfds, waits for the\n"
+                  << "             producer, bootstraps on the stream's parameter sets, plays\n";
         return 1;
     }
 
@@ -234,19 +240,71 @@ int main(int argc, char* argv[]) {
     if (!dec) { std::cerr << "Create decoder '" << backend << "' failed\n"; return 1; }
     std::cerr << "[hal_player] backend: " << dec->getName() << "\n";
 
-    // 读文件
-    std::ifstream fin(path, std::ios::binary | std::ios::ate);
-    if (!fin) { std::cerr << "cannot open " << path << "\n"; return 1; }
-    std::streamsize sz = fin.tellg(); fin.seekg(0);
-    std::vector<uint8_t> raw(sz);
-    fin.read(reinterpret_cast<char*>(raw.data()), sz);
-    fin.close();
-    std::cerr << "[hal_player] file size: " << sz << " bytes\n";
+    // 输入:文件整读,或 shm:NAME 走共享内存活流(参数集从流头引导)。
+    halcodec::CodecParams params;
+    params.zeroCopy = true;  // 让 backend 优先 device memory (NV12 on GPU)
+    std::vector<uint8_t> raw;
+    bool live = false;
+    std::thread feeder;                                   // live: feeds FillInput
+    std::unique_ptr<halcodec::ShmRingHost> ring;          // live: the transport
+#if defined(__linux__)
+    if (path.rfind("shm:", 0) == 0) {
+        live = true;
+        const std::string name = path.substr(4);
+        constexpr uint64_t kRingBytes = 4ull << 20;  // 4 MiB ≈ 2 s of 4K HEVC
+        ring = std::make_unique<halcodec::ShmRingHost>();
+        std::string err;
+        if (!ring->create(name, kRingBytes, &err) ||
+            !ring->acceptProducer(&err)) {
+            std::cerr << "[hal_player] shm ring: " << err << "\n";
+            return 1;
+        }
+        if (!dec->isAsync()) {
+            std::cerr << "shm live input needs an async decoder backend "
+                         "(vtbox/nvdec/qsvdec)\n";
+            return 1;
+        }
+        std::cerr << "[hal_player] waiting for producer on shm:" << name
+                  << " ...\n";
+        // Accumulate the stream head until the parameter sets are in: the
+        // decoder needs extradata before Initialize, and an Annex-B stream
+        // leads with them. Cap the bootstrap so a param-set-less stream
+        // errors out instead of buffering forever.
+        std::vector<uint8_t> chunk(256 * 1024);
+        constexpr size_t kBootstrapCap = 16 << 20;
+        while (true) {
+            int64_t n = ring->read(chunk.data(), chunk.size());
+            if (n <= 0) {
+                std::cerr << "stream ended before H.264/H.265 parameter sets "
+                             "arrived\n";
+                return 1;
+            }
+            raw.insert(raw.end(), chunk.begin(), chunk.begin() + n);
+            if (ExtractAnnexBParamSets(raw.data(), raw.size(),
+                                       &params.extradata) >= 0)
+                break;
+            if (raw.size() > kBootstrapCap) {
+                std::cerr << "no parameter sets in the first " << kBootstrapCap
+                          << " bytes\n";
+                return 1;
+            }
+        }
+        std::cerr << "[hal_player] producer connected, bootstrapped from "
+                  << raw.size() << " bytes\n";
+    } else
+#endif
+    {
+        std::ifstream fin(path, std::ios::binary | std::ios::ate);
+        if (!fin) { std::cerr << "cannot open " << path << "\n"; return 1; }
+        std::streamsize sz = fin.tellg(); fin.seekg(0);
+        raw.resize(static_cast<size_t>(sz));
+        fin.read(reinterpret_cast<char*>(raw.data()), sz);
+        fin.close();
+        std::cerr << "[hal_player] file size: " << sz << " bytes\n";
+        params.inputs.push_back(path);
+    }
 
     // 给 vtbox/qsvdec 等 backend 提供 extradata (SPS+PPS or VPS+SPS+PPS,AVCC 格式)
-    halcodec::CodecParams params;
-    params.inputs.push_back(path);
-    params.zeroCopy = true;  // 让 backend 优先 device memory (NV12 on GPU)
     int det = ExtractAnnexBParamSets(raw.data(), raw.size(), &params.extradata);
 
     // codec:extradata 探测优先(以流内容为准),探测不出来才退回扩展名.
@@ -267,18 +325,52 @@ int main(int argc, char* argv[]) {
         return 1;
     }
 
+    // Live mode: a feeder thread streams the ring into FillInput so the
+    // decode/render loop below never waits on input while a frame may be
+    // pending (a blocking GetFrame with un-fed bytes in the ring would
+    // deadlock against a full ring). Async backends run FillInput and
+    // GetFrame from different threads safely -- the Session fan-in relies
+    // on the same contract.
+    if (live) {
+        feeder = std::thread([&dec, &raw, &ring] {
+            constexpr size_t kFeedChunk = 256 * 1024;
+            size_t off = 0;
+            while (off < raw.size()) {  // bootstrap bytes arrived with the param sets
+                size_t n = std::min(kFeedChunk, raw.size() - off);
+                dec->FillInput(raw.data() + off, n);
+                off += n;
+            }
+            std::vector<uint8_t> chunk(kFeedChunk);
+            while (true) {
+                int64_t n = ring->read(chunk.data(), chunk.size());
+                if (n <= 0) break;
+                dec->FillInput(chunk.data(), static_cast<int>(n));
+            }
+            dec->SignalInputComplete();
+        });
+    }
+
     Player player;
     std::vector<uint8_t> bgraBuf;
 
     if (bench) {
         // ============ BENCH MODE:no window,pure decode throughput ============
         uint64_t t0 = NowNs();
+        int64_t frames = 0;
+        if (live) {
+            // The feeder streams the ring into FillInput; drain decoded
+            // frames until the stream ends.
+            halcodec::CodecFrame f;
+            while (dec->GetFrame(f)) {
+                frames++;
+                if (f.release) f.release();
+            }
+        } else {
         std::cerr << "[hal_player] calling FillInput (" << raw.size() << " bytes)...\n";
         int ready = dec->FillInput(raw.data(), raw.size());
         std::cerr << "[hal_player] FillInput returned ready=" << ready
                   << "  backend isAsync=" << (dec->isAsync() ? "yes" : "no") << "\n";
 
-        int64_t frames = 0;
         if (ready >= 0) {
             dec->SignalInputComplete();  // EOF → GetFrame 不会永远等更多 input
             halcodec::CodecFrame f;
@@ -294,6 +386,7 @@ int main(int argc, char* argv[]) {
                 while (dec->GetFrame(f)) { frames++; if (f.release) f.release(); }
             } while (n > 0);
         }
+        }
         uint64_t t1 = NowNs();
         double wall = NsToSec(t1 - t0);
         std::cerr << "\n================ PERF ================\n";
@@ -306,8 +399,10 @@ int main(int argc, char* argv[]) {
         std::cerr << "======================================\n\n";
     } else {
         // ============ WINDOW MODE:decode + NV12→BGRA + SDL2/GL render ============
-        dec->FillInput(raw.data(), raw.size());
-        dec->SignalInputComplete();
+        if (!live) {  // live: the feeder thread feeds FillInput
+            dec->FillInput(raw.data(), raw.size());
+            dec->SignalInputComplete();
+        }
         halcodec::CodecFrame f;
         while (player.running && dec->GetFrame(f)) {
             if (!f.data) halcodec::DownloadToHost(f);
@@ -337,6 +432,12 @@ int main(int argc, char* argv[]) {
         }
     }
 
+    if (live) {
+        // Release the feeder if the window closed while the producer still
+        // streams; after a natural end-of-stream this is a no-op.
+        ring->abort();
+        feeder.join();
+    }
     player.shutdown();
     dec->Finalize();
     std::cerr << "[hal_player] exit\n";

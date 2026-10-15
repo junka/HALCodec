@@ -159,6 +159,16 @@ foreach(_tgt hal_enc codecinfo hal_dec hal_transcode hal_cam)
     endif()
 endforeach()
 
+# hal_push: Linux-only producer for hal_player's shm live mode (app/shm_ring.h)
+# -- streams an Annex-B file/stdin into the player's ring. Depends on nothing
+# but the header (the producer side never touches a codec).
+if(UNIX AND NOT APPLE)
+    add_executable(hal_push hal_push.cc)
+    set_target_properties(hal_push PROPERTIES
+        CXX_STANDARD 17
+        CXX_STANDARD_REQUIRED ON)
+endif()
+
 # hal_player: cross-platform hard-decode player via HAL Decoder + SDL2 + OpenGL.
 # Falls back to the Apple-specific Objective-C++ build only when SDL2 is
 # unavailable (kept so the pure VT path still builds on a bare macOS SDK).

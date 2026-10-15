@@ -73,7 +73,7 @@ VideoToolbox/layers/ Apple adapter (vtbox namespace)
 AMF/layers/          AMD adapter (amd namespace), Linux-only
 QSV/layers/          Intel QSV/libvpl adapter (qsv namespace), Linux-only
 NvMedia/layers/      NVIDIA DRIVE OS adapter (nvmedia namespace), Linux-aarch64-only
-app/                 example CLIs (hal_dec/hal_enc/hal_transcode/hal_cam/codecinfo, plus hal_player when SDL2 is present)
+app/                 example CLIs (hal_dec/hal_enc/hal_transcode/hal_cam/codecinfo, plus hal_player when SDL2 is present, and the Linux-only hal_push live-stream producer)
 tools/               helper scripts (SDK update/import)
 ```
 
@@ -680,6 +680,39 @@ Annex-B .h264 / .hevc file
 | Yes | all | `hal_player.cc` (cross-platform C++ + SDL2 + GL) |
 | No  | macOS | `hal_player.mm` (Apple-only ObjC++ fallback) |
 | No  | Linux/Windows | hal_player target skipped |
+
+### Live input from another process (`shm:NAME`, Linux)
+
+The player can decode an Annex-B elementary stream as a *different process
+produces it* — e.g. frames another program just decoded to raw H.265. The
+transport (`app/shm_ring.h`) is a SPSC byte ring in POSIX shared memory with
+one eventfd per direction:
+
+- The **player is the rendezvous host**: it creates the shm object
+  `/halcodec-shm-<NAME>` and listens on an abstract unix socket; the producer
+  (`app/hal_push.cc`, `ShmRingWriter`) connects and receives both eventfds via
+  SCM_RIGHTS — no files in the filesystem, no polling.
+- **Backpressure, not loss**: the ring starts at 4 MiB (~2 s of 4K HEVC); when
+  full the producer's `write()` blocks until the player consumes (space-event),
+  so a slow renderer paces the producer instead of dropping bytes.
+- **Bootstrap from the stream head**: an Annex-B stream leads with its
+  parameter sets, so the player accumulates bytes until SPS/PPS arrive
+  (16 MiB cap), initializes the decoder, then decodes while bytes keep
+  arriving (a feeder thread decouples ring→FillInput from the render loop).
+- **Peer death tears down cleanly**: a `MSG_PEEK` probe on the socket wakes
+  blocked waiters, so a producer killed mid-stream ends playback instead of
+  hanging; a player that closes its window releases a still-streaming
+  producer the same way.
+
+```sh
+# terminal 1: player hosts the ring and waits (name is exclusive to one player)
+./app/hal_player shm:demo --bench          # or window mode: ./app/hal_player shm:demo
+
+# terminal 2: stream a file (or stdin with -) into it; --sleep-us N paces
+# the feed per 256 KiB to simulate a capture rate
+./app/hal_push demo stream.hevc
+cat stream.hevc | ./app/hal_push demo -
+```
 
 ### hal_player throughput
 
