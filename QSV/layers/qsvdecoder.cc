@@ -410,6 +410,11 @@ public:
         // plain declaration + later assignment keeps the goto legal.
         bool eosSignaled;
         eosSignaled = false;
+        // Consecutive MFX_WRN_VIDEO_PARAM_CHANGED reports for the same bytes
+        // (see the case below). Same declaration style as eosSignaled — the
+        // goto out in the switch must not cross an initialization.
+        int paramChangedRepeats;
+        paramChangedRepeats = 0;
         while (true) {
             mfxBitstream* bsPtr = nullptr;
             // This lock spans the bitstream setup AND the DecodeFrameAsync
@@ -517,17 +522,23 @@ public:
                 }
             }
 #if defined(__linux__) && defined(QSV_HAS_VA)
-            // VA path: if the decoder did NOT take the work surface (no output
-            // surface returned, or an error/non-NONE status), return it to the
-            // pool so the next iteration can reuse it. VP9's per-packet flow
-            // calls DecodeFrameAsync twice per frame: first returns
-            // MFX_ERR_MORE_SURFACE (surfOut=null, work surface unused — must be
-            // recycled), then returns MFX_ERR_NONE (surfOut==work, drained and
-            // recycled in drainPendingLockedKeepAlive). Without recycling on the
+            // VA path: recycle the work surface unless the decoder returned it
+            // as an output frame. VP9's per-packet flow calls DecodeFrameAsync
+            // twice per frame: first returns MFX_ERR_MORE_SURFACE (surfOut=null,
+            // work surface unused — must be recycled), then returns
+            // MFX_ERR_NONE (surfOut==work, drained and recycled in
+            // drainPendingLockedKeepAlive). Without recycling on the
             // MORE_SURFACE call every frame would leak one surface and exhaust
-            // the 16-surface pool within ~16 frames. VA surfaces have no
+            // the 16-surface pool within ~16 frames. Both MFX_ERR_NONE and
+            // MFX_WRN_VIDEO_PARAM_CHANGED can carry a frame, so "the decoder
+            // took the work surface" is surfOut==work under EITHER status — the
+            // old `sts != MFX_ERR_NONE` test would recycle (and reuse) a surface
+            // that is now a queued output frame. VA surfaces have no
             // FrameInterface, so we recycle via the allocator (not Release).
-            if (vaWork && (sts != MFX_ERR_NONE || surfOut != vaWork)) {
+            const bool vaWorkIsOutput = vaWork && surfOut == vaWork
+                && (sts == MFX_ERR_NONE
+                    || sts == MFX_WRN_VIDEO_PARAM_CHANGED);
+            if (vaWork && !vaWorkIsOutput) {
                 vaAlloc->releaseSurface(vaWork);
             }
             (void)workSurf;  // unused on the VA path (no GetSurfaceForDecode)
@@ -535,27 +546,10 @@ public:
             switch (sts) {
                 case MFX_ERR_NONE:
                     // Track the surface for batched synchronization. lk is held
-                    // (spanning the decode call above).
-                    pending.push_back({surfOut, syncp});
-                    stats_.framesIn++;  // one frame submitted to hardware
-                    stats_.pendingAsync = static_cast<int>(pending.size());
-#if defined(__linux__) && defined(QSV_HAS_VA)
-                    // VP8/VP9 per-packet path: sync+copy this frame to host
-                    // immediately before pulling the next packet (the VA
-                    // surface is then free to be reused as a reference for
-                    // the next P-frame — but we keep N alive; see
-                    // drainPendingLockedKeepAlive).
-                    if (perPacketFeed) {
-                        drainPendingLockedKeepAlive();
-                    } else if (pending.size() >= 4) {
-                        drainPendingLocked();
-                    }
-#else
-                    // Synchronize a batch when several are in flight.
-                    if (pending.size() >= 4) {
-                        drainPendingLocked();
-                    }
-#endif
+                    // (spanning the decode call above). The repeat counter is
+                    // reset after the switch (any non-warning status ends the
+                    // run), so it is not cleared here.
+                    enqueuePendingLocked(surfOut, syncp);
                     break;
                 case MFX_ERR_MORE_DATA:
                     if (!eof) {
@@ -649,6 +643,52 @@ public:
                     break;
                 case MFX_WRN_DEVICE_BUSY:
                     break;
+                case MFX_WRN_VIDEO_PARAM_CHANGED:
+                    // The encoder repeats its parameter sets in band: the camera
+                    // stream sends a byte-identical VPS/SPS/PPS plus a fresh IDR
+                    // every GOP (measured: every 20 frames, sha1 of each set
+                    // identical across GOPs). The decoder therefore reports
+                    // "video parameters changed" although nothing did. It is a
+                    // WARNING, not a failure, and it returns no output surface:
+                    // loop back and re-call DecodeFrameAsync with the same bs,
+                    // exactly like MFX_ERR_MORE_SURFACE above (ffmpeg's qsv
+                    // decoder does the same). Falling through to default: used to
+                    // poison the worker, so the stream died at the second GOP --
+                    // measured 16 decoded frames out of 148, and the same file
+                    // fails in file mode too, so it was never a transport issue.
+                    //
+                    // This path deliberately does NOT do Dynamic Resolution
+                    // Change. The warning's contract asks the application to call
+                    // MFXVideoDECODE_GetVideoParam and reconfigure if the
+                    // parameters genuinely changed; we never compare them, so a
+                    // real mid-stream change (new resolution/profile) is not
+                    // adapted -- it just retries and, if it keeps reporting,
+                    // bails out below. That is correct for a fixed-geometry feed
+                    // like this one; a stream that really rescales needs the
+                    // GetVideoParam + reconfigure path added here.
+                    //
+                    // A frame CAN accompany the warning (both this and
+                    // MFX_ERR_NONE can carry a surface). Deliver it before
+                    // retrying: otherwise it is neither queued nor released --
+                    // leaked, and the frame dropped. Producing a frame is
+                    // progress, so it also ends the repeat run.
+                    if (surfOut) {
+                        paramChangedRepeats = 0;
+                        enqueuePendingLocked(surfOut, syncp);
+                        break;
+                    }
+                    if (++paramChangedRepeats > 16) {
+                        // Looping does not help: the same bytes keep reporting a
+                        // param change. Bail out as before rather than spin at
+                        // 100% CPU with nothing coming out.
+                        std::cerr << "QSVDecoder: MFX_WRN_VIDEO_PARAM_CHANGED "
+                                     "not clearing after " << paramChangedRepeats
+                                  << " retries\n";
+                        workerError = true;
+                        cvFrames.notify_all();
+                        goto out;
+                    }
+                    break;
                 default:
                     if (eof && bs.DataLength == 0) {
                         // At EOF some codecs (VP9, MPEG2) return MFX_ERR_UNKNOWN
@@ -666,18 +706,35 @@ public:
                     cvFrames.notify_all();
                     goto out;
             }
+            // paramChangedRepeats counts *consecutive* frame-less param-change
+            // warnings. Any other status means the decoder made progress or
+            // needs fresh input, so the run is over and a later warning is a new
+            // event. This single reset (rather than one only in MFX_ERR_NONE) is
+            // what keeps the counter honest across a long stream: otherwise it
+            // accumulates one warning per GOP — the in-band parameter sets — so
+            // a long live feed trips the 16-retry bail-out above at its 17th GOP
+            // (~frame 340) even though every individual warning cleared in a
+            // single retry. A 4-GOP file never reaches 17, which is why this
+            // only ever showed up on the live stream.
+            if (sts != MFX_WRN_VIDEO_PARAM_CHANGED) {
+                paramChangedRepeats = 0;
+            }
 #if defined(__linux__) && defined(QSV_HAS_VA)
             // VP8/VP9 per-packet feed: unblock FillInput once the worker has
             // consumed the current packet (bs.DataLength dropped to 0 — the
             // decoder ate the bytes). If the packet was NOT consumed (MORE_DATA
-            // with bytes remaining, MORE_SURFACE, DEVICE_BUSY), keep FillInput
-            // blocked so the same packet is re-fed next iteration. On a fatal
-            // error, notify so FillInput does not deadlock on a dead packet.
+            // with bytes remaining, MORE_SURFACE, DEVICE_BUSY, VIDEO_PARAM_CHANGED
+            // — the last two re-feed the SAME bs), keep FillInput blocked so the
+            // same packet is re-fed next iteration; releasing it here would let
+            // FillInput append the next packet while the worker is still parsing
+            // this one. On a fatal error, notify so FillInput does not deadlock
+            // on a dead packet.
             if (perPacketFeed) {
                 if (bs.DataLength == 0
                         || (sts != MFX_ERR_NONE && sts != MFX_ERR_MORE_DATA
                             && sts != MFX_ERR_MORE_SURFACE
-                            && sts != MFX_WRN_DEVICE_BUSY)) {
+                            && sts != MFX_WRN_DEVICE_BUSY
+                            && sts != MFX_WRN_VIDEO_PARAM_CHANGED)) {
                     cvDrained.notify_one();
                 }
             }
@@ -688,7 +745,43 @@ public:
             std::lock_guard<std::mutex> lk(mu);
             finished = true;
             cvFrames.notify_all();
+            // Also wake FillInput: on the per-packet (VP8/VP9) path it may be
+            // parked on cvDrained waiting for the worker to consume the current
+            // packet, and its predicate (bs.DataLength==0 || workerError ||
+            // finished) is now satisfied via `finished` — but every exit here
+            // jumps past the in-loop cvDrained.notify_one(), so without this it
+            // would wait forever (missed notification). Applies to the bail-out
+            // above, the default error path, and the EOF drain alike.
+            cvDrained.notify_all();
         }
+    }
+
+    // Queue one freshly decoded surface for batched synchronization, then flush
+    // the batch when enough are in flight. Shared by the MFX_ERR_NONE case and
+    // the MFX_WRN_VIDEO_PARAM_CHANGED-with-frame case so a surface that arrives
+    // alongside the warning is delivered exactly like a normal one (queued,
+    // counted, and eventually released) instead of being leaked and dropped.
+    // Caller holds mu.
+    void enqueuePendingLocked(mfxFrameSurface1* surf, mfxSyncPoint syncp) {
+        pending.push_back({surf, syncp});
+        stats_.framesIn++;  // one frame submitted to hardware
+        stats_.pendingAsync = static_cast<int>(pending.size());
+#if defined(__linux__) && defined(QSV_HAS_VA)
+        // VP8/VP9 per-packet path: sync+copy this frame to host immediately
+        // before pulling the next packet (the VA surface is then free to be
+        // reused as a reference for the next P-frame — but we keep N alive; see
+        // drainPendingLockedKeepAlive).
+        if (perPacketFeed) {
+            drainPendingLockedKeepAlive();
+        } else if (pending.size() >= 4) {
+            drainPendingLocked();
+        }
+#else
+        // Synchronize a batch when several are in flight.
+        if (pending.size() >= 4) {
+            drainPendingLocked();
+        }
+#endif
     }
 
     // Synchronizes and copies out all pending surfaces into frames_. Caller
