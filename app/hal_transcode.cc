@@ -126,20 +126,27 @@ static int RunMultiStream(CommandLineParser& cli) {
         }
         // Feed mode: codec name, never the path (an inputs path would send
         // NVDEC into its internal demuxer and FillInput would be ignored).
-        dparams[s].codec = cli.getCodec();
+        // An explicit -c is seeded and left alone; the sniffs below only fill
+        // an empty name: content first, then the extension, then h264.
+        dparams[s].codec = cli.isCodecExplicit() ? cli.getCodec() : std::string();
+        dparams[s].deviceIndex = cli.getGpuIndex();
+        // Extradata for the backends that open on parameter sets (vtbox), as
+        // the single-stream path does. The same scan settles the codec when
+        // -c was not given (only H.264/HEVC have spottable parameter sets).
+        if (dparams[s].codec.empty() || dparams[s].codec == "h264" ||
+            dparams[s].codec == "hevc") {
+            halcodec::CodecHint hint = halcodec::ExtractParameterSets(
+                streams[s].raw.data(), streams[s].raw.size(),
+                &dparams[s].extradata, nullptr, /*onlyWithSpsPps=*/true);
+            if (dparams[s].codec.empty()) {
+                if (hint == halcodec::CodecHint::kH264) dparams[s].codec = "h264";
+                else if (hint == halcodec::CodecHint::kHEVC) dparams[s].codec = "hevc";
+            }
+        }
         if (dparams[s].codec.empty()) {
             dparams[s].codec = halcodec::CodecFromExtension(ExtOf(inputs[s]));
         }
-        dparams[s].deviceIndex = cli.getGpuIndex();
-        // Extradata for the backends that open on parameter sets (vtbox), as
-        // the single-stream path does.
-        if (dparams[s].codec == "h264" || dparams[s].codec == "hevc" ||
-            dparams[s].codec.empty()) {
-            halcodec::ExtractParameterSets(streams[s].raw.data(),
-                                           streams[s].raw.size(),
-                                           &dparams[s].extradata, nullptr,
-                                           /*onlyWithSpsPps=*/true);
-        }
+        if (dparams[s].codec.empty()) dparams[s].codec = "h264";
 
         // Encoder template: the same CLI-derived settings the single-stream
         // path builds, minus geometry (per-stream, from the first frame).
@@ -363,18 +370,31 @@ int main(int argc, char* argv[]) {
 
     // The decoder is fed the compressed bytes ourselves, so it must open in
     // feed mode: pass the codec name, not the file path (passing inputs would
-    // make NVDEC open its internal demuxer and ignore FillInput).
+    // make NVDEC open its internal demuxer and ignore FillInput). An explicit
+    // -c is seeded and left alone; without it the codec is resolved below.
     halcodec::CodecParams dparams;
-    dparams.codec = cli.getCodec();
+    dparams.codec = cli.isCodecExplicit() ? cli.getCodec() : std::string();
     dparams.deviceIndex = cli.getGpuIndex();
     dparams.zeroCopy = cli.getZeroCopy();
 
     // Extract SPS/PPS (or VPS/SPS/PPS for HEVC) from the input stream for backends
     // that need extradata (e.g. vtbox on macOS). This mirrors what hal_dec does.
-    if (dparams.codec == "h264" || dparams.codec == "hevc" || dparams.codec.empty()) {
-        halcodec::ExtractParameterSets(raw.data(), raw.size(), &dparams.extradata,
-                                       nullptr, /*onlyWithSpsPps=*/true);
+    // The same scan settles the codec when -c was not given: content first (only
+    // H.264/HEVC have spottable parameter sets), then the extension, then h264.
+    if (dparams.codec.empty() || dparams.codec == "h264" ||
+        dparams.codec == "hevc") {
+        halcodec::CodecHint hint = halcodec::ExtractParameterSets(
+            raw.data(), raw.size(), &dparams.extradata, nullptr,
+            /*onlyWithSpsPps=*/true);
+        if (dparams.codec.empty()) {
+            if (hint == halcodec::CodecHint::kH264) dparams.codec = "h264";
+            else if (hint == halcodec::CodecHint::kHEVC) dparams.codec = "hevc";
+        }
     }
+    if (dparams.codec.empty()) {
+        dparams.codec = halcodec::CodecFromExtension(ExtOf(input));
+    }
+    if (dparams.codec.empty()) dparams.codec = "h264";
 
     if (!dec->Initialize(dparams)) {
         std::cerr << "Fail to initialize decoder backend" << std::endl;
@@ -384,7 +404,10 @@ int main(int argc, char* argv[]) {
     // Encoder tuning comes from the same JSON config + CLI overrides as
     // hal_enc, so presets and rate control can be reused verbatim.
     halcodec::CodecParams eparams;
-    eparams.codec = cli.getCodec();
+    // The encoder mirrors the decoder's codec: the resolved name (explicit -c,
+    // the stream's own parameter sets, or the extension), never the bare
+    // h264 default the CLI would have handed back.
+    eparams.codec = dparams.codec;
     eparams.deviceIndex = cli.getGpuIndex();
     // Mirror the decoder's zero-copy selection onto the encoder: a OneVPLSurface
     // decoded frame can only be fed directly (no host memcpy) to an encoder

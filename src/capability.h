@@ -1,6 +1,7 @@
 #ifndef SRC_CAPABILITY_H
 #define SRC_CAPABILITY_H
 
+#include <map>
 #include <memory>
 #include <string>
 #include <vector>
@@ -25,8 +26,26 @@ public:
 
     using Creator = Registry<CapabilityProvider>::Creator;
 
+    // A provider is a backend *family* -- one per vendor library (qsv, nvidia,
+    // vtbox, ...) -- while the CLI addresses a direction of that family
+    // (qsvdec/qsvenc, nvdec/nvenc, nvjpegenc, vtenc). Both spellings name the
+    // same provider, so Create() resolves the direction to the family first:
+    // otherwise `codecinfo -b qsvdec --decode-caps` fails with "no capability
+    // provider" for a backend that is plainly registered. A name that is not a
+    // known direction (the family name itself, or a future backend) passes
+    // through unchanged.
+    static std::string ProviderName(const std::string& backend) {
+        static const std::map<std::string, std::string> directionToFamily = {
+            {"qsvdec", "qsv"},   {"qsvenc", "qsv"},
+            {"nvdec", "nvidia"}, {"nvenc", "nvidia"}, {"nvjpegenc", "nvjpeg"},
+            {"vtenc", "vtbox"},
+        };
+        auto it = directionToFamily.find(backend);
+        return it == directionToFamily.end() ? backend : it->second;
+    }
+
     static std::unique_ptr<CapabilityProvider> Create(const std::string& type) {
-        return Registry<CapabilityProvider>::Create(type);
+        return Registry<CapabilityProvider>::Create(ProviderName(type));
     }
 
     static bool Register(const std::string& type, Creator creator) {

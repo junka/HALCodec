@@ -139,6 +139,14 @@ public:
             }
             po::notify(vm);
 
+            // Whether -c was typed or is just the stored default. The decode
+            // apps sniff the stream's own parameter sets when it was not given
+            // (the same content-first policy hal_player uses); the encoders,
+            // which have no bitstream to sniff, keep the h264 default verbatim.
+            // `.defaulted()` distinguishes the two even though store() inserts
+            // the default into the map (so count() alone would read as "given").
+            codecExplicit_ = vm.count("codec") != 0 && !vm["codec"].defaulted();
+
             // If output is not provided, derive it from input
             outputExplicit_ = vm.count("output") != 0;
             if (!outputExplicit_ && !inputFiles_.empty()) {
@@ -176,6 +184,10 @@ public:
     const std::string& getInputFormat() const { return input_format_; }
     const std::string& getColorSpace() const { return cs_; }
     const std::string& getCodec() const { return codec_; }
+    // False when the name is only the h264 default -- i.e. -c was not given.
+    // Decode-side apps use this to prefer the stream's own parameter sets over
+    // the default; encoders ignore it and take getCodec() as-is.
+    bool isCodecExplicit() const { return codecExplicit_; }
 
     // Encoder config: returns the JSON file path (may be empty) plus the
     // single-item CLI overrides. Load the JSON first and apply these on top, or
@@ -244,6 +256,7 @@ private:
     std::string input_format_;
     std::string cs_;
     std::string codec_;
+    bool codecExplicit_ = false;
 
     // Encoder tuning overrides (sentinel defaults mean "not set on CLI").
     std::string encodeConfigFile_;

@@ -30,14 +30,13 @@ namespace {
 // Scan an Annex-B H.264/HEVC stream, sniff its codec from the parameter-set
 // NAL types, and pack the sets it carries into AVCC extradata
 // ([len:4][nalu]...), which is what the decoders' Initialize() consumes.
-// The scan itself is shared (src/annexb.h); the policy that stays here is only
-// the caller's: this app has no codec verdict to report (the codec comes from
-// -c), so it just asks whether anything usable was found.
-bool ExtractParameterSets(const uint8_t* data, size_t size,
-                          std::vector<uint8_t>* extradata) {
+// The scan itself is shared (src/annexb.h). The verdict it returns
+// (kH264/kHEVC/kUnknown) is this app's content-first codec answer, used only
+// when -c was not given -- an explicit -c always wins.
+halcodec::CodecHint ExtractParameterSets(const uint8_t* data, size_t size,
+                                         std::vector<uint8_t>* extradata) {
     return halcodec::ExtractParameterSets(data, size, extradata, nullptr,
-                                          /*onlyWithSpsPps=*/true) !=
-           halcodec::CodecHint::kUnknown;
+                                          /*onlyWithSpsPps=*/true);
 }
 
 // IVF: the container AV1 and VP9 test streams travel in (a 32-byte file header
@@ -221,9 +220,10 @@ struct DecodeStream {
 // What a single input file is, judged once, before any decoder opens: IVF
 // (codec from the fourcc, first packet as extradata, record walker attached),
 // ProRes (header as extradata), JPEG (whole file as extradata), or an
-// Annex-B elementary stream (parameter sets as extradata, codec from -c /
-// the extension). Fills *params and *stream; false when the file cannot be
-// read.
+// Annex-B elementary stream (parameter sets as extradata, codec sniffed from
+// the SPS/VPS NAL types). Each sniff fills params->codec only when it is
+// still empty, so an explicit -c is never overridden. Fills *params and
+// *stream; false when the file cannot be read.
 bool PrepareDecodeStream(const std::string& path, halcodec::CodecParams* params,
                          DecodeStream* stream) {
     if (!halcodec::ReadFile(path, &stream->raw)) {
@@ -240,14 +240,14 @@ bool PrepareDecodeStream(const std::string& path, halcodec::CodecParams* params,
         // An IVF/AV01 or VP90 input says which codec its bytes are, which
         // the name has to carry because the frame records make the stream
         // look like nothing to the Annex-B sniff below.
-        params->codec = ivfCodec;
+        if (params->codec.empty()) params->codec = ivfCodec;
         params->extradata.assign(packet, packet + packetSize);
         stream->ivf.reset(new IvfPayloadReader(headerSize));
     } else if (IsProRes(stream->raw.data(), stream->raw.size())) {
         // The name has to say ProRes before the feed starts: a picture's own
         // byte count is what the decoder splits on, and no other codec's
         // bytes are delimited that way.
-        params->codec = "prores";
+        if (params->codec.empty()) params->codec = "prores";
         const size_t headerBytes = stream->raw.size() < 20 ? stream->raw.size() : 20;
         params->extradata.assign(stream->raw.begin(),
                                  stream->raw.begin() + headerBytes);
@@ -258,11 +258,18 @@ bool PrepareDecodeStream(const std::string& path, halcodec::CodecParams* params,
         // the extradata: the decoder reads the picture size out of its frame
         // header before opening a session, and the feed below then streams
         // the same bytes as usual.
-        params->codec = "jpeg";
+        if (params->codec.empty()) params->codec = "jpeg";
         params->extradata = stream->raw;
     } else {
-        ExtractParameterSets(stream->raw.data(), stream->raw.size(),
-                             &params->extradata);
+        // Annex-B elementary stream: the parameter-set NAL types tell H.264
+        // and HEVC apart, the same content-first verdict hal_player uses. Every
+        // other codec keeps whatever name -c or the extension gave it.
+        halcodec::CodecHint hint = ExtractParameterSets(
+            stream->raw.data(), stream->raw.size(), &params->extradata);
+        if (params->codec.empty()) {
+            if (hint == halcodec::CodecHint::kH264) params->codec = "h264";
+            else if (hint == halcodec::CodecHint::kHEVC) params->codec = "hevc";
+        }
     }
     return true;
 }
@@ -314,22 +321,22 @@ static int RunMultiStream(CommandLineParser& cli) {
     for (size_t s = 0; s < n; s++) {
         params[s].deviceIndex = cli.getGpuIndex();
         params[s].zeroCopy = cli.getZeroCopy();
-        // Feed mode: the codec comes from the extension (or the container
-        // sniffs), never from params.inputs — passing the path would make
-        // NVDEC-style backends open an internal demuxer and ignore FillInput.
-        params[s].codec = cli.getCodec();
-        if (params[s].codec.empty()) {
-            params[s].codec = halcodec::CodecFromExtension(ExtOf(inputs[s]));
-        }
+        // Feed mode: the codec comes from -c, else the stream itself (content
+        // sniff, then the extension), never from params.inputs — passing the
+        // path would make NVDEC-style backends open an internal demuxer and
+        // ignore FillInput. An explicit -c is seeded here and left alone: the
+        // sniffs below only fill an empty name.
+        params[s].codec = cli.isCodecExplicit() ? cli.getCodec() : std::string();
         if (!PrepareDecodeStream(inputs[s], &params[s], &streams[s])) {
             std::cerr << "Cannot read " << inputs[s] << std::endl;
             return -1;
         }
-        // Still nothing after -c, the extension and the container sniffs:
-        // default to h264. The feed-mode backends that
-        // cannot sniff (nvdec) need a name to build their decoder, and the
-        // parameter-set sniff in PrepareDecodeStream already overrode it for
-        // every stream that carries SPS/VPS.
+        // Content sniffs (IVF/ProRes/JPEG/Annex-B parameter sets) have run;
+        // fall back to the extension, then to h264. The feed-mode backends
+        // that cannot sniff (nvdec) need a name to build their decoder.
+        if (params[s].codec.empty()) {
+            params[s].codec = halcodec::CodecFromExtension(ExtOf(inputs[s]));
+        }
         if (params[s].codec.empty()) {
             params[s].codec = "h264";
         }
@@ -480,7 +487,8 @@ int main(int argc, char* argv[]) {
     // Forward the explicit codec (-c) for backends that have no internal
     // demuxer and derive the NvMedia/cuvid codec id from the name (e.g.
     // nvmedia). Backends with their own demuxer (nvdec file mode) ignore it.
-    params.codec = cli.getCodec();
+    // Without -c the name is left empty and resolved from the stream below.
+    params.codec = cli.isCodecExplicit() ? cli.getCodec() : std::string();
     // -z/--zero-copy: ask the decoder to keep frames in device memory. Backends
     // that don't support it ignore the flag (still produce host frames); the
     // output writer calls DownloadToHost on every frame regardless.
@@ -493,11 +501,17 @@ int main(int argc, char* argv[]) {
     }
     // Decoders that build a format description from parameter sets (vtbox)
     // need SPS/PPS; extract them from the Annex-B input stream when present.
+    // The same pass settles the codec when -c was not given: content first,
+    // then the extension, then h264.
     DecodeStream stream;
     if (!PrepareDecodeStream(cli.getInputFile(), &params, &stream)) {
         std::cerr << "Cannot read " << cli.getInputFile() << std::endl;
         return -1;
     }
+    if (params.codec.empty()) {
+        params.codec = halcodec::CodecFromExtension(ExtOf(cli.getInputFile()));
+    }
+    if (params.codec.empty()) params.codec = "h264";
     if (!dec->Initialize(params)) {
         std::cerr << "Fail to initialize decoder backend: " << backend << std::endl;
         return -1;
