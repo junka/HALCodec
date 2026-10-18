@@ -39,14 +39,25 @@ foreach(pair "${NV12_3}:nv12" "${P010_3}:p010le" "${P210_3}:p210le")
     endif()
 endforeach()
 
-# HAL format | ffmpeg raw format | profile | the pix_fmt ffprobe must report.
+# HAL format | ffmpeg raw format | profile | the pix_fmt ffprobe must report |
+# the class depth | the class chroma (0 = monochrome).
 # Both p210 and p010 inputs are expected to come out 4:2:2 10-bit: the source's
 # chroma is upsampled by ffmpeg on the way in for the second one.
+#
+# The last two fields feed the capability gate: each case is skipped when this
+# machine's encoder does not claim that profile fed that raw format, so a
+# half-featured machine loses the cases it cannot run instead of failing them.
 set(CASES
-    "p210|p210le|main422-10|yuv422p10le"
-    "p010|p010le|main422-10|yuv422p10le"
-    "nv12|nv12|main-mono|gray"
-    "p010|p010le|main-mono-10|gray10le")
+    "p210|p210le|main422-10|yuv422p10le|10|422"
+    "p010|p010le|main422-10|yuv422p10le|10|422"
+    "nv12|nv12|main-mono|gray|8|0"
+    "p010|p010le|main-mono-10|gray10le|10|0")
+
+# Capability gate for the cases, from the same probe the encoder uses: a real
+# hardware session per class, encoding one picture. The refusals below are not
+# gated -- they are host-side checks that run before any session opens, so they
+# mean the same thing on a machine with no encoder at all.
+halcodec_encode_caps(CODECINFO vtbox hevc HEVC_ENC)
 
 foreach(case ${CASES})
     string(REPLACE "|" ";" parts "${case}")
@@ -54,6 +65,16 @@ foreach(case ${CASES})
     list(GET parts 1 ff_fmt)
     list(GET parts 2 profile)
     list(GET parts 3 want_fmt)
+    list(GET parts 4 case_depth)
+    list(GET parts 5 case_chroma)
+    string(TOUPPER "${fmt}" case_input)
+    halcodec_caps_supports(HEVC_ENC ${case_depth} ${case_chroma} ${case_input} CASE_CLAIMED)
+    if(CASE_CLAIMED STREQUAL "NO")
+        message("SKIP vtenc.hevc_profiles ${profile} from ${fmt}: vtbox does not "
+                "claim ${case_depth}-bit ${case_chroma} <- ${case_input}. The probe "
+                "reports: ${HEVC_ENC_JSON}")
+        continue()
+    endif()
     if(fmt STREQUAL "nv12")
         set(src "${NV12_3}")
     elseif(fmt STREQUAL "p010")

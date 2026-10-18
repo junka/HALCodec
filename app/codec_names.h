@@ -68,6 +68,14 @@ inline bool IsConverterFormat(const std::string& format) {
            format == "rgbi" || format == "bgri";
 }
 
+// The two interleaved spellings. HAL's format table has no name for 24-bit
+// interleaved pixels, so -f rgbi/-f bgri reaches a decoder as planar RGB/BGR and
+// only the writer can say what goes wrong -- a capability table cannot, which is
+// why the decode-side gates step aside for these.
+inline bool IsInterleavedFormat(const std::string& format) {
+    return format == "rgbi" || format == "bgri";
+}
+
 // A file extension -> the codec name the backends take. The extension may carry
 // its dot and any case ("JPG", ".jpg", "jpg" all work); empty when the
 // extension says nothing, and callers keep their own default ("h264" for every

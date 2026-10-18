@@ -125,8 +125,13 @@ public:
                  "codecinfo: instead of the full human-readable dump, query the "
                  "structured decoder capability for this codec (-b required) and "
                  "print it; --json makes the output machine-readable.")
+                ("encode-caps", po::value<std::string>(&encodeCapsCodec_),
+                 "codecinfo: query the structured encoder capability for this codec "
+                 "(-b required), i.e. which raw formats a hardware encoder on this "
+                 "machine really takes; --json makes the output machine-readable.")
                 ("json", po::bool_switch(&jsonOut_),
-                 "codecinfo --decode-caps: emit one single-line JSON object.");
+                 "codecinfo --decode-caps/--encode-caps: emit one single-line JSON "
+                 "object.");
 
             // Parse the command line
             po::variables_map vm;
@@ -243,6 +248,7 @@ public:
 
     // codecinfo-only.
     const std::string& getDecodeCapsCodec() const { return decodeCapsCodec_; }
+    const std::string& getEncodeCapsCodec() const { return encodeCapsCodec_; }
     bool getJsonOut() const { return jsonOut_; }
 
 private:
@@ -304,6 +310,7 @@ private:
 
     // codecinfo-only.
     std::string decodeCapsCodec_;
+    std::string encodeCapsCodec_;
     bool jsonOut_ = false;
 };
 

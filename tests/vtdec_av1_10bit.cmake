@@ -25,6 +25,15 @@
 include("${CMAKE_CURRENT_LIST_DIR}/halcodec_test_prelude.cmake")
 halcodec_require(HAL_DEC FFMPEG FFPROBE INPUT_NV12 WORKDIR)
 
+# Capability gate: same unpack law as the HEVC Main 10 case, asserted on AV1 bytes,
+# which only this backend's own probe can say it decodes at 10 bits here.
+halcodec_decode_caps(CODECINFO vtbox av1 AV1)
+halcodec_caps_supports(AV1 10 420 P010 WANT_P010)
+if(WANT_P010 STREQUAL "NO")
+    message("SKIP vtdec.av1_10bit: vtbox does not claim 10-bit 4:2:0 -> P010. The probe reports: ${AV1_JSON}")
+    return()
+endif()
+
 set(FRAMES 3)
 
 foreach(size 320x240 640x360)

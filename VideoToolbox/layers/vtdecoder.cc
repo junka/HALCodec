@@ -4,6 +4,7 @@
 #include <CoreFoundation/CoreFoundation.h>
 #include <CoreMedia/CMFormatDescriptionBridge.h>
 #include <algorithm>
+#include <atomic>
 #include <cstdlib>
 #include <cstring>
 #include <iostream>
@@ -18,6 +19,7 @@
 #include "h264au.h"
 #include "jpegdesc.h"
 #include "proresdesc.h"
+#include "vt_fourcc.h"
 
 namespace halcodec {
 namespace vtbox {
@@ -39,11 +41,15 @@ std::string FourCC(OSType cc) {
     return text;
 }
 
-// ... and back again, for the formats this SDK has no constant for. The
-// decoder's 10-bit output ('pf20') is one of them.
-constexpr OSType FourccOf(char a, char b, char c, char d) {
-    return (static_cast<OSType>(a) << 24) | (static_cast<OSType>(b) << 16) |
-           (static_cast<OSType>(c) << 8) | static_cast<OSType>(d);
+// Whether the decode-fault paths in the frame callback should print. The
+// capability probe drives the very same callback on input classes it expects to
+// be refused, and a refusal there *is* the measured answer -- reporting it as a
+// fault mid-run would tell an application's user that their own decode failed.
+// Only the probe brackets itself with this; a real decode keeps every word.
+std::atomic<bool> gProbeLoggingQuiet{false};
+
+bool ReportDecodeFault() {
+    return !gProbeLoggingQuiet.load(std::memory_order_relaxed);
 }
 
 // One row of the decoder's packed 10-bit plane to one row of 16-bit samples.
@@ -170,6 +176,10 @@ void ReadBayerAttachments(CVPixelBufferRef pb, BayerInfo* out) {
 }
 
 } // namespace
+
+void SetDecodeProbeLoggingQuiet(bool quiet) {
+    gProbeLoggingQuiet.store(quiet, std::memory_order_relaxed);
+}
 
 bool VTDecoder::Initialize(const CodecParams& params) {
     const auto& ext = params.extradata;
@@ -495,9 +505,8 @@ bool VTDecoder::InitializeProRes(const CodecParams& params) {
     // v216 (a single-plane packed variant that HAL cannot name), and asking
     // for sv22/sv44 is what kept the decoder on bi-planar in the first place.
     const OSType requestedFormat =
-        isProResRaw_ ? kCVPixelFormatType_16VersatileBayer
-                     : (frame.is444 ? kCVPixelFormatType_444YpCbCr16BiPlanarVideoRange
-                                    : kCVPixelFormatType_422YpCbCr16BiPlanarVideoRange);
+        isProResRaw_ ? kPfBp16
+                     : (frame.is444 ? kPfSv44 : kPfSv22);
     // Neither choice below pins the flavour: the codec type in the description is
     // not checked against the bitstream's own -- measured, an apcn description
     // decodes a 4:4:4 picture into 'sv44' just the same, and these RAW frames
@@ -1154,8 +1163,10 @@ void VTDecoder::DecompressionCallback(
               reinterpret_cast<intptr_t>(sourceFrameRefCon)) - 1
         : -1;
     if (status != noErr || !imageBuffer) {
-        std::cerr << "VTDecoder: decoded frame came back with status " << status
-                  << std::endl;
+        if (ReportDecodeFault()) {
+            std::cerr << "VTDecoder: decoded frame came back with status " << status
+                      << std::endl;
+        }
         // A sample VideoToolbox rejected never reaches the queue, so it must
         // give its window slot back or the feed path stops making progress.
         self->ReleaseSlot();
@@ -1188,18 +1199,21 @@ void VTDecoder::DecompressionCallback(
         // ffmpeg p010le).
         format = PixelFormat::P010;
         chromaRows = h / 2;
-    } else if (fourcc == kCVPixelFormatType_422YpCbCr16BiPlanarVideoRange ||
-               fourcc == FourccOf('v', '2', '1', '6')) {
+    } else if (fourcc == kPfSv22) {
+        // 'sv22' only: 'v216' used to be read here too, but it is a single-plane
+        // packed 10-bit layout, so the two-plane 16-bit walk would hand back
+        // mislabelled bytes without complaining. It now falls through to the
+        // refusal below, which prints the fourcc.
         format = PixelFormat::P210;
         chromaRows = h;
-    } else if (fourcc == kCVPixelFormatType_444YpCbCr16BiPlanarVideoRange) {
+    } else if (fourcc == kPfSv44) {
         // ProRes 4:4:4. Both planes are as tall as the picture, and the chroma
         // one is twice as wide as the luma one because it holds Cb and Cr for
         // every luma sample.
         format = PixelFormat::YUV444P16LE;
         chromaRows = h;
         planar444 = true;
-    } else if (fourcc == kCVPixelFormatType_16VersatileBayer) {
+    } else if (fourcc == kPfBp16) {
         // ProRes RAW: one plane of 16-bit sensels, the grid at the picture's full
         // size. The OS's own demosaic stage is not reached on this machine --
         // measured, VTRAWProcessingSessionCreate answers -12907 even for a buffer
@@ -1259,9 +1273,22 @@ void VTDecoder::DecompressionCallback(
         // its own output ('b16q', four planes of one Bayer phase each), which is
         // why the RAW session asks for 'bp16' instead. Handing one of these over
         // under an existing format would be a wrong-labelled frame; the reason is
-        // printed.
-        std::cerr << "VTDecoder: decoded frame came back as '" << FourCC(fourcc)
-                  << "', which HAL has no pixel format for" << std::endl;
+        // printed, together with the buffer's own geometry -- that is exactly the
+        // evidence needed to tell an unlisted fourCC for a known layout (a plain
+        // gap here) from a layout HAL has no name for at all.
+        if (ReportDecodeFault()) {
+            std::cerr << "VTDecoder: decoded frame came back as '" << FourCC(fourcc)
+                      << "', which HAL has no pixel format for ("
+                      << CVPixelBufferGetPlaneCount(imageBuffer) << " planes, "
+                      << w << "x" << h;
+            for (size_t p = 0; p < CVPixelBufferGetPlaneCount(imageBuffer); p++) {
+                std::cerr << ", plane " << p << " "
+                          << CVPixelBufferGetWidthOfPlane(imageBuffer, p) << "x"
+                          << CVPixelBufferGetHeightOfPlane(imageBuffer, p) << "@"
+                          << CVPixelBufferGetBytesPerRowOfPlane(imageBuffer, p);
+            }
+            std::cerr << ")" << std::endl;
+        }
         self->ReleaseSlot();
         return;
     }
@@ -1345,24 +1372,13 @@ void VTDecoder::DecompressionCallback(
             }
         } else if (oneComponent) {
             for (size_t r = 0; r < h; ++r) {
-                if (format == PixelFormat::GRAY10LE) {
-                    // VT 'L010' stores the ten bits at the top of each 16-bit word
-                    // (top-10-bit, like P010/P210). The test reference for this path
-                    // runs through a swscale filter that shifts the ten bits to the
-                    // bottom, so match it here. (Note: HAL's GRAY10LE was defined
-                    // as top-10-bit in src/frame.h; this keeps the value the same,
-                    // only the bit position moves.)
-                    const uint8_t* src = src0 + r * row0;
-                    uint8_t* dst = buf + r * outRow0;
-                    for (size_t c = 0; c < w; ++c) {
-                        uint16_t v;
-                        memcpy(&v, src + c * 2, 2);
-                        v = (v >> 6) & 0xFFFF;  // top-10-bit → bottom-10-bit
-                        memcpy(dst + c * 2, &v, 2);
-                    }
-                } else {
-                    memcpy(buf + r * outRow0, src0 + r * row0, outRow0);
-                }
+                // Both letters copy straight through. 'L010' already carries the
+                // ten significant bits at the top of each 16-bit word -- what
+                // CoreVideo's own header says of it and what HAL's GRAY10LE means
+                // (src/frame.h) -- so the plane needs no rescaling, and measured
+                // against ffmpeg's p010le decode of the same stream a shift here
+                // is the difference between byte-identical and every sample wrong.
+                memcpy(buf + r * outRow0, src0 + r * row0, outRow0);
             }
             // dataSize also carries a few bytes past the last row (measured 76864
             // and 153664 for the two letters at 320x240) that belong to no row,

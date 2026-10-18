@@ -13,6 +13,15 @@
 include("${CMAKE_CURRENT_LIST_DIR}/halcodec_test_prelude.cmake")
 halcodec_require(HAL_ENC FFMPEG FFPROBE INPUT_NV12 WORKDIR)
 
+# Capability gate: three NV12 pictures go in and three codestreams come out, which
+# needs an image encoder that takes NV12 on this machine.
+halcodec_encode_caps(CODECINFO vtbox jpeg JPEG_ENC)
+halcodec_caps_supports(JPEG_ENC 8 420 NV12 WANT_NV12)
+if(WANT_NV12 STREQUAL "NO")
+    message("SKIP vtenc.jpeg: vtbox does not claim 8-bit 4:2:0 <- NV12. The probe reports: ${JPEG_ENC_JSON}")
+    return()
+endif()
+
 set(FRAME_BYTES 115200)   # 320x240 NV12
 set(IMAGES 3)
 math(EXPR LAST "${IMAGES} - 1")

@@ -434,16 +434,41 @@ input file themselves.
 
 ```sh
 cd build
-./app/codecinfo              # enumerate every registered capability provider
-./app/codecinfo -b vtbox     # inspect a single provider
+./app/codecinfo                        # every registered capability provider
+./app/codecinfo -b vtbox               # one provider, human-readable dump
+./app/codecinfo -b vtbox --decode-caps hevc
+./app/codecinfo -b vtbox --encode-caps hevc --json
 ```
 
-Prints each backend's devices plus its decoder/encoder capabilities.
-VideoToolbox has no decoder enumeration API, so decode support is probed per
-codec via `VTIsHardwareDecodeSupported` (e.g. `H264: hw decode supported`);
-encoders are listed via `VTCopyVideoEncoderList`
-(e.g. `codec=avc1 Apple H.264 (HW)`). Reports `no capability providers
-registered` when nothing is available.
+Prints each backend's devices plus its decoder/encoder capabilities, and the
+structured per-codec answers the integration tests gate on.
+
+VideoToolbox has no capability API to read these from, so both structured
+answers are *measured on the machine that runs them*. Decode: one embedded probe
+stream per input class goes through the same `VTDecoder` path an application
+takes, and the class is claimed only with the pixel format that actually came
+back -- the difference matters, because hardware accepts a stream and silently
+downgrades it (an HEVC Main 4:2:2 10 picture decodes to 8-bit NV16 on machines
+whose path has no 10-bit 4:2:2 output). Encode: one synthetic picture through a
+session that sets `kVTVideoEncoderSpecification_RequireHardwareAcceleratedVideoEncoder`,
+so an entry means a hardware encoder took that raw layout, not that some encoder
+exists.
+
+Both sides come from tables (`kProbeClasses`, `kEncodeClasses` in
+`VideoToolbox/layers/vt_caps.cc`) whose rows are codec and pixel-format codes
+written as integers (`vt_fourcc.h`), never SDK constants: the same binary
+compiles against an old SDK and simply answers fewer rows yes. On M5 the decode
+table answers H.264 (Baseline, High), HEVC (Main, Main 10, Main 4:2:2, Main 4:2:2
+10, both monochrome profiles), AV1 (Main, Main 10), JPEG, ProRes 422/4444 and --
+with a sample on disk -- ProRes RAW into a Bayer grid; the encode table answers
+H.264 and HEVC (8 and 10 bit, including 4:2:2 and monochrome), JPEG and ProRes
+422/4444.
+
+`--json` is one single line with a fixed field order, which is what the cmake
+gate in `tests/halcodec_test_prelude.cmake` regex-parses. A backend that cannot
+answer truthfully says `unknown`, and a gated case then keeps its historical
+hard-run behavior rather than skipping on a guess. Reports `no capability
+providers registered` when nothing is available.
 
 ## Measured throughput on Apple M5
 
@@ -618,6 +643,14 @@ the fixed tree.
 - **AV1 encode**: `VTCopyVideoEncoderList` has no AV1 entry on M5, so AV1 is
   decode-only.
 - **ProRes RAW encode**: decode-only.
+- **HEVC Main 12 decode**: the hardware answers, but with an 8-bit picture in a
+  buffer it calls `tv20` whose chroma plane is 32x32 for a 64x64 frame -- a
+  downgraded picture with a geometry no HAL format names. The decode layer
+  refuses it loudly (with the plane geometry printed) instead of relabelling it,
+  so the class appears in no capability answer.
+- **HEVC Main 4:4:4 8-bit decode**: comes back as `444v`, Apple's bi-planar 8-bit
+  4:4:4 (luma `w` bytes a row, chroma `2w`), which is NV24 -- a format HAL's
+  `PixelFormat` enum does not have yet. Same refusal, same absence from the table.
 - ffmpeg's `-hwaccel videotoolbox` rates are deliberately left out. It falls
   back to the software decoder without saying so on profiles it does not hand
   over, and the results show it: Monochrome 8 "hardware" at 2823 fps is its own

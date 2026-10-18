@@ -21,6 +21,17 @@
 include("${CMAKE_CURRENT_LIST_DIR}/halcodec_test_prelude.cmake")
 halcodec_require(HAL_DEC FFMPEG FFPROBE INPUT_NV12 WORKDIR)
 
+# Capability gate: the assertions below compare the decoder's P010 with ffmpeg's byte for byte, so
+# the case only means something where this machine hands back 10-bit 4:2:0. A path
+# that lands on 8-bit NV12 instead would fail on bit depth alone -- the wrong way
+# to learn that it cannot do this.
+halcodec_decode_caps(CODECINFO vtbox hevc HEVC)
+halcodec_caps_supports(HEVC 10 420 P010 WANT_P010)
+if(WANT_P010 STREQUAL "NO")
+    message("SKIP vtdec.hevc_main10: vtbox does not claim 10-bit 4:2:0 -> P010. The probe reports: ${HEVC_JSON}")
+    return()
+endif()
+
 set(FRAMES 3)
 set(H265_320 "${WORKDIR}/m10dec_320x240.h265")
 set(H265_640 "${WORKDIR}/m10dec_640x360.h265")

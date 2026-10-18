@@ -184,6 +184,13 @@ private:
     void submitAu(const uint8_t* au, size_t size, int64_t displayKey);
 };
 
+// Brackets the frame callback as a capability probe rather than a real decode.
+// While it is on, a refused frame stays silent: for the probe that refusal *is*
+// the answer it is measuring, and printing it as a fault would tell an
+// application's user that their own decode failed. Only the probe calls this, and
+// only around its own decode; a real decode keeps reporting every refusal.
+void SetDecodeProbeLoggingQuiet(bool quiet);
+
 } // namespace vtbox
 } // namespace halcodec
 

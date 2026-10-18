@@ -2,6 +2,7 @@
 #include <cstring>
 #include <fstream>
 #include <iostream>
+#include <map>
 #include <memory>
 #include <set>
 #include <string>
@@ -20,6 +21,7 @@
 #include "codec_config.h"
 #include "codec_names.h"
 #include "annexb.h"
+#include "capability.h"
 #include "decoder.h"
 #include "frame.h"
 #include "plugin_loader.h"
@@ -274,6 +276,72 @@ bool PrepareDecodeStream(const std::string& path, halcodec::CodecParams* params,
     return true;
 }
 
+// A -f rgb/bgr/y request asks the decoder to *convert*, which is not the same ask
+// as dumping the frame's own bytes. The backend's structured decode capability is
+// the list of layouts it can ever hand out, so a request that does not appear in
+// it is refused here -- before any frame is decoded -- rather than after the first
+// picture lands in the layout the stream carries.
+//
+// Returns "" when the request can proceed, the reason to print when it cannot. An
+// Unknown answer (no probe for this codec, capability provider missing) also
+// returns "": this gate only sharpens an error the per-frame check in writeFrame
+// already raises, and a backend that has not adopted the structured query keeps
+// that older, run-and-see behavior instead of being blocked by a guess.
+std::string UnreachableOutputFormat(const std::string& backend,
+                                   const std::string& codec,
+                                   const std::string& cliFormat,
+                                   halcodec::PixelFormat want) {
+    if (want == halcodec::PixelFormat::Unknown) {
+        return {};  // not a conversion request; the frame keeps its own layout
+    }
+    if (halcodec::IsInterleavedFormat(cliFormat)) {
+        // No HAL format names interleaved 24-bit pixels, so the table below has
+        // nothing truthful to say about the request; the check that judges the
+        // frame that arrives spells out what the writer would do with it.
+        return {};
+    }
+    // One probe sweep per (backend, codec): the answer is a property of the
+    // machine, and a multi-stream run asks the same question for every input it
+    // was handed. cached = (did the backend answer, what it can deliver).
+    static std::map<std::string, std::pair<bool, std::set<halcodec::PixelFormat>>> cache;
+    const std::string key = backend + '\0' + codec;
+    auto it = cache.find(key);
+    if (it == cache.end()) {
+        auto provider = halcodec::CapabilityProvider::Create(backend);
+        std::vector<halcodec::CapabilityProvider::DecodeCapsEntry> entries;
+        const bool answered =
+            provider && provider->queryDecoderCaps(codec, entries) ==
+                            halcodec::CapabilityProvider::CapsStatus::Available;
+        std::set<halcodec::PixelFormat> seen;
+        for (const auto& e : entries) {
+            for (const auto& f : e.formats()) {
+                seen.insert(f);
+            }
+        }
+        it = cache.emplace(key, std::make_pair(answered, seen)).first;
+    }
+    if (!it->second.first) {
+        return {};
+    }
+    const std::set<halcodec::PixelFormat>& reachable = it->second.second;
+    if (reachable.count(want) != 0) {
+        return {};  // some input class of this codec really does deliver it
+    }
+    std::string layouts;
+    for (const auto& f : reachable) {
+        layouts += (layouts.empty() ? "" : ", ") + std::string(halcodec::Name(f));
+    }
+    std::string why = "--format " + cliFormat + " asks for " +
+                      std::string(halcodec::Name(want)) + " pixels, and " + backend +
+                      " never decodes " + codec + " into that layout. ";
+    if (layouts.empty()) {
+        return why + "It claims no decode output for this codec at all.";
+    }
+    return why + "It delivers " + layouts + "; dump one of those (no converting "
+                 "-f, or -f matching it) and convert afterwards if the pixels "
+                 "really have to be " + std::string(halcodec::Name(want)) + ".";
+}
+
 } // namespace
 
 // The multi-stream decode driver: N inputs through one halcodec::Session,
@@ -345,6 +413,12 @@ static int RunMultiStream(CommandLineParser& cli) {
         if (IsBmpFormat(cli.getFormat())) {
             halcodec::FormatToPixelFormat(cli.getFormat(),
                                           &params[s].outputFormat);
+        }
+        const std::string why = UnreachableOutputFormat(
+            backend, params[s].codec, cli.getFormat(), params[s].outputFormat);
+        if (!why.empty()) {
+            std::cerr << why << std::endl;
+            return -1;
         }
     }
 
@@ -512,6 +586,15 @@ int main(int argc, char* argv[]) {
         params.codec = halcodec::CodecFromExtension(ExtOf(cli.getInputFile()));
     }
     if (params.codec.empty()) params.codec = "h264";
+    {
+        const std::string why = UnreachableOutputFormat(backend, params.codec,
+                                                       cli.getFormat(),
+                                                       params.outputFormat);
+        if (!why.empty()) {
+            std::cerr << why << std::endl;
+            return -1;
+        }
+    }
     if (!dec->Initialize(params)) {
         std::cerr << "Fail to initialize decoder backend: " << backend << std::endl;
         return -1;
@@ -672,8 +755,12 @@ int main(int argc, char* argv[]) {
             // ignores it and answers in the layout the stream carries, so an
             // NV12 frame handed over here is read 1.5x past its end (measured as
             // a heap-buffer-overflow at bmp_write.h:104 on a 320x240 frame).
-            const bool interleaved =
-                cli.getFormat() == "rgbi" || cli.getFormat() == "bgri";
+            //
+            // UnreachableOutputFormat above already refuses the requests a backend
+            // can never satisfy; this check is the one that judges the frame that
+            // actually arrived, which is what a backend answering Unknown to the
+            // structured query is still held to.
+            const bool interleaved = halcodec::IsInterleavedFormat(cli.getFormat());
             const halcodec::PixelFormat want =
                 cli.getFormat() == "y"
                     ? halcodec::PixelFormat::GRAY

@@ -18,6 +18,17 @@
 include("${CMAKE_CURRENT_LIST_DIR}/halcodec_test_prelude.cmake")
 halcodec_require(HAL_DEC FFMPEG INPUT_NV12 WORKDIR)
 
+# Capability gate: ProRes 422 and 4444 land on different 16-bit layouts ('sv22'
+# and 'sv44'), and the plane heights the case measures only exist if this machine
+# really decodes those classes into those formats.
+halcodec_decode_caps(CODECINFO vtbox prores PRORES)
+halcodec_caps_supports(PRORES 10 422 P210 WANT_P210)
+halcodec_caps_supports(PRORES 12 444 YUV444P16LE WANT_YUV444P16LE)
+if(WANT_P210 STREQUAL "NO" OR WANT_YUV444P16LE STREQUAL "NO")
+    message("SKIP vtdec.prores: vtbox does not claim 10-bit 4:2:2 -> P210, 12-bit 4:4:4 -> YUV444P16LE. The probe reports: ${PRORES_JSON}")
+    return()
+endif()
+
 set(FRAMES 3)
 set(FRAME_BYTES 307200)   # 320x240 P210: 4:2:2, 16-bit storage (4 bytes/pixel)
 

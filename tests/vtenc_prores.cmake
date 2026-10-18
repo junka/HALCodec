@@ -16,6 +16,15 @@
 include("${CMAKE_CURRENT_LIST_DIR}/halcodec_test_prelude.cmake")
 halcodec_require(HAL_ENC HAL_DEC FFMPEG INPUT_NV12 WORKDIR)
 
+# Capability gate: ProRes 422 encoded from an NV12 source: the round trip the case
+# scores needs both this encoder class and the decode of what it writes.
+halcodec_encode_caps(CODECINFO vtbox prores PRORES_ENC)
+halcodec_caps_supports(PRORES_ENC 8 420 NV12 WANT_NV12)
+if(WANT_NV12 STREQUAL "NO")
+    message("SKIP vtenc.prores: vtbox does not claim 8-bit 4:2:0 <- NV12. The probe reports: ${PRORES_ENC_JSON}")
+    return()
+endif()
+
 set(FRAMES 3)
 set(FRAME_BYTES 307200)   # 320x240 P210: 4:2:2, 16-bit storage (4 bytes/pixel)
 math(EXPR WANT_BYTES "${FRAMES} * ${FRAME_BYTES}")

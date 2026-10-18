@@ -91,9 +91,38 @@ public:
         int bitDepth = 0;      // bits per component: 8/10/12; 0 = n/a (jpeg)
         int chroma = 0;        // subsampling: 420/422/444; 0 = mono/n-a
         std::vector<PixelFormat> outputFormats;
+        // What a gate matches on, spelled the same for both directions: the
+        // formats this backend really hands over (decode) or takes (encode).
+        const std::vector<PixelFormat>& formats() const { return outputFormats; }
     };
     virtual CapsStatus queryDecoderCaps(const std::string& codec,
                                         std::vector<DecodeCapsEntry>& out) const {
+        (void)codec;
+        (void)out;
+        return CapsStatus::Unknown;
+    }
+
+    // Structured encoder capability, the mirror image of the decode query: here
+    // the *input* side is the load-bearing part. A raw frame of a given layout is
+    // what an encoder is handed, and hardware answers per layout -- an encoder
+    // that takes 8-bit 4:2:0 but has no 10-bit 4:2:2 path is a different machine
+    // than one that takes both, and only the second lets a byte-exact encode test
+    // ask for P210. Each entry states one input class (label plus the numeric
+    // depth and chroma a gate matches on) and the raw formats this backend will
+    // really encode for it.
+    //
+    // Same contract as the decode query: Unknown when the backend cannot answer
+    // truthfully, and Available with no entries as a truthful "does not encode
+    // this at all".
+    struct EncodeCapsEntry {
+        std::string profile;   // human-readable input class, e.g. "Main 4:2:2 10"
+        int bitDepth = 0;
+        int chroma = 0;
+        std::vector<PixelFormat> inputFormats;
+        const std::vector<PixelFormat>& formats() const { return inputFormats; }
+    };
+    virtual CapsStatus queryEncoderCaps(const std::string& codec,
+                                        std::vector<EncodeCapsEntry>& out) const {
         (void)codec;
         (void)out;
         return CapsStatus::Unknown;

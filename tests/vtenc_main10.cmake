@@ -9,6 +9,15 @@
 include("${CMAKE_CURRENT_LIST_DIR}/halcodec_test_prelude.cmake")
 halcodec_require(HAL_ENC FFMPEG FFPROBE INPUT_NV12 WORKDIR)
 
+# Capability gate: the encoder is fed a P010 raw file; whether a hardware encoder on
+# this machine takes that layout is a measured claim, not a constant.
+halcodec_encode_caps(CODECINFO vtbox hevc HEVC_ENC)
+halcodec_caps_supports(HEVC_ENC 10 420 P010 WANT_P010)
+if(WANT_P010 STREQUAL "NO")
+    message("SKIP vtenc.hevc_main10: vtbox does not claim 10-bit 4:2:0 <- P010. The probe reports: ${HEVC_ENC_JSON}")
+    return()
+endif()
+
 set(P010_RAW "${WORKDIR}/synth_320x240_p010.yuv")
 set(OUT_H265 "${WORKDIR}/synth_main10.h265")
 set(FRAME_BYTES 230400)   # 320x240 P010: 1.5 samples per pixel, 16-bit storage

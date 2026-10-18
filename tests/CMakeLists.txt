@@ -249,6 +249,7 @@ if(FFMPEG_EXE AND EXISTS "${_cars_h264}")
                     -DFFMPEG=${FFMPEG_EXE}
                     -DINPUT_NV12=${_cars_nv12}
                     -DWORKDIR=${CMAKE_CURRENT_BINARY_DIR}
+                    -DCODECINFO=${HAL_CODECINFO_EXE}
                     -P ${CMAKE_CURRENT_SOURCE_DIR}/vtdec_jpeg.cmake)
 
         # The decoder's own output names: one file per picture where a picture is
@@ -277,6 +278,7 @@ if(FFMPEG_EXE AND EXISTS "${_cars_h264}")
                     -DFFPROBE=${FFPROBE_EXE}
                     -DINPUT_NV12=${_cars_nv12}
                     -DWORKDIR=${CMAKE_CURRENT_BINARY_DIR}
+                    -DCODECINFO=${HAL_CODECINFO_EXE}
                     -P ${CMAKE_CURRENT_SOURCE_DIR}/vtdec_prores.cmake)
 
         # 10-bit output is a different animal in the buffer: VideoToolbox hands
@@ -290,7 +292,8 @@ if(FFMPEG_EXE AND EXISTS "${_cars_h264}")
                         -DFFPROBE=${FFPROBE_EXE}
                         -DINPUT_NV12=${_cars_nv12}
                         -DWORKDIR=${CMAKE_CURRENT_BINARY_DIR}
-                        -P ${CMAKE_CURRENT_SOURCE_DIR}/vtdec_main10.cmake)
+                        -DCODECINFO=${HAL_CODECINFO_EXE}
+                    -P ${CMAKE_CURRENT_SOURCE_DIR}/vtdec_main10.cmake)
 
             # The same unpack on the other 10-bit codec that this backend can
             # decode, so the shift and the pitch law are not HEVC-specific.
@@ -300,7 +303,8 @@ if(FFMPEG_EXE AND EXISTS "${_cars_h264}")
                         -DFFPROBE=${FFPROBE_EXE}
                         -DINPUT_NV12=${_cars_nv12}
                         -DWORKDIR=${CMAKE_CURRENT_BINARY_DIR}
-                        -P ${CMAKE_CURRENT_SOURCE_DIR}/vtdec_av1_10bit.cmake)
+                        -DCODECINFO=${HAL_CODECINFO_EXE}
+                    -P ${CMAKE_CURRENT_SOURCE_DIR}/vtdec_av1_10bit.cmake)
 
             # 10-bit 4:2:2 ('p422'/'pf22'): the packed rows of 'pf20' with a
             # chroma row against every picture row, so the chroma height -- not
@@ -323,7 +327,8 @@ if(FFMPEG_EXE AND EXISTS "${_cars_h264}")
                         -DFFPROBE=${FFPROBE_EXE}
                         -DINPUT_NV12=${_cars_nv12}
                         -DWORKDIR=${CMAKE_CURRENT_BINARY_DIR}
-                        -P ${CMAKE_CURRENT_SOURCE_DIR}/vtdec_hevc_mono.cmake)
+                        -DCODECINFO=${HAL_CODECINFO_EXE}
+                    -P ${CMAKE_CURRENT_SOURCE_DIR}/vtdec_hevc_mono.cmake)
         endif()
     endif()
 endif()
@@ -357,6 +362,7 @@ if(FFMPEG_EXE AND FFPROBE_EXE AND HAL_ENC_EXE)
                     -DFFPROBE=${FFPROBE_EXE}
                     -DINPUT_NV12=${_cars_nv12_enc}
                     -DWORKDIR=${CMAKE_CURRENT_BINARY_DIR}
+                    -DCODECINFO=${HAL_CODECINFO_EXE}
                     -P ${CMAKE_CURRENT_SOURCE_DIR}/vtenc_main10.cmake)
 
         # Image coder: three staged pictures in, three standalone codestreams
@@ -367,6 +373,7 @@ if(FFMPEG_EXE AND FFPROBE_EXE AND HAL_ENC_EXE)
                     -DFFPROBE=${FFPROBE_EXE}
                     -DINPUT_NV12=${_cars_nv12_enc}
                     -DWORKDIR=${CMAKE_CURRENT_BINARY_DIR}
+                    -DCODECINFO=${HAL_CODECINFO_EXE}
                     -P ${CMAKE_CURRENT_SOURCE_DIR}/vtenc_jpeg.cmake)
 
         # The same image coder over a directory whose inputs are raw frames named
@@ -379,6 +386,7 @@ if(FFMPEG_EXE AND FFPROBE_EXE AND HAL_ENC_EXE)
                     -DFFPROBE=${FFPROBE_EXE}
                     -DINPUT_NV12=${_cars_nv12_enc}
                     -DWORKDIR=${CMAKE_CURRENT_BINARY_DIR}
+                    -DCODECINFO=${HAL_CODECINFO_EXE}
                     -P ${CMAKE_CURRENT_SOURCE_DIR}/vtenc_jpeg_naming.cmake)
 
         # The HEVC profiles this hardware answers for that the encoder had no
@@ -390,6 +398,7 @@ if(FFMPEG_EXE AND FFPROBE_EXE AND HAL_ENC_EXE)
                     -DFFPROBE=${FFPROBE_EXE}
                     -DINPUT_NV12=${_cars_nv12_enc}
                     -DWORKDIR=${CMAKE_CURRENT_BINARY_DIR}
+                    -DCODECINFO=${HAL_CODECINFO_EXE}
                     -P ${CMAKE_CURRENT_SOURCE_DIR}/vtenc_hevc_profiles.cmake)
     endif()
 endif()
@@ -410,6 +419,7 @@ if(FFMPEG_EXE AND HAL_ENC_EXE AND HAL_DEC_EXE)
                     -DPRORESDESC_TEST=${CMAKE_CURRENT_BINARY_DIR}/proresdesc_test
                     -DINPUT_NV12=${_cars_nv12_pr}
                     -DWORKDIR=${CMAKE_CURRENT_BINARY_DIR}
+                    -DCODECINFO=${HAL_CODECINFO_EXE}
                     -P ${CMAKE_CURRENT_SOURCE_DIR}/vtenc_prores.cmake)
     endif()
 endif()

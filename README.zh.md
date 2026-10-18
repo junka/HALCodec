@@ -213,6 +213,44 @@ HEVC Main 10 72。
 关键观察：把每帧解码结果落盘只付出"写"的代价（边际 13–19 GB/s，视频 codec 掉
 13–23%，ProRes 掉约三分之一）；ProRes 各档只差输出大小（该 session 拒绝码率控制）。
 
+### 此机器上没有硬件通路
+
+- **AV1 编码**：M5 的 `VTCopyVideoEncoderList` 没有 AV1 条目，AV1 只能解码。
+- **ProRes RAW 编码**：只有解码。
+- **HEVC Main 12 解码**：硬件确实出帧，但回的是被降级的 8-bit 画面，buffer 自称
+  `tv20` 而 64x64 帧的色度平面是 32x32 —— HAL 没有任何像素格式能诚实描述它。解码层
+  响亮拒绝（并把平面几何一并打印）而不是换个标签交出去，因此这一类不进能力表。
+- **HEVC Main 4:4:4 8-bit 解码**：回来的是 `444v`，即 Apple 的双平面 8-bit 4:4:4
+  （亮度每行 `w` 字节、色度 `2w`），也就是 NV24 —— HAL 的 `PixelFormat` 还没有这个
+  名字。同样拒绝，同样不进表。
+
+## codecinfo — 结构化能力查询
+
+```sh
+./app/codecinfo -b vtbox --decode-caps hevc
+./app/codecinfo -b vtbox --encode-caps hevc --json
+```
+
+除了人读的 dump，这两条给出集成测试用来设门槛的结构化答案。VideoToolbox 没有可查的
+能力 API，所以两侧的答案都是**在这台机器上实测**出来的：解码把每种输入类一条的内置
+探测码流走一遍应用用的同一条 `VTDecoder` 通路，只登记真正回来的像素格式 —— 差别很要
+紧，硬件会接受码流再静默降规格（没有 10-bit 4:2:2 输出通路的机器，会把 HEVC Main
+4:2:2 10 解成 8-bit NV16）。编码则用一条设了
+`kVTVideoEncoderSpecification_RequireHardwareAcceleratedVideoEncoder` 的 session 编一
+帧，因此一条记录说的是"硬件编码器收下了这份 raw"，而不是"存在某个编码器"。
+
+两侧都由表驱动（`VideoToolbox/layers/vt_caps.cc` 的 `kProbeClasses`、
+`kEncodeClasses`），表里的码型与像素格式一律写成整数字面量（`vt_fourcc.h`）而不是
+SDK 常量：同一个二进制能在老 SDK 上编译，只是答"是"的行少几行，代码里没有任何
+macOS 版本判断。M5 上解码表答 H.264（Baseline、High）、HEVC（Main、Main 10、
+Main 4:2:2、Main 4:2:2 10、两个单色 profile）、AV1（Main、Main 10）、JPEG、
+ProRes 422/4444，以及在有样本时把 ProRes RAW 答成 Bayer 网格；编码表答 H.264 与
+HEVC（8/10 bit，含 4:2:2 与单色）、JPEG、ProRes 4444/422。
+
+`--json` 是单行、字段顺序固定，`tests/halcodec_test_prelude.cmake` 里的门就按它做
+正则匹配。后端无法诚实回答时给 `unknown`，被门的用例于是保持原本"照跑"的行为，而不是
+靠猜测跳过。
+
 
 ## hal_player — 跨平台硬解播放器 (HAL Decoder + SDL2 + OpenGL)
 

@@ -13,6 +13,15 @@
 include("${CMAKE_CURRENT_LIST_DIR}/halcodec_test_prelude.cmake")
 halcodec_require(HAL_DEC FFMPEG INPUT_NV12 WORKDIR)
 
+# Capability gate: the byte counts below are a JPEG decoded into NV12; the probe
+# decodes an embedded JFIF stream and says what this machine really returns.
+halcodec_decode_caps(CODECINFO vtbox jpeg JPEG)
+halcodec_caps_supports(JPEG 8 420 NV12 WANT_NV12)
+if(WANT_NV12 STREQUAL "NO")
+    message("SKIP vtdec.jpeg: vtbox does not claim 8-bit 4:2:0 -> NV12. The probe reports: ${JPEG_JSON}")
+    return()
+endif()
+
 set(FRAME_BYTES 115200)   # 320x240 NV12
 set(JPG      "${WORKDIR}/jdec_420.jpg")
 set(JPG444   "${WORKDIR}/jdec_444.jpg")

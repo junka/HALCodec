@@ -70,24 +70,6 @@ macro(dir_count out)
 endmacro()
 
 # ---------------------------------------------------------------------------
-# Preflight: every case below needs the vtbox backend. On a host without the
-# CUDA runtime (or libnvidia-encode) the backend .so fails to load and hal_dec
-# exits non-zero before decoding anything -- the comment at the top of this
-# file promises a skip in that case, so probe once up front rather than
-# reporting each case as a hard failure. Matches decode_determinism's skip.
-# ---------------------------------------------------------------------------
-execute_process(COMMAND ${HAL_DEC} -b vtbox -i ${INPUT_NV12} -f nv12
-                -o "${W}/_probe.nv12"
-                RESULT_VARIABLE probe_rc OUTPUT_VARIABLE probe_out
-                ERROR_VARIABLE probe_err)
-file(REMOVE "${W}/_probe.nv12")
-if(probe_rc EQUAL 137 OR probe_rc GREATER 0)
-    message("SKIP vtdec.output_naming: vtbox backend not available "
-            "(hal_dec rc=${probe_rc})\n${probe_err}")
-    return()
-endif()
-
-# ---------------------------------------------------------------------------
 # Material: a 3-frame 8-bit monochrome HEVC stream (for the grey BMP path) and a
 # 3-frame 4:2:0 one (for the refusal), both from the bundled NV12. Streams come
 # from libx265 rather than from hal_enc so the encoder cannot cover for the
@@ -131,6 +113,23 @@ execute_process(COMMAND ${FFMPEG} -hide_banner -loglevel error
                 RESULT_VARIABLE rc4 OUTPUT_QUIET ERROR_QUIET)
 if(NOT rc4 EQUAL 0)
     message("SKIP vtdec.output_naming: ffmpeg cannot encode 4:2:0 HEVC (rc=${rc4})")
+    return()
+endif()
+
+# Preflight: every case below needs the vtbox backend, so probe once rather than
+# reporting each case as a hard failure (the skip decode_determinism makes too).
+# The probe decodes one of the streams just built, because that is what the cases
+# do: feeding it the raw NV12 source asks the decoder to open a bitstream out of
+# pixel data, which fails with "no extradata provided" on any machine and would
+# turn this whole case into a silent skip.
+execute_process(COMMAND ${HAL_DEC} -b vtbox -i "${W}/y420.h265" --codec hevc -f nv12
+                -o "${W}/_probe.nv12"
+                RESULT_VARIABLE probe_rc OUTPUT_VARIABLE probe_out
+                ERROR_VARIABLE probe_err)
+file(REMOVE "${W}/_probe.nv12")
+if(probe_rc EQUAL 137 OR probe_rc GREATER 0)
+    message("SKIP vtdec.output_naming: vtbox backend not available "
+            "(hal_dec rc=${probe_rc})\n${probe_err}")
     return()
 endif()
 

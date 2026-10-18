@@ -46,6 +46,17 @@
 include("${CMAKE_CURRENT_LIST_DIR}/halcodec_test_prelude.cmake")
 halcodec_require(HAL_DEC FFMPEG FFPROBE INPUT_NV12 WORKDIR)
 
+# Capability gate: the case pins two single-component buffers, so both classes have
+# to be claims; a machine that answers one and not the other would half-pass for
+# reasons that have nothing to do with the plane-less geometry under test.
+halcodec_decode_caps(CODECINFO vtbox hevc HEVC)
+halcodec_caps_supports(HEVC 8 0 GRAY WANT_GRAY)
+halcodec_caps_supports(HEVC 10 0 GRAY10LE WANT_GRAY10LE)
+if(WANT_GRAY STREQUAL "NO" OR WANT_GRAY10LE STREQUAL "NO")
+    message("SKIP vtdec.hevc_mono: vtbox does not claim 8-bit mono -> GRAY, 10-bit mono -> GRAY10LE. The probe reports: ${HEVC_JSON}")
+    return()
+endif()
+
 set(FRAMES 3)
 
 # HAL format | ffmpeg raw format for the source | bytes a decoded frame carries |
